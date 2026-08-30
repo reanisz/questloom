@@ -1,0 +1,12 @@
+[package]
+name = "questloom-plugin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "questloom のプラグイン API(Plugin trait・PluginContext・イベント型)"
+
+[dependencies]
+questloom-core.workspace = true

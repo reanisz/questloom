@@ -1,0 +1,26 @@
+:root {
+  font-family: "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+  line-height: 1.6;
+  color: #0f0f0f;
+  background-color: #f6f6f6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #f6f6f6;
+    background-color: #2f2f2f;
+  }
+}
+
+body {
+  margin: 0;
+}
+
+.container {
+  padding: 2rem;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 2rem;
+}

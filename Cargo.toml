@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+    "crates/questloom-core",
+    "crates/questloom-store",
+    "crates/questloom-mcp",
+    "crates/questloom-ai",
+    "crates/questloom-plugin-api",
+    "crates/plugins/questloom-plugin-github",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["reanisz"]
+repository = "https://github.com/reanisz/questloom"
+
+[workspace.dependencies]
+# workspace 内 crate
+questloom-core = { path = "crates/questloom-core" }
+questloom-store = { path = "crates/questloom-store" }
+questloom-mcp = { path = "crates/questloom-mcp" }
+questloom-ai = { path = "crates/questloom-ai" }
+questloom-plugin-api = { path = "crates/questloom-plugin-api" }
+questloom-plugin-github = { path = "crates/plugins/questloom-plugin-github" }
+
+# 共通の外部依存(バージョンはここで一元管理する)
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[profile.release]
+strip = true

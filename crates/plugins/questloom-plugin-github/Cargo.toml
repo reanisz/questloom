@@ -1,0 +1,13 @@
+[package]
+name = "questloom-plugin-github"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "questloom の GitHub 統合プラグイン(PR ポーリング)"
+
+[dependencies]
+questloom-core.workspace = true
+questloom-plugin-api.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "questloom-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "questloom の内蔵 MCP サーバー(localhost の Streamable HTTP)"
+
+[dependencies]
+questloom-core.workspace = true

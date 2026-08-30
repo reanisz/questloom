@@ -1,0 +1,12 @@
+[package]
+name = "questloom-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "questloom の AI CLI 呼び出し層(claude / codex / antigravity)"
+
+[dependencies]
+questloom-core.workspace = true
