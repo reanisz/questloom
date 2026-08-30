@@ -30,8 +30,10 @@ questloom-plugin-github = { path = "crates/plugins/questloom-plugin-github" }
 # 共通の外部依存(バージョンはここで一元管理する)
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
 tracing = "0.1"

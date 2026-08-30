@@ -9,3 +9,9 @@ repository.workspace = true
 description = "questloom のドメインモデルとサービス層(UI・Tauri・HTTP 非依存)"
 
 [dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
