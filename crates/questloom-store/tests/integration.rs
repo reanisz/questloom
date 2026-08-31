@@ -261,6 +261,7 @@ fn settings_are_persisted_and_reloaded() {
                 &CoreSettings {
                     week_start: WeekStart::Sunday,
                     backup_generations: 7,
+                    ..CoreSettings::default()
                 },
             )
             .unwrap();

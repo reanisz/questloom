@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-import { listenTasksChanged } from "./api";
+import { listenOpenTask, listenTasksChanged } from "./api";
 import { BoardView } from "./components/BoardView";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { TitleBar } from "./components/TitleBar";
@@ -15,6 +15,7 @@ function App() {
   const error = useBoardStore((state) => state.error);
   const refresh = useBoardStore((state) => state.refresh);
   const setError = useBoardStore((state) => state.setError);
+  const openTask = useBoardStore((state) => state.openTask);
   const [expanded, setExpanded] = useExpandedView();
 
   useEffect(() => {
@@ -25,6 +26,14 @@ function App() {
       void unlisten.then((off) => off()).catch(() => undefined);
     };
   }, [refresh]);
+
+  useEffect(() => {
+    // オーバーレイのクリックから「このタスクを開く」と言われたら詳細を開く。
+    const unlisten = listenOpenTask((taskId) => openTask(taskId));
+    return () => {
+      void unlisten.then((off) => off()).catch(() => undefined);
+    };
+  }, [openTask]);
 
   return (
     <div className="app">

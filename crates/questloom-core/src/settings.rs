@@ -28,6 +28,12 @@ impl WeekStart {
     }
 }
 
+/// グローバルショートカットの既定値。
+///
+/// 文字列の解釈はシェル(デスクトップアプリ)側の責務。コアは値を保持するだけで、
+/// ここでの検証・パースは行わない(コアを UI・Tauri から独立させるため)。
+pub const DEFAULT_GLOBAL_SHORTCUT: &str = "Ctrl+Space";
+
 /// コア設定。未知フィールドは無視し、欠けたフィールドは既定値で補う(前方互換)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -36,6 +42,12 @@ pub struct CoreSettings {
     pub week_start: WeekStart,
     /// バックアップの保持世代数。
     pub backup_generations: u32,
+    /// オーバーレイ通知を表示するか。
+    pub overlay_enabled: bool,
+    /// メインウィンドウをトグルするグローバルショートカット。
+    pub global_shortcut: String,
+    /// OS へのログイン時に自動起動するか。
+    pub autostart: bool,
 }
 
 impl Default for CoreSettings {
@@ -43,6 +55,9 @@ impl Default for CoreSettings {
         Self {
             week_start: WeekStart::Monday,
             backup_generations: 14,
+            overlay_enabled: true,
+            global_shortcut: DEFAULT_GLOBAL_SHORTCUT.to_owned(),
+            autostart: false,
         }
     }
 }
@@ -56,6 +71,9 @@ mod tests {
         let settings = CoreSettings::default();
         assert_eq!(settings.week_start, WeekStart::Monday);
         assert_eq!(settings.backup_generations, 14);
+        assert!(settings.overlay_enabled);
+        assert_eq!(settings.global_shortcut, "Ctrl+Space");
+        assert!(!settings.autostart);
     }
 
     #[test]
@@ -64,6 +82,17 @@ mod tests {
             serde_json::from_str(r#"{"weekStart":"sunday","futureField":123}"#).unwrap();
         assert_eq!(parsed.week_start, WeekStart::Sunday);
         assert_eq!(parsed.backup_generations, 14);
+        // Phase 1 以前に保存された JSON でも、追加フィールドは既定値で補われる。
+        assert!(parsed.overlay_enabled);
+        assert_eq!(parsed.global_shortcut, DEFAULT_GLOBAL_SHORTCUT);
+    }
+
+    #[test]
+    fn json_is_camel_case() {
+        let json = serde_json::to_value(CoreSettings::default()).unwrap();
+        assert_eq!(json["overlayEnabled"], true);
+        assert_eq!(json["globalShortcut"], "Ctrl+Space");
+        assert_eq!(json["autostart"], false);
     }
 
     #[test]

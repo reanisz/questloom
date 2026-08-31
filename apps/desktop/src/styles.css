@@ -814,3 +814,154 @@ textarea {
 ::-webkit-scrollbar-thumb:hover {
   background-color: var(--text-faint);
 }
+
+/* ---- オーバーレイ通知ウィンドウ ---- */
+
+/* 透過ウィンドウなので body の地色を消す(メインウィンドウ側は従来どおり)。 */
+body.overlay-body {
+  background: transparent;
+}
+
+.overlay {
+  /* 影のはみ出し分を含めた余白。ウィンドウ高さはこの要素の高さに合わせられる。 */
+  padding: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+.overlay-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  background: rgba(24, 27, 34, 0.82);
+  backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px;
+}
+
+.overlay-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+.overlay-heading {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.overlay-count {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.overlay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.overlay-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.overlay-row:hover,
+.overlay-row:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-strong);
+  outline: none;
+}
+
+.overlay-row.is-instant {
+  background: var(--instant-soft);
+}
+
+.overlay-bolt {
+  flex: 0 0 auto;
+  color: var(--instant);
+  font-size: 12px;
+}
+
+.overlay-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+
+.overlay-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+}
+
+.overlay-btn {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.overlay-btn:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.overlay-btn-done:hover {
+  background: rgba(110, 196, 138, 0.16);
+  border-color: var(--success);
+}
+
+.overlay-more {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 11px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.overlay-more:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
+}

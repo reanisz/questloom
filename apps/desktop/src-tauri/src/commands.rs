@@ -6,9 +6,10 @@ use questloom_core::bucket::BoardColumn;
 use questloom_core::model::{Origin, ResourceId, Task, TaskId, TaskResource, TaskUpdateEntry};
 use questloom_core::service::{Board, MoveRequest, NewResource, NewTask, TaskDetail, TaskPatch};
 use questloom_core::settings::CoreSettings;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::state::AppState;
+use crate::window;
 
 /// command の戻り値。エラーはフロントで扱いやすいよう文字列にする。
 pub type CommandResult<T> = Result<T, String>;
@@ -127,7 +128,19 @@ pub fn get_settings(state: State<'_, AppState>) -> CommandResult<CoreSettings> {
 }
 
 /// コア設定を保存し、即座に反映する。
+///
+/// ショートカット・自動起動・オーバーレイ表示は、保存時に発行される
+/// `SettingsChanged` イベントを購読している watcher が反映する。
 #[tauri::command]
 pub fn set_settings(state: State<'_, AppState>, settings: CoreSettings) -> CommandResult<()> {
     state.save_settings(settings).map_err(fail)
+}
+
+/// メインウィンドウを表示・フォーカスし、指定があればそのタスクの詳細を開かせる。
+///
+/// オーバーレイから通常タスクをクリックしたときに使う。
+#[tauri::command]
+pub fn show_main_window(app: AppHandle, task_id: Option<TaskId>) -> CommandResult<()> {
+    window::show_main(&app, task_id);
+    Ok(())
 }

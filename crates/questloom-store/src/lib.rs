@@ -209,6 +209,7 @@ mod tests {
         let settings = CoreSettings {
             week_start: WeekStart::Sunday,
             backup_generations: 7,
+            ..CoreSettings::default()
         };
         store.set_settings(CORE_NAMESPACE, &settings).unwrap();
         assert_eq!(

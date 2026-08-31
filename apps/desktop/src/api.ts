@@ -28,6 +28,9 @@ import type {
 /** タスク関連の変更通知イベント名。ペイロードは見ずに再フェッチすればよい。 */
 export const TASKS_CHANGED = "questloom://tasks-changed";
 
+/** メインウィンドウでタスク詳細を開かせるイベント名(オーバーレイからの遷移で使う)。 */
+export const OPEN_TASK = "questloom://open-task";
+
 /** reject 値(多くは日本語文字列)を Error へ正規化する。 */
 export function toMessage(error: unknown): string {
   if (typeof error === "string") return error;
@@ -89,7 +92,19 @@ export const getSettings = () => call<CoreSettings>("get_settings");
 /** コア設定を保存する。 */
 export const setSettings = (settings: CoreSettings) => call<void>("set_settings", { settings });
 
+/**
+ * メインウィンドウを前面に出す。`taskId` を渡すとそのタスクの詳細も開く
+ * (メインウィンドウへ `questloom://open-task` が送られる)。
+ */
+export const showMainWindow = (taskId?: TaskId) =>
+  call<void>("show_main_window", { taskId: taskId ?? null });
+
 /** タスク変更イベントを購読する。ペイロードは使わず再フェッチのトリガとしてのみ扱う。 */
 export function listenTasksChanged(handler: () => void): Promise<UnlistenFn> {
   return listen(TASKS_CHANGED, () => handler());
+}
+
+/** オーバーレイからのタスク詳細オープン要求を購読する(メインウィンドウ専用)。 */
+export function listenOpenTask(handler: (taskId: TaskId) => void): Promise<UnlistenFn> {
+  return listen<{ taskId: TaskId }>(OPEN_TASK, (event) => handler(event.payload.taskId));
 }

@@ -154,6 +154,12 @@ export interface NewResource {
 export interface CoreSettings {
   weekStart: WeekStart;
   backupGenerations: number;
+  /** New タスクがあるときにオーバーレイ通知を出すか。 */
+  overlayEnabled: boolean;
+  /** メインウィンドウをトグルするグローバルショートカット(例: "Ctrl+Space")。 */
+  globalShortcut: string;
+  /** OS ログイン時に自動起動するか。 */
+  autostart: boolean;
 }
 
 /** 昇格先として選べる列(New / Doing / Done は選ばせない)。 */

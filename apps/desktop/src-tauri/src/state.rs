@@ -140,6 +140,8 @@ mod tests {
             .save_settings(CoreSettings {
                 week_start: WeekStart::Sunday,
                 backup_generations: 3,
+                overlay_enabled: false,
+                ..CoreSettings::default()
             })
             .unwrap();
         assert_eq!(state.service.settings().week_start, WeekStart::Sunday);
@@ -149,5 +151,8 @@ mod tests {
         let state = AppState::initialize(dir.path()).unwrap();
         assert_eq!(state.service.settings().week_start, WeekStart::Sunday);
         assert_eq!(state.service.settings().backup_generations, 3);
+        assert!(!state.service.settings().overlay_enabled);
+        // 保存していない項目は既定値のまま残る。
+        assert_eq!(state.service.settings().global_shortcut, "Ctrl+Space");
     }
 }
