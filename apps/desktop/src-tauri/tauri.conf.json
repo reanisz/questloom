@@ -17,7 +17,11 @@
         "create": false,
         "width": 1280,
         "height": 800,
-        "decorations": false
+        "decorations": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        }
       },
       {
         "label": "overlay",

@@ -430,6 +430,17 @@ Rust 側は定義をそのまま `from_config` に渡すだけで、capability �
 従来どおりラベルで決まる。`create: false` が保たれていることは
 `src-tauri/src/lib.rs` の `windows_are_created_by_the_setup_hook` テストが見る。
 
+### メインウィンドウのすりガラス (windowEffects)
+
+main ウィンドウは `tauri.conf.json` で `"transparent": true` +
+`"windowEffects": { "effects": ["acrylic"] }` を持つ。効果は
+`WebviewWindowBuilder::from_config` が build 時に適用するので、Rust 側の追加配線は要らない。
+`window_vibrancy` の acrylic は Windows 11 build 22523 以降なら DWM の
+`DWMWA_SYSTEMBACKDROP_TYPE`(ラグの無い新しい経路)、Windows 10 v1809〜Win11 21H2 では
+旧 `SetWindowCompositionAttribute`(リサイズ/ドラッグが重い既知の問題)になる。
+CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-reduced-transparency`
+(Windows の「透明効果」オフ)では不透明色 `--bg` に落として従来のダークテーマへ戻す。
+
 ### ウィンドウ別の command 許可(ACL)
 
 アプリ独自 command も **Tauri の ACL の対象にしている**。`build.rs` が

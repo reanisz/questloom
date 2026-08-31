@@ -1,34 +1,69 @@
-/* questloom のグローバルスタイル。ダーク基調の落ち着いた配色を CSS 変数で定義する。 */
+/*
+ * questloom のグローバルスタイル。
+ *
+ * 設計の柱は「面の階層を透明度で表現する」こと。メインウィンドウは Windows の
+ * アクリル効果(`tauri.conf.json` の `windowEffects`)で背後がぼけているので、
+ * 地色 (--app-tint) 以外の面は不透明色ではなく「白の薄膜」を重ねて作る。
+ * 枠線は最小限にし、階層は明度差とやわらかい影で示す。
+ *
+ * 透明度の梯子(下から上へ):
+ *   0.000  ボード背景・ヘッダ(= --app-tint がそのまま見える)
+ *   0.035  列・タイトルバー・設定のヘッダ/フッタ (--surface)
+ *   0.055  カード・リスト行 (--surface-2)
+ *   0.090  ホバー・バッジ・カウンタ (--surface-3)
+ *   0.860  ドロワー・モーダル (--panel。ここだけ backdrop-filter を掛ける)
+ */
 
 :root {
-  /* 面 */
+  /* --- 面 ------------------------------------------------------------- */
+
+  /* body の地色。ウィンドウのアクリルの上に乗る暗幕で、文字のコントラストを作る。 */
+  --app-tint: rgba(15, 17, 22, 0.72);
+  /* エフェクトが効かない環境用の不透明な下地(prefers-reduced-transparency で使う)。 */
   --bg: #14161b;
-  --surface: #1b1e25;
-  --surface-2: #22262f;
-  --surface-3: #2a2f3a;
-  --border: #313846;
-  --border-strong: #414a5c;
 
-  /* 文字 */
-  --text: #e4e8f0;
-  --text-muted: #97a0b3;
-  --text-faint: #6d768a;
+  /* 地色の上に重ねる薄膜。数字が大きいほど手前の面。 */
+  --surface: rgba(255, 255, 255, 0.035);
+  --surface-2: rgba(255, 255, 255, 0.055);
+  --surface-3: rgba(255, 255, 255, 0.095);
 
-  /* アクセント */
-  --accent: #6ea8fe;
+  /* ボードの上に浮くパネル(ドロワー・モーダル・ポップオーバー)。 */
+  --panel: rgba(21, 24, 31, 0.86);
+  --panel-blur: blur(28px) saturate(150%);
+  /* 暗幕。後ろのボードを軽くぼかして奥行きを出す。 */
+  --scrim: rgba(8, 9, 12, 0.5);
+
+  /* 入力欄は逆に沈ませる(黒の薄膜)。 */
+  --field: rgba(0, 0, 0, 0.26);
+
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.15);
+
+  /* --- 文字 ----------------------------------------------------------- */
+
+  --text: #eef1f7;
+  --text-muted: #a3abbd;
+  --text-faint: #757e92;
+
+  /* --- アクセント ----------------------------------------------------- */
+
+  --accent: #7db1ff;
   --accent-strong: #4d8ef0;
-  --accent-soft: rgba(110, 168, 254, 0.14);
-  --instant: #f0b45a;
-  --instant-soft: rgba(240, 180, 90, 0.12);
-  --danger: #f07171;
-  --danger-soft: rgba(240, 113, 113, 0.14);
-  --success: #6ec48a;
+  --accent-soft: rgba(110, 168, 254, 0.16);
+  --instant: #f4bd68;
+  --instant-soft: rgba(240, 180, 90, 0.14);
+  --danger: #ff8585;
+  --danger-soft: rgba(240, 113, 113, 0.15);
+  --success: #78d097;
 
-  /* 形 */
-  --radius: 10px;
-  --radius-sm: 6px;
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-lift: 0 8px 20px rgba(0, 0, 0, 0.45);
+  /* --- 形 ------------------------------------------------------------- */
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-panel: 0 2px 14px rgba(0, 0, 0, 0.22);
+  --shadow-lift: 0 18px 44px rgba(0, 0, 0, 0.55);
 
   /* ドラッグオーバーレイの幅の基準。列自体は flex で伸縮する。 */
   --column-width: 260px;
@@ -41,6 +76,18 @@
   font-family: "Segoe UI", "Yu Gothic UI", "Meiryo", system-ui, -apple-system, sans-serif;
   font-size: 14px;
   line-height: 1.5;
+}
+
+/*
+ * Windows の「透明効果」を切っている環境ではアクリルが単色に落ちる。
+ * そのときは地色を不透明に戻して、従来どおりのダークテーマとして破綻させない。
+ */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --app-tint: var(--bg);
+    --panel: #191c23;
+    --panel-blur: none;
+  }
 }
 
 * {
@@ -77,7 +124,8 @@ h3 {
   flex: 0 0 var(--titlebar-height);
   height: var(--titlebar-height);
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  /* 枠線ではなく内側のハイライトで下端を示す(線を減らして軽く見せる)。 */
+  box-shadow: inset 0 -1px 0 var(--border);
   user-select: none;
   -webkit-user-select: none;
 }
@@ -89,7 +137,7 @@ h3 {
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.14em;
 }
 
 /* ドラッグ用の余白。data-tauri-drag-region を持つ要素だけがドラッグを開始できる。 */
@@ -120,7 +168,7 @@ h3 {
 }
 
 .titlebar-btn:active {
-  background: var(--border);
+  background: var(--surface-2);
 }
 
 .titlebar-btn-close:hover,
@@ -129,13 +177,13 @@ h3 {
   color: #fff;
 }
 
+/* ヘッダは地色のまま。塗り分けずに余白とタイポグラフィだけで区切る。 */
 .app-header {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 6px 12px 6px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  padding: 8px 12px 8px 18px;
+  background: transparent;
 }
 
 .app-header-actions {
@@ -161,9 +209,9 @@ h3 {
   gap: 12px;
   margin: 8px 16px 0;
   padding: 8px 12px;
-  border: 1px solid var(--danger);
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px var(--danger);
   color: var(--text);
 }
 
@@ -178,7 +226,7 @@ h3 {
   flex: 1;
   min-height: 0;
   gap: 12px;
-  padding: 12px 16px 16px;
+  padding: 4px 16px 16px;
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -186,7 +234,7 @@ h3 {
 /* 展開表示は 8 列を敷き詰めるため、余白と列幅を詰める。 */
 .board-expanded {
   gap: 8px;
-  padding: 12px 8px 16px;
+  padding: 4px 10px 16px;
 }
 
 .column {
@@ -195,10 +243,10 @@ h3 {
   flex: 1 1 0;
   min-width: var(--column-min);
   max-height: 100%;
-  border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: var(--shadow-panel);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
 }
 
 .board-expanded .column {
@@ -206,14 +254,13 @@ h3 {
 }
 
 .column-over {
-  border-color: var(--accent);
   background: var(--surface-2);
+  box-shadow: var(--shadow-panel), inset 0 0 0 1px var(--accent);
 }
 
 /* レールから展開したバケットを一時的に強調する。 */
 .column-focused {
-  border-color: var(--accent-strong);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: var(--shadow-panel), inset 0 0 0 1px var(--accent-strong);
 }
 
 /* ---- 先送りレール ---- */
@@ -228,10 +275,10 @@ h3 {
 }
 
 .defer-rail-title {
-  padding: 2px 2px 0;
+  padding: 4px 2px 0;
   color: var(--text-faint);
   font-size: 11px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
@@ -240,37 +287,35 @@ h3 {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 10px 10px;
-  border: 1px dashed var(--border-strong);
+  padding: 11px 12px;
+  border: none;
   border-radius: var(--radius);
-  background: var(--surface);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border);
   color: var(--text-muted);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease,
-    box-shadow 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .defer-box:hover {
-  border-color: var(--accent);
-  background: var(--surface-2);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text);
 }
 
 /* ドラッグ中はどこへ落とせるかを示す。 */
 .defer-box-armed {
-  border-color: var(--accent-strong);
-  background: var(--surface-2);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text);
 }
 
 .defer-box-over {
-  border-style: solid;
-  border-color: var(--accent);
   background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
   color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .defer-box-label {
@@ -299,12 +344,12 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px 8px;
+  padding: 12px 14px 8px;
 }
 
 .column-header h2 {
-  font-size: 13px;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -339,7 +384,7 @@ h3 {
   display: flex;
   gap: 6px;
   padding: 8px 10px 10px;
-  border-top: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 var(--border);
 }
 
 .quick-add input {
@@ -349,35 +394,45 @@ h3 {
 
 /* ---- カード ---- */
 
+/*
+ * カードは枚数が多いので backdrop-filter は掛けない(1 枚ごとに合成レイヤーを
+ * 作ると重くなる)。半透明の薄膜と細い影だけで列から浮かせる。
+ */
 .card {
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
+  padding: 10px 11px;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-card), inset 0 0 0 1px var(--border);
   cursor: pointer;
   touch-action: none;
-  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
 }
 
 .card:hover {
   background: var(--surface-3);
-  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card), inset 0 0 0 1px var(--border-strong);
 }
 
+/* インスタントは左端の琥珀の帯で示す(枠線ではなく inset shadow で描く)。 */
 .card-instant {
-  border-left-color: var(--instant);
-  background: linear-gradient(90deg, var(--instant-soft), transparent 55%), var(--surface-2);
+  background: linear-gradient(90deg, var(--instant-soft), transparent 60%), var(--surface-2);
+  box-shadow: var(--shadow-card), inset 3px 0 0 var(--instant),
+    inset 0 0 0 1px var(--border);
+}
+
+.card-instant:hover {
+  box-shadow: var(--shadow-card), inset 3px 0 0 var(--instant),
+    inset 0 0 0 1px var(--border-strong);
 }
 
 .card-dragging {
-  opacity: 0.35;
+  opacity: 0.3;
 }
 
 .card-overlay {
   cursor: grabbing;
-  box-shadow: var(--shadow-lift);
+  box-shadow: var(--shadow-lift), inset 0 0 0 1px var(--border-strong);
+  background: var(--panel);
   transform: rotate(1.5deg);
   width: calc(var(--column-width) - 20px);
 }
@@ -402,7 +457,7 @@ h3 {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 1px 6px;
+  padding: 1px 7px;
   border-radius: 999px;
   background: var(--surface-3);
   color: var(--text-muted);
@@ -423,19 +478,19 @@ h3 {
 /* ---- ボタン・入力 ---- */
 
 .btn {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-3);
+  border: none;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text);
   font: inherit;
-  padding: 5px 10px;
+  padding: 5px 11px;
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
 }
 
 .btn:hover:not(:disabled) {
-  background: var(--border);
-  border-color: var(--accent);
+  background: var(--surface-3);
 }
 
 .btn:disabled {
@@ -444,32 +499,36 @@ h3 {
 }
 
 .btn-sm {
-  padding: 3px 8px;
+  padding: 3px 9px;
   font-size: 12px;
 }
 
 .btn-ghost {
   background: transparent;
-  border-color: transparent;
+  box-shadow: none;
   color: var(--text-muted);
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: var(--surface-3);
-  border-color: var(--border-strong);
+  background: var(--surface-2);
+  box-shadow: none;
   color: var(--text);
 }
 
 .btn-primary {
   background: var(--accent-soft);
-  border-color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px var(--accent-strong);
   color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: rgba(110, 168, 254, 0.26);
 }
 
 /* 破壊的な操作(削除)。確認ダイアログの確定ボタンとドロワーの削除ボタン。 */
 .btn-danger {
   background: transparent;
-  border-color: var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
   color: var(--danger);
 }
 
@@ -480,20 +539,25 @@ h3 {
 input,
 textarea,
 select {
-  padding: 5px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
+  padding: 6px 9px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: var(--field);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text);
   font: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-faint);
 }
 
 input:focus,
 textarea:focus,
 select:focus {
   outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
 }
 
 textarea {
@@ -502,7 +566,7 @@ textarea {
 }
 
 .input-overdue {
-  border-color: var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
   color: var(--danger);
 }
 
@@ -513,6 +577,7 @@ textarea {
   display: inline-block;
 }
 
+/* ボードの上に浮くのでぼかしを掛ける(枚数は 1 つなので負荷は問題にならない)。 */
 .promote-menu {
   position: absolute;
   z-index: 40;
@@ -520,18 +585,18 @@ textarea {
   left: 0;
   min-width: 120px;
   padding: 4px;
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface-3);
-  box-shadow: var(--shadow-lift);
+  background: var(--panel);
+  backdrop-filter: var(--panel-blur);
+  box-shadow: var(--shadow-lift), inset 0 0 0 1px var(--border-strong);
 }
 
 .promote-item {
   display: block;
   width: 100%;
-  padding: 5px 8px;
+  padding: 6px 9px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -546,11 +611,13 @@ textarea {
 
 /* ---- ドロワー ---- */
 
+/* 暗幕はボードを軽くぼかして、手前のガラス板との距離を作る。 */
 .drawer-scrim {
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--scrim);
+  backdrop-filter: blur(3px);
 }
 
 .drawer {
@@ -562,9 +629,9 @@ textarea {
   width: min(480px, 92vw);
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border-strong);
-  background: var(--surface);
-  box-shadow: var(--shadow-lift);
+  background: var(--panel);
+  backdrop-filter: var(--panel-blur);
+  box-shadow: var(--shadow-lift), inset 1px 0 0 var(--border-strong);
   animation: drawer-in 0.18s ease-out;
 }
 
@@ -584,28 +651,28 @@ textarea {
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 .drawer-content {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 14px 24px;
+  padding: 4px 16px 24px;
 }
 
 .drawer-section {
   padding: 12px 0;
-  border-bottom: 1px solid var(--border);
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 .drawer-section:last-child {
-  border-bottom: none;
+  box-shadow: none;
 }
 
 .drawer-section h3 {
   margin: 10px 0 6px;
-  font-size: 12px;
-  letter-spacing: 0.06em;
+  font-size: 11px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -616,15 +683,15 @@ textarea {
 
 .drawer-title {
   width: 100%;
-  padding: 6px 8px;
-  border-color: transparent;
+  padding: 7px 9px;
   background: transparent;
+  box-shadow: none;
   font-size: 17px;
   font-weight: 600;
 }
 
 .drawer-title:hover {
-  border-color: var(--border-strong);
+  background: var(--surface-2);
 }
 
 .drawer-actions {
@@ -692,9 +759,8 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  border-radius: var(--radius-xs);
   background: var(--surface-2);
 }
 
@@ -750,18 +816,18 @@ textarea {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  border: none;
+  border-radius: var(--radius-xs);
   background: var(--surface-2);
   color: var(--text);
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background 0.12s ease;
 }
 
 .task-link:hover {
-  border-color: var(--accent);
   background: var(--surface-3);
 }
 
@@ -781,9 +847,8 @@ textarea {
 /* ---- 履歴 ---- */
 
 .update-list li {
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  border-radius: var(--radius-xs);
   background: var(--surface-2);
 }
 
@@ -797,7 +862,7 @@ textarea {
 
 .update-origin {
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 
 .update-body {
@@ -821,7 +886,8 @@ textarea {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scrim);
+  backdrop-filter: blur(3px);
 }
 
 .modal {
@@ -834,10 +900,10 @@ textarea {
   flex-direction: column;
   width: min(680px, 92vw);
   max-height: min(80vh, 720px);
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: var(--shadow-lift);
+  background: var(--panel);
+  backdrop-filter: var(--panel-blur);
+  box-shadow: var(--shadow-lift), inset 0 0 0 1px var(--border-strong);
   animation: modal-in 0.16s ease-out;
 }
 
@@ -861,8 +927,8 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  padding: 11px 16px;
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 .modal-header h2 {
@@ -876,7 +942,7 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px;
+  padding: 14px 16px;
 }
 
 .modal-footer {
@@ -884,18 +950,18 @@ textarea {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--border);
+  padding: 11px 16px;
+  box-shadow: inset 0 1px 0 var(--border);
 }
 
 /* ---- 削除の確認 / 削除済み一覧 ---- */
 
 /* 確認ダイアログで「どれを消すのか」を見せる行。 */
 .confirm-target {
-  padding: 8px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  border-radius: var(--radius-xs);
   background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
@@ -911,9 +977,8 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  border-radius: var(--radius-xs);
   background: var(--surface-2);
 }
 
@@ -994,18 +1059,17 @@ textarea {
 
 .ai-error {
   margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  border-radius: var(--radius-xs);
   background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px var(--danger);
   font-size: 13px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .ai-result {
-  padding: 10px;
-  border: 1px solid var(--border);
+  padding: 11px;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
 }
@@ -1015,8 +1079,8 @@ textarea {
   align-items: center;
   gap: 8px;
   margin: 0 0 8px;
-  font-size: 12px;
-  letter-spacing: 0.06em;
+  font-size: 11px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -1063,9 +1127,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 12px 8px 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 12px 10px 18px;
   background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 .settings-header h1 {
@@ -1093,8 +1157,8 @@ textarea {
   flex-direction: column;
   gap: 2px;
   flex: 0 0 220px;
-  padding: 12px 8px;
-  border-right: 1px solid var(--border);
+  padding: 12px 10px;
+  box-shadow: inset -1px 0 0 var(--border);
   overflow-y: auto;
 }
 
@@ -1102,8 +1166,8 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
+  padding: 9px 11px;
+  border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
@@ -1120,7 +1184,7 @@ textarea {
 
 .settings-nav-item.is-active {
   background: var(--accent-soft);
-  border-color: var(--accent-strong);
+  box-shadow: inset 0 0 0 1px var(--accent-strong);
   color: var(--text);
 }
 
@@ -1151,7 +1215,7 @@ textarea {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 16px 20px 24px;
+  padding: 18px 22px 24px;
 }
 
 .settings-section {
@@ -1162,16 +1226,16 @@ textarea {
 }
 
 .settings-section h2 {
-  font-size: 14px;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
 
 .settings-section h3 {
   margin-top: 6px;
-  font-size: 12px;
-  letter-spacing: 0.06em;
+  font-size: 11px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -1209,8 +1273,8 @@ textarea {
 
 .settings-hint code,
 .settings-code code {
-  padding: 0 3px;
-  border-radius: 3px;
+  padding: 0 4px;
+  border-radius: 4px;
   background: var(--surface-3);
   font-family: "Cascadia Mono", "Consolas", monospace;
   font-size: 11px;
@@ -1261,8 +1325,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
+  padding: 9px 11px;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
 }
@@ -1289,13 +1352,13 @@ textarea {
   color: var(--text-faint);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   text-align: left;
   text-transform: uppercase;
 }
 
 .settings-table td {
-  padding: 3px 6px;
+  padding: 4px 6px;
   border-top: 1px solid var(--border);
   vertical-align: top;
 }
@@ -1344,10 +1407,10 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  padding: 13px 15px;
+  border-radius: var(--radius);
   background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 
 .plugin-card-head {
@@ -1372,9 +1435,9 @@ textarea {
 .plugin-card-error {
   max-height: 160px;
   margin: 0;
-  padding: 8px 10px;
+  padding: 9px 11px;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--radius-xs);
   background: var(--danger-soft);
   color: var(--text);
   font-family: "Cascadia Mono", "Consolas", monospace;
@@ -1404,8 +1467,8 @@ textarea {
   margin: 0;
   padding: 8px 16px 8px 36px;
   overflow-y: auto;
-  border-top: 1px solid var(--danger);
   background: var(--danger-soft);
+  box-shadow: inset 0 1px 0 var(--danger);
   color: var(--text);
   font-size: 12px;
 }
@@ -1414,9 +1477,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--border);
+  padding: 11px 18px;
   background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--border);
 }
 
 .settings-footer-feedback {
@@ -1429,7 +1492,7 @@ textarea {
 }
 
 .btn-icon {
-  padding: 3px 8px;
+  padding: 3px 9px;
   font-size: 14px;
   line-height: 1.2;
 }
@@ -1445,24 +1508,36 @@ textarea {
   border: 3px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
-  background-color: var(--border-strong);
+  background-color: rgba(255, 255, 255, 0.16);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: var(--text-faint);
+  background-color: rgba(255, 255, 255, 0.3);
 }
 
-/* ---- オーバーレイ通知ウィンドウ ---- */
+/* ---- ウィンドウごとの地色 ---- */
 
 /* 透過ウィンドウなので body の地色を消す。 */
 body.overlay-body {
   background: transparent;
 }
 
-/* オーバーレイ以外(メインウィンドウ・plugin-host)。地色を明示して overlay-body と対にする。 */
+/*
+ * メインウィンドウ(と plugin-host)。ウィンドウのアクリル効果の上に乗せる暗幕。
+ * 左上のごく淡いアクセントの光だけを足して、単調な平面に奥行きを作る。
+ * エフェクトが効かない環境では --app-tint が不透明色に落ちる
+ * (上の prefers-reduced-transparency を参照)。
+ */
 body.main-body {
-  background: var(--bg);
+  background: radial-gradient(
+      120vw 80vh at 8% -20%,
+      rgba(110, 168, 254, 0.09),
+      transparent 62%
+    ),
+    var(--app-tint);
 }
+
+/* ---- オーバーレイ通知ウィンドウ ---- */
 
 .overlay {
   /* 影のはみ出し分を含めた余白。ウィンドウ高さはこの要素の高さに合わせられる。 */
@@ -1477,11 +1552,10 @@ body.main-body {
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 14px;
-  background: rgba(24, 27, 34, 0.82);
-  backdrop-filter: blur(14px) saturate(140%);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  background: rgba(21, 24, 31, 0.86);
+  backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 0 0 1px var(--border-strong);
 }
 
 .overlay-head {
@@ -1503,7 +1577,7 @@ body.main-body {
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
@@ -1529,17 +1603,17 @@ body.main-body {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.04);
+  border: none;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
 }
 
 .overlay-row:hover,
 .overlay-row:focus-visible {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--border-strong);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   outline: none;
 }
 
@@ -1569,27 +1643,28 @@ body.main-body {
 }
 
 .overlay-btn {
-  border: 1px solid var(--border-strong);
+  border: none;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--text-muted);
   font: inherit;
   font-size: 11px;
   line-height: 1.4;
-  padding: 2px 8px;
+  padding: 2px 9px;
   cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
 }
 
 .overlay-btn:hover {
   background: var(--accent-soft);
-  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
   color: var(--text);
 }
 
 .overlay-btn-done:hover {
-  background: rgba(110, 196, 138, 0.16);
-  border-color: var(--success);
+  background: rgba(110, 196, 138, 0.18);
+  box-shadow: inset 0 0 0 1px var(--success);
 }
 
 .overlay-more {
