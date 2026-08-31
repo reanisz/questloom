@@ -11,8 +11,13 @@
 
 import type { AiProvider, CoreSettings, WeekStart } from "./types";
 
-/** 設定画面の節。 */
-export type SectionKey = "general" | "shortcut" | "mcp" | "ai";
+/**
+ * 設定画面の節。
+ *
+ * `plugins` だけはコア設定 (`CoreSettings`) と無関係で、保存も独立している
+ * (プラグインごとの `plugin_set_settings`)。そのためドラフト・検証の対象外。
+ */
+export type SectionKey = "general" | "shortcut" | "mcp" | "ai" | "plugins";
 
 /** 節の表示順とラベル。 */
 export const SECTIONS: readonly { key: SectionKey; label: string; hint: string }[] = [
@@ -20,6 +25,7 @@ export const SECTIONS: readonly { key: SectionKey; label: string; hint: string }
   { key: "shortcut", label: "ショートカットとオーバーレイ", hint: "呼び出しキーと通知表示" },
   { key: "mcp", label: "MCP サーバー", hint: "AI エージェントからの接続" },
   { key: "ai", label: "AI", hint: "呼び出す CLI プロバイダ" },
+  { key: "plugins", label: "プラグイン", hint: "TypeScript プラグインと個別設定" },
 ];
 
 /** MCP ポートの許容範囲(バックエンドと同じ)。 */
@@ -262,7 +268,8 @@ export function isDirty(draft: SettingsDraft, baseline: SettingsDraft): boolean 
 
 /** 節ごとの問題件数(ナビゲーションの印に使う)。 */
 export function issuesBySection(issues: readonly SettingsIssue[]): Record<SectionKey, number> {
-  const counts: Record<SectionKey, number> = { general: 0, shortcut: 0, mcp: 0, ai: 0 };
+  // プラグイン節はコア設定の検証対象外なので常に 0。
+  const counts: Record<SectionKey, number> = { general: 0, shortcut: 0, mcp: 0, ai: 0, plugins: 0 };
   for (const issue of issues) counts[issue.section] += 1;
   return counts;
 }

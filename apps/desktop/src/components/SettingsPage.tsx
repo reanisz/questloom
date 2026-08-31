@@ -25,6 +25,7 @@ import {
   type SettingsDraft,
 } from "../settings";
 import type { RuntimeStatus, WeekStart } from "../types";
+import { PluginSettingsSection } from "./PluginSettingsSection";
 
 /** クリップボードへコピーする。Tauri の webview では権限が無いこともあるので握りつぶさない。 */
 async function copyText(text: string): Promise<boolean> {
@@ -609,6 +610,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
               </button>
             </section>
           )}
+
+          {/* プラグイン節はコア設定と独立して保存する(下の「保存」ボタンは無関係)。 */}
+          {section === "plugins" && <PluginSettingsSection />}
         </div>
       </div>
 

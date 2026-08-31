@@ -151,6 +151,92 @@ impl SqliteStore {
         self.set_settings_json(namespace, &json)
     }
 
+    /// プラグイン専用 KV から値を読む。未保存なら `None`。
+    ///
+    /// 値は JSON。壊れた JSON が入っていた場合は警告ログを出して `None` を返す
+    /// (1 件の壊れたエントリでプラグインを起動不能にしないため)。
+    ///
+    /// # Errors
+    /// SQLite のエラー。
+    pub fn plugin_kv_get(
+        &self,
+        plugin_id: &str,
+        key: &str,
+    ) -> StoreResult<Option<serde_json::Value>> {
+        let conn = self.conn();
+        let raw = conn
+            .query_row(
+                "SELECT value FROM plugin_kv WHERE plugin_id = ?1 AND key = ?2",
+                [plugin_id, key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        match serde_json::from_str(&raw) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => {
+                tracing::warn!(plugin_id, key, %error, "プラグイン KV の JSON を解釈できません");
+                Ok(None)
+            }
+        }
+    }
+
+    /// プラグイン専用 KV に値を書く(upsert)。
+    ///
+    /// # Errors
+    /// JSON 化に失敗した場合、または SQLite のエラー。
+    pub fn plugin_kv_set<T: Serialize>(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: &T,
+    ) -> StoreResult<()> {
+        let json = serde_json::to_string(value).map_err(|source| StoreError::Json {
+            namespace: format!("plugin_kv:{plugin_id}"),
+            source,
+        })?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO plugin_kv (plugin_id, key, value, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(plugin_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![plugin_id, key, json, mapping::time_to_sql(Utc::now())],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// プラグイン専用 KV からキーを消す。存在しなければ `Ok(false)`。
+    ///
+    /// # Errors
+    /// SQLite のエラー。
+    pub fn plugin_kv_delete(&self, plugin_id: &str, key: &str) -> StoreResult<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM plugin_kv WHERE plugin_id = ?1 AND key = ?2",
+            [plugin_id, key],
+        )?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// プラグイン専用 KV のキーを昇順で返す。
+    ///
+    /// # Errors
+    /// SQLite のエラー。
+    pub fn plugin_kv_keys(&self, plugin_id: &str) -> StoreResult<Vec<String>> {
+        let conn = self.conn();
+        let mut statement =
+            conn.prepare("SELECT key FROM plugin_kv WHERE plugin_id = ?1 ORDER BY key")?;
+        let keys = statement
+            .query_map([plugin_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(keys)
+    }
+
     /// WAL のチェックポイントを実行し、`-wal` の内容を本体へ取り込む。
     ///
     /// # Errors
@@ -245,6 +331,65 @@ mod tests {
             Some(r#"{"intervalMinutes":5}"#)
         );
         assert_eq!(store.get_settings_json("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn plugin_kv_roundtrip_and_namespacing() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert_eq!(store.plugin_kv_get("github", "etag").unwrap(), None);
+
+        store
+            .plugin_kv_set("github", "etag", &serde_json::json!({"pr/1": "W/\"abc\""}))
+            .unwrap();
+        // 同じキーでもプラグインが違えば別物。
+        store
+            .plugin_kv_set("hello", "etag", &serde_json::json!(42))
+            .unwrap();
+
+        assert_eq!(
+            store.plugin_kv_get("github", "etag").unwrap(),
+            Some(serde_json::json!({"pr/1": "W/\"abc\""}))
+        );
+        assert_eq!(
+            store.plugin_kv_get("hello", "etag").unwrap(),
+            Some(serde_json::json!(42))
+        );
+
+        // 上書きできる。
+        store
+            .plugin_kv_set("github", "etag", &serde_json::json!(null))
+            .unwrap();
+        assert_eq!(
+            store.plugin_kv_get("github", "etag").unwrap(),
+            Some(serde_json::Value::Null)
+        );
+
+        store.plugin_kv_set("github", "seen", &["a"]).unwrap();
+        assert_eq!(
+            store.plugin_kv_keys("github").unwrap(),
+            vec!["etag".to_owned(), "seen".to_owned()]
+        );
+        assert_eq!(
+            store.plugin_kv_keys("missing").unwrap(),
+            Vec::<String>::new()
+        );
+
+        assert!(store.plugin_kv_delete("github", "etag").unwrap());
+        assert!(!store.plugin_kv_delete("github", "etag").unwrap());
+        assert_eq!(store.plugin_kv_get("github", "etag").unwrap(), None);
+    }
+
+    #[test]
+    fn broken_plugin_kv_falls_back_to_none() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO plugin_kv (plugin_id, key, value, updated_at) VALUES ('x', 'k', 'not json', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.plugin_kv_get("x", "k").unwrap(), None);
     }
 
     #[test]

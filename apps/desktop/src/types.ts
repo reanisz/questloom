@@ -5,6 +5,11 @@
  * この形を固定している。JSON は全面 camelCase、enum も camelCase。
  */
 
+// プラグインの manifest 型は SDK(プラグイン作者向けリファレンス)を唯一の定義とする。
+import type { PluginManifest } from "./plugin-host/sdk";
+
+export type { PluginManifest, PluginSettingField, PluginSettingType } from "./plugin-host/sdk";
+
 /** タスクの識別子 (UUID v7)。 */
 export type TaskId = string;
 /** 関連リソースの識別子 (UUID v7)。 */
@@ -235,6 +240,31 @@ export interface RuntimeStatus {
   mcpTokenRequired: boolean;
   /** 設定中のグローバルショートカットを実際に登録できているか。 */
   shortcutRegistered: boolean;
+}
+
+/**
+ * `plugin_list_sources` が返すプラグインソース 1 件。
+ * `fileName` はプラグインディレクトリ直下のファイル名(区切り文字を含むものは Rust 側が弾く)。
+ */
+export interface PluginSourceFile {
+  fileName: string;
+  source: string;
+  /** 最終更新時刻 (RFC3339 / UTC)。取得できなければ null。 */
+  modifiedAt: string | null;
+}
+
+/**
+ * plugin-host が公開するロード結果 1 件(`plugin_list_loaded` /
+ * `questloom://plugins-loaded`)。設定画面のプラグイン一覧はこれを描画する。
+ */
+export interface LoadedPlugin {
+  fileName: string;
+  /** 読み取れた manifest。ロードに失敗した場合は null。 */
+  manifest: PluginManifest | null;
+  /** `activate` まで成功したか。 */
+  active: boolean;
+  /** 失敗した場合のメッセージ。 */
+  error: string | null;
 }
 
 /** 昇格先として選べる列(New / Doing / Done は選ばせない)。 */

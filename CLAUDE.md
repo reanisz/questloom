@@ -17,9 +17,12 @@ questloom/
 ├── CLAUDE.md
 ├── README.md
 ├── docs/                            # 設計ドキュメント(実装前に必ず参照)
+├── examples/
+│   └── plugins/                     # TS プラグインのサンプル(hello.ts)
 ├── apps/
 │   └── desktop/                     # Tauri デスクトップアプリ
 │       ├── src/                     # フロントエンド (React 19 + TypeScript)
+│       │   └── plugin-host/         # TS プラグインのホストと SDK 型定義
 │       ├── src-tauri/               # Tauri シェル crate (questloom-desktop)
 │       ├── index.html
 │       ├── package.json
@@ -183,10 +186,73 @@ Tauri command として配線する。ヘッダの「✨ AI」ボタンと、タ
 - `CREATE_NO_WINDOW` を付けてコンソールウィンドウを出さない。
 - PowerShell 専用シム(`.ps1` のみ)の CLI は未対応。
 
+## TypeScript プラグイン
+
+`%APPDATA%\dev.reanisz.questloom\plugins\` に `*.ts` / `*.js` を置くだけで読み込まれる軽量プラグイン層
+(Phase 6a の基盤。GitHub 統合は Phase 6b)。実行場所は**非表示の `plugin-host` webview ウィンドウ**で、
+プラグインのライフサイクルはすべてホスト JS が持つ(Rust 側はファイル列挙・永続化・ログ転送のみ)。
+
+| 役割 | 場所 |
+|---|---|
+| Tauri command(列挙・KV・設定・リソース・ログ・ドメイン判定・レジストリ) | `apps/desktop/src-tauri/src/plugin_host.rs` |
+| ホスト(ロード・activate・dispose・リロード) | `apps/desktop/src/plugin-host/host.ts` |
+| **SDK の型定義(プラグイン作者向けリファレンス)** | `apps/desktop/src/plugin-host/sdk.ts` |
+| トランスパイル (esbuild-wasm) | `apps/desktop/src/plugin-host/transpile.ts` |
+| サンプル | `examples/plugins/hello.ts` |
+
+### プラグインの形
+
+```ts
+export default defineQuestloomPlugin({
+  manifest: {
+    id: "github",                     // 一意。設定名前空間・KV・origin (`plugin:<id>`) になる
+    name: "GitHub 統合",
+    version: "0.1.0",
+    fetchDomains: ["api.github.com"], // ctx.fetch を許すホスト名(完全一致)
+    settingsSchema: [                 // 設定画面に項目が自動で生える
+      { key: "pat", label: "Personal Access Token", type: "secret", default: "" },
+      { key: "pollIntervalMinutes", label: "ポーリング間隔(分)", type: "number", default: 5 },
+      { key: "enabled", label: "有効", type: "boolean", default: true },
+    ],
+  },
+  activate(ctx) { /* 戻り値に関数を返すと dispose 時に呼ばれる */ },
+});
+```
+
+`defineQuestloomPlugin` は**ホストがグローバルに用意する**(import 不要)。
+`ctx` が提供するのは `tasks` / `settings` / `kv` / `fetch` / `schedule` / `onTaskEvent` / `log`。
+詳細は `sdk.ts` の JSDoc を参照。
+
+### 既知の制限
+
+- **1 ファイル 1 プラグイン。`import` は使えない。** ロード時に esbuild-wasm の `transform` を
+  かけるだけで、バンドル(モジュール解決)はしない。
+- **型検査はされない**(トランスパイルのみ)。型注釈は書けるが誤りは実行時まで分からない。
+- `ctx.fetch` は webview の `fetch` なので **CORS の制約を受ける**。
+  `Access-Control-Allow-Origin` を返さない API は呼べない。
+- **questloom が起動している間だけ動く**。常駐サービスではなく、アプリ終了でポーリングも止まる。
+- `fetchDomains` はサブドメインのワイルドカードを持たない(完全一致のみ)。
+  判定の実体は Rust 側 `plugin_host::is_fetch_allowed`(テストもそこにある)。
+- シークレット項目 (`type: "secret"`) は現状 **DB の `settings` テーブルに平文で入る**。
+  資格情報マネージャーへの移行は今後の課題。
+- ホスト JS とプラグインは同じ JS realm で動くため、`fetchDomains` は
+  セキュリティ境界ではなく**事故防止のガードレール**として扱う。
+
+### 開発時の確認
+
+- プラグインの `ctx.log` は `plugin_log` command 経由で **本体の tracing に流れる**
+  (`npm run tauri dev` のコンソールに `plugin="<id>"` 付きで出る)。
+  `console.log` は非表示ウィンドウのコンソールに埋もれるので使わないこと。
+- ファイルを足したり書き換えたら、設定画面の「プラグインを再読み込み」
+  (`questloom://plugins-reload` を emit)で dispose → 再ロードされる。
+
 ## 設定画面
 
 ヘッダ右端の歯車ボタンから、ボードを置き換えるページとして開く(`apps/desktop/src/components/SettingsPage.tsx`。
-Esc / 閉じるでボードへ戻る)。節は 一般 / ショートカットとオーバーレイ / MCP サーバー / AI の 4 つ。
+Esc / 閉じるでボードへ戻る)。節は 一般 / ショートカットとオーバーレイ / MCP サーバー / AI / プラグイン の 5 つ。
+プラグイン節(`components/PluginSettingsSection.tsx`)だけはコア設定と独立で、
+manifest の `settingsSchema` からフォームを自動生成し、プラグインごとの保存ボタンで
+`plugin_set_settings` を呼ぶ(下記の一括「保存」は使わない)。
 自動保存はせず「保存」ボタンで `set_settings` を一括呼び出しする(未保存のまま閉じるときは確認)。
 検証はフロント (`apps/desktop/src/settings.ts`) とバックエンド
 (`apps/desktop/src-tauri/src/settings.rs::validate`、ショートカット文字列のパースを含む)の両方で行い、

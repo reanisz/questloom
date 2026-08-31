@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-host",
+  "description": "Capability for the hidden TypeScript plugin host window",
+  "windows": ["plugin-host"],
+  "permissions": ["core:default"]
+}

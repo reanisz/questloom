@@ -1267,6 +1267,72 @@ textarea {
   font-size: 12px;
 }
 
+/* --- プラグイン節 -------------------------------------------------------- */
+
+.plugin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plugin-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.plugin-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plugin-card-head h3 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text);
+}
+
+.plugin-card-head .settings-hint {
+  margin-top: 2px;
+}
+
+.plugin-card-error {
+  max-height: 160px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--danger-soft);
+  color: var(--text);
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plugin-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  font-size: 12px;
+}
+
+/* plugin-host ウィンドウは常に非表示。開発時のインスペクタ用の最小限の見た目。 */
+.plugin-host-debug {
+  padding: 12px;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 11px;
+}
+
 .settings-issues {
   flex: 0 0 auto;
   max-height: 25vh;

@@ -35,6 +35,19 @@
         "maximizable": false,
         "minimizable": false,
         "focus": false
+      },
+      {
+        "label": "plugin-host",
+        "title": "questloom plugin host",
+        "width": 320,
+        "height": 200,
+        "visible": false,
+        "decorations": false,
+        "skipTaskbar": true,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "focus": false
       }
     ],
     "security": {

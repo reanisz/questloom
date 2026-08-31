@@ -4,8 +4,9 @@
 //! [`TaskService`](questloom_core::service::TaskService) を State として保持する。
 //! ドメインイベントは [`events::TASKS_CHANGED`] として webview へ中継される。
 //!
-//! ウィンドウは 2 つ。メインウィンドウ(ボード)は閉じるとトレイへ格納され、
+//! ウィンドウは 3 つ。メインウィンドウ(ボード)は閉じるとトレイへ格納され、
 //! オーバーレイウィンドウは New タスクがある間だけ表示される。
+//! plugin-host ウィンドウは常に非表示で、TS プラグイン([`plugin_host`])を実行する。
 //!
 //! 設定で有効なら、内蔵 MCP サーバー([`mcp`])を `127.0.0.1` で起動する。
 //! AI CLI の呼び出し([`ai`])は、実行中の MCP サーバーがあればその URL を CLI に渡す。
@@ -16,6 +17,7 @@ pub mod commands;
 pub mod events;
 pub mod mcp;
 pub mod overlay;
+pub mod plugin_host;
 pub mod settings;
 pub mod shortcut;
 pub mod state;
@@ -64,6 +66,9 @@ pub fn run() {
             app.manage(state);
             app.manage(Arc::new(mcp::McpSupervisor::new(Arc::clone(&service))));
             app.manage(Arc::new(ai::AiRunner::new()));
+            // TS プラグインのライフサイクルは plugin-host webview 上の JS が持つ。
+            // Rust 側はそのロード結果を受け取るレジストリだけを用意する。
+            app.manage(plugin_host::PluginRegistry::new());
 
             tray::setup(&handle)?;
 
@@ -107,6 +112,18 @@ pub fn run() {
             ai::ai_split_task,
             ai::ai_free_instruction,
             ai::ai_cancel,
+            plugin_host::plugin_directory,
+            plugin_host::plugin_list_sources,
+            plugin_host::plugin_kv_get,
+            plugin_host::plugin_kv_set,
+            plugin_host::plugin_kv_keys,
+            plugin_host::plugin_get_settings,
+            plugin_host::plugin_set_settings,
+            plugin_host::plugin_list_task_resources,
+            plugin_host::plugin_log,
+            plugin_host::plugin_fetch_allowed,
+            plugin_host::plugin_publish_loaded,
+            plugin_host::plugin_list_loaded,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri アプリの起動に失敗しました");
