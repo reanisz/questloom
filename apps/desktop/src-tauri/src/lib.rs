@@ -2,6 +2,7 @@
 //!
 //! 起動時に `%APPDATA%\questloom` の DB を開き(マイグレーション + バックアップ)、
 //! [`TaskService`](questloom_core::service::TaskService) を State として保持する。
+//! データディレクトリと MCP ポートは環境変数で上書きできる([`env_override`])。
 //! ドメインイベントは [`contract::TASKS_CHANGED`] として webview へ中継される。
 //!
 //! ウィンドウは 3 つ。メインウィンドウ(ボード)は閉じるとトレイへ格納され、
@@ -32,6 +33,7 @@ pub mod app_commands;
 pub mod autostart;
 pub mod commands;
 pub mod contract;
+pub mod env_override;
 pub mod events;
 pub mod mcp;
 pub mod overlay;
@@ -85,7 +87,18 @@ pub fn run() {
         ))
         .setup(|app| {
             let handle = app.handle().clone();
-            let data_dir = app.path().app_data_dir()?;
+            // テストからは QUESTLOOM_DATA_DIR で本物の %APPDATA% を避けられる(env_override 参照)。
+            let data_dir = match env_override::data_dir() {
+                Some(dir) => {
+                    tracing::info!(
+                        path = %dir.display(),
+                        "{} でデータディレクトリを上書きします",
+                        env_override::DATA_DIR_ENV
+                    );
+                    dir
+                }
+                None => app.path().app_data_dir()?,
+            };
             let state = AppState::initialize(&data_dir)?;
             let service = Arc::clone(&state.service);
             let settings = state.settings();

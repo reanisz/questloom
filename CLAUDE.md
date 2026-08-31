@@ -70,6 +70,8 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 | Lint / フォーマット | `cargo clippy --workspace --all-targets`, `cargo fmt --all` |
 | フロント依存のインストール | `cd apps/desktop; npm install` |
 | フロントのみのビルド(型チェック込み) | `cd apps/desktop; npm run build` |
+| フロントのユニットテスト (vitest + jsdom) | `cd apps/desktop; npm test` |
+| プラグイン(TS)の純関数テスト | `node --test examples/plugins/github.test.mjs` |
 | アプリの開発起動(ウィンドウが立ち上がる) | `cd apps/desktop; npm run tauri dev` |
 | リリースバンドル作成 | `cd apps/desktop; npm run tauri build` |
 
@@ -80,6 +82,33 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 - 初回の Tauri ビルドは数分〜10 分以上かかる。タイムアウトを長めに設定すること。
 - `apps/desktop/src-tauri` はルート workspace のメンバー。src-tauri/Cargo.toml に
   独自の `[workspace]` を書かないこと。
+
+### テスト
+
+三段構えの方針と現状の棚卸しは `docs/testing.md`。CI は `.github/workflows/ci.yml`
+(rust ジョブ = windows-latest で `cargo test --workspace` + clippy、frontend ジョブ =
+ubuntu-latest で `npm run build` → `npm test` → プラグインの `node --test`)。
+
+- **フロントのユニットテスト**は vitest + jsdom。`apps/desktop/src/**/*.test.ts(x)` に置き、
+  `npm test` (= `vitest run`) で走る。テストは `npm run build` の tsc でも型検査される。
+  React フックを触るテストは `src/test-utils.tsx` の `mount` / `renderHook` / `pressKey` を使う。
+- **バックエンド e2e** (`apps/desktop/src-tauri/tests/backend_e2e.rs`) は実アプリを起動して
+  MCP 越しに往復させる。ビルド済み exe が前提なので `#[ignore]` 付き。
+
+  ```powershell
+  cargo build -p questloom-desktop
+  cargo test -p questloom-desktop --test backend_e2e -- --ignored
+  ```
+
+### テスト用の環境変数
+
+実アプリを本物のデータ・ポートから切り離して起動するための上書き
+(`apps/desktop/src-tauri/src/env_override.rs`)。どちらも未設定なら従来どおり。
+
+- `QUESTLOOM_DATA_DIR` — `app_data_dir()`(`%APPDATA%\dev.reanisz.questloom`)の代わりに
+  このディレクトリを使う。
+- `QUESTLOOM_MCP_PORT` — コア設定の `mcpPort` を無視してこのポートで待ち受ける
+  (本物の 39150 と衝突させないため)。`u16` として読めない値は無視して設定値に落ちる。
 
 ## 設計ドキュメント
 

@@ -20,6 +20,11 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
+  /*
+   * `src` には `*.test.ts(x)` と `test-utils.tsx` も入る。除外していないのは、
+   * `npm run build` の tsc にテストまで型検査させたいから(vitest は型を見ない)。
+   * バンドルには入らない(エントリから辿られないため)。
+   */
   "include": ["src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

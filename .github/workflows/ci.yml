@@ -1,0 +1,81 @@
+# questloom の CI。docs/testing.md の「CI(GitHub Actions)方針」に対応する。
+#
+# - rust: windows-latest。src-tauri が MSVC リンク(WebView2 / tray-icon)を要するため、
+#   Linux ランナーでは workspace 全体をビルドできない。
+# - frontend: ubuntu-latest。tsc + vite build + vitest + プラグインの純関数テスト。
+#
+# GUI e2e (@wdio/tauri-service) と、ビルド済み exe を要するバックエンド e2e
+# (`cargo test -p questloom-desktop --test backend_e2e -- --ignored`)はここには入れない。
+# どちらも実アプリの起動を伴い、専用のジョブ設計が要るため T2 で検討する。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同じブランチへ続けて push したら、古い実行は打ち切る。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust ツールチェーンを用意する
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # target/ と ~/.cargo をキャッシュする。Tauri のビルドは重いので効果が大きい。
+      - name: cargo のキャッシュ
+        uses: Swatinem/rust-cache@v2
+
+      - name: フォーマット
+        run: cargo fmt --all -- --check
+
+      - name: テスト
+        run: cargo test --workspace
+
+      # --all-targets でテスト・ベンチも lint 対象に入れる。警告はすべてエラー扱い。
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  frontend:
+    name: Frontend (ubuntu)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node を用意する
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: 依存をインストールする
+        run: npm ci
+
+      # tsc(型検査。テストファイルも含む)+ vite build。
+      - name: ビルド
+        run: npm run build
+
+      - name: ユニットテスト (vitest)
+        run: npm test
+
+      # TS プラグインの純関数テスト。リポジトリルートから走らせる。
+      - name: プラグインのテスト
+        run: node --test examples/plugins/github.test.mjs
+        working-directory: .

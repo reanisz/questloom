@@ -3,6 +3,8 @@
  *
  * ドロップ時にドロップ先の前後カード id (`prevId` / `nextId`) を求めて `move_task` に渡す。
  * 両方 null なら列末尾。並び順キーの生成はバックエンドが行う。
+ * 着地点の計算そのものは、単体テストできるよう
+ * [`resolveDropPosition`](./dropPosition.ts) に純関数として切り出してある。
  */
 
 import {
@@ -25,22 +27,14 @@ import {
   type Board,
   type BoardColumnKey,
   type TaskCard,
-  type TaskId,
 } from "../types";
-import { Column, COLUMN_DROPPABLE_PREFIX, columnDomId } from "./Column";
+import { Column, columnDomId } from "./Column";
 import { DeferRail } from "./DeferRail";
+import { locate, resolveDropPosition } from "./dropPosition";
 import { CardBody } from "./TaskCardView";
 
 /** レールから展開したバケットを強調しておく時間 (ms)。 */
 const FOCUS_HIGHLIGHT_MS = 1600;
-
-/** カードが属する列を探す。 */
-function locate(columns: Board["columns"], taskId: TaskId): BoardColumnKey | null {
-  for (const { key } of BOARD_COLUMNS) {
-    if (columns[key].some((card) => card.id === taskId)) return key;
-  }
-  return null;
-}
 
 interface Props {
   board: Board;
@@ -87,43 +81,18 @@ export function BoardView({ board, expanded, onExpand }: Props) {
     if (!over) return;
 
     const activeId = String(active.id);
-    const overId = String(over.id);
-    const from = locate(board.columns, activeId);
-    if (!from) return;
+    const landing = resolveDropPosition(
+      board.columns,
+      activeId,
+      String(over.id),
+      active.rect.current.translated,
+      over.rect,
+    );
+    if (!landing) return;
 
-    const to = overId.startsWith(COLUMN_DROPPABLE_PREFIX)
-      ? (overId.slice(COLUMN_DROPPABLE_PREFIX.length) as BoardColumnKey)
-      : locate(board.columns, overId);
-    if (!to) return;
-
-    // 移動対象を除いた移動先の並び。ここへの挿入位置から前後 id を求める。
-    const items = board.columns[to].map((card) => card.id).filter((id) => id !== activeId);
-
-    let insertAt: number;
-    if (overId.startsWith(COLUMN_DROPPABLE_PREFIX) || overId === activeId) {
-      insertAt = items.length;
-    } else {
-      const overIndex = items.indexOf(overId);
-      if (overIndex < 0) return;
-      // ドラッグ中の矩形の中心が対象カードの中心より下なら後ろへ挿入する。
-      const dragged = active.rect.current.translated;
-      const below =
-        dragged != null && dragged.top + dragged.height / 2 > over.rect.top + over.rect.height / 2;
-      insertAt = overIndex + (below ? 1 : 0);
-    }
-
-    const prevId = items[insertAt - 1] ?? null;
-    const nextId = items[insertAt] ?? null;
-
-    // 同じ列で位置が変わらないなら何もしない。
-    if (from === to) {
-      const current = board.columns[from].map((card) => card.id);
-      const at = current.indexOf(activeId);
-      if ((current[at - 1] ?? null) === prevId && (current[at + 1] ?? null) === nextId) return;
-    }
-
-    applyLocalMove(activeId, to, prevId, nextId);
-    void mutate(() => api.moveTask(activeId, { column: to, prevId, nextId }));
+    const { column, prevId, nextId } = landing;
+    applyLocalMove(activeId, column, prevId, nextId);
+    void mutate(() => api.moveTask(activeId, { column, prevId, nextId }));
   };
 
   return (

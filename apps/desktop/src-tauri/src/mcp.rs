@@ -3,6 +3,9 @@
 //! 起動時とコア設定の変更時に [`McpSupervisor::apply`] が呼ばれ、
 //! `mcpEnabled` / `mcpPort` / `mcpToken` の変化に追随してサーバーを張り直す。
 //! ポート使用中などで起動に失敗しても、ログを出すだけでアプリは動き続ける。
+//!
+//! 待受ポートは `QUESTLOOM_MCP_PORT` が設定されていればそちらが優先される
+//! ([`crate::env_override`])。テストが本物の 39150 を奪わないための逃げ道。
 
 use std::sync::Arc;
 
@@ -43,7 +46,8 @@ impl McpSupervisor {
     /// 構成が変わっていなければ何もしない(冪等)。
     pub async fn apply(&self, settings: &CoreSettings) {
         let desired = settings.mcp_enabled.then(|| McpServerConfig {
-            port: settings.mcp_port,
+            // 環境変数が指定されていればコア設定より優先する(crate::env_override 参照)。
+            port: crate::env_override::mcp_port(settings.mcp_port),
             token: settings.mcp_token.clone(),
         });
 

@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -28,5 +29,14 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+
+  // ユニットテスト (vitest)。`npm test` = `vitest run`。
+  // DOM を触るテスト(keyboard の Esc レイヤー・viewMode の localStorage)があるので jsdom。
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // describe / it / expect は各テストが "vitest" から import する(暗黙のグローバルは使わない)。
+    globals: false,
   },
 }));

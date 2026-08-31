@@ -2988,6 +2988,7 @@ dependencies = [
  "questloom-core",
  "questloom-mcp",
  "questloom-store",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",
