@@ -13,7 +13,12 @@
 
 ### タスクの状態とバケットの考え方
 
-タスクの状態 (`status`) は 4 つ: `new` / `todo` / `doing` / `done`。
+タスクの状態 (`status`) は 5 つ: `new` / `todo` / `doing` / `done` / `watching`。
+
+`watching` は「即座に作業があるわけではないが、外部の変化を待っている」状態。
+**ユーザー以外の origin**(`mcp` / `ai` / `plugin:*`)による変化——履歴追記・内容更新・
+リソース追加・子タスク作成——を受けると、サービス層が自動的に `new` へ移動する(起床)。
+起床時も `scheduled` は保持する。ユーザー自身の編集では起床しない。
 
 Todo 内の時間バケット (Today/Tomorrow/ThisWeek/NextWeek/Future) は **DB に保存せず、
 `scheduled_*` カラムから表示時に導出する**。これにより「日付や週が変わったら自動的に正しい
