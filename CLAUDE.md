@@ -300,6 +300,10 @@ export default defineQuestloomPlugin({
 
 `defineQuestloomPlugin` は**ホストがグローバルに用意する**(import 不要)。
 `ctx` が提供するのは `tasks` / `settings` / `kv` / `fetch` / `schedule` / `onTaskEvent` / `log`。
+`ctx.tasks` は `createTask` / `updateTask` / `getTask` / `listTasks` / `completeTask` /
+`addTaskUpdate` / `addResource` / `listAllResources` / `moveTask`。
+`updateTask` はタイトル・詳細・締切の差分更新で、`origin` を持たない command なので
+更新してもタスクの出所は変わらない(**ユーザーが書いた文章を上書きしない**判断はプラグイン側の責任)。
 詳細は `sdk.ts` の JSDoc を参照。
 
 ### 既知の制限
@@ -327,24 +331,29 @@ export default defineQuestloomPlugin({
 
 ### GitHub プラグイン(Phase 6b)
 
-`examples/plugins/github.ts` が TS プラグイン層のパイロット実装。
-未完了タスクに紐づいた GitHub PR を監視し、新しいコメント・CI 失敗を検知したら
-「PR を確認する: owner/repo#123」というインスタントの子タスクを New に作る。
+`examples/plugins/github.ts` が TS プラグイン層のパイロット実装。機能は 2 つ。
+
+- **PR の監視**(PAT 必須)。未完了タスクに紐づいた GitHub PR を監視し、
+  新しいコメント・CI 失敗を検知したら「PR を確認する: owner/repo#123」という
+  インスタントの子タスクを New に作る。
+- **description の自動記入**(PAT 任意)。PR の URL が付いたタスクの description が
+  空なら、PR のタイトル・状態・作者・本文の先頭を書き込む。
 
 #### 導入
 
 1. `examples/plugins/github.ts` を `%APPDATA%\dev.reanisz.questloom\plugins\` へコピーする。
 2. 設定画面の「プラグイン」節で「プラグインを再読み込み」を押す。
 3. 同じ節に生えるフォームで **Personal Access Token** を入れて保存する
-   (PAT 未設定のうちは「PAT が未設定のためスキップします」とログに出るだけで何もしない)。
+   (PAT 未設定のうちは PR の監視は「PAT が未設定のためスキップします」とログに出るだけで
+   何もしない。description の自動記入は PAT 無しでも public な PR に対して動く)。
 
 | 設定 | 既定 | 内容 |
 |---|---|---|
-| `pat` (secret) | `""` | GitHub PAT。PR を読めるだけの最小権限で発行する |
+| `pat` (secret) | `""` | GitHub PAT。PR を読めるだけの最小権限で発行する。空なら認証なしで叩く |
 | `pollIntervalMinutes` (number) | `5` | ポーリング間隔。保存すると即座に張り直して 1 回走る |
-| `enabled` (boolean) | `true` | 偽ならポーリングしない |
+| `enabled` (boolean) | `true` | 偽なら 2 つの機能とも動かない |
 
-#### 動作
+#### 動作(PR の監視)
 
 1. `get_board` + `plugin_list_task_resources` で全タスクの関連リソースを走査し、
    `https://github.com/<owner>/<repo>/pull/<番号>` を検出する。
@@ -366,6 +375,30 @@ KV(`plugin_kv` の `github` 名前空間)に持つのは、PR ごとの
 エンドポイントごとの ETag、作成済み通知タスクの id)と、自分の login (`selfLogin`)。
 PR を初めて観測したラウンドではコメントの通知はせず「今」を起点に記録するだけにする
 (過去ログを丸ごと通知しないため)。CI が既に赤い場合だけは初回でも通知する。
+
+#### 動作(description の自動記入)
+
+1. トリガーは `ctx.onTaskEvent`(1.5 秒デバウンス)と、ポーリングラウンドの先頭
+   (イベントの取りこぼし対策)。**PAT の有無に関係なく走る**。
+2. 対象は「description が空(空白のみを含む)で、PR の URL を関連リソースに持つタスク」。
+   1 タスクにつきリソース順で最初に見つかった PR を 1 件だけ使う。
+   このプラグインが作ったタスク (`origin == plugin:github`) と削除済みタスクは対象外。
+   Done は対象に含める。
+3. `GET /repos/{owner}/{repo}/pulls/{番号}` を 1 回だけ叩き(PAT があれば `Authorization` 付き、
+   無ければ認証なし)、次の形を `update_task` で書き込む。本文が空なら 2 行目までで終わる。
+
+   ```
+   <PR タイトル>
+   <owner>/<repo>#<番号> (open|merged|closed) by <作者>
+
+   <PR 本文の先頭 400 文字。切ったら末尾に「…」>
+   ```
+
+4. 書き込んだら KV に `desc:<taskId>` = `{ pr: "<owner>/<repo>#<番号>", at: "<RFC 3339>" }` を残し、
+   **そのタスクには二度と触らない**。記入後にユーザーが編集・削除しても埋め直さない。
+   ボードから消えたタスクの記録はポーリングのラウンドで掃除する。
+5. 403 / 404(private・削除済み・認証なしでは見えない PR)は debug ログを出して黙って飛ばす。
+   レート制限に当たったらそのラウンドを打ち切る。ここでの失敗は PR の監視に波及しない。
 
 #### 検証
 
@@ -398,6 +431,9 @@ cd apps/desktop
 - コメントは 1 ページ(100 件)しか読まない。1 回のポーリング間隔に 100 件を超える更新があると
   次回に回る(`since` が進むので取りこぼしはしない)。
 - questloom が起動している間だけ動く。閉じている間の変化は次の起動時にまとめて拾う。
+- description の自動記入は **1 タスクにつき 1 回きり**。PR が更新されても追随しないし、
+  ユーザーが description を消しても埋め直さない(上書き事故を避けるための割り切り)。
+  PAT 無しの認証なしリクエストは GitHub のレート制限が厳しい(IP あたり 60 req/h)。
 
 ## 設定画面
 
@@ -462,7 +498,7 @@ CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-
 |---|---|
 | `main` | 全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
-| `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings` と設定画面専用の `plugin_directory` / `plugin_list_loaded` を除く)+ `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
+| `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings` と設定画面専用の `plugin_directory` / `plugin_list_loaded` を除く)+ `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
 
 plugin-host では第三者のプラグインコードが動くので、`get_settings` / `set_settings` /
 `get_runtime_status`(MCP トークンが載る)/ `ai_*` / タスクの削除・復元は**渡さない**。許可されていない

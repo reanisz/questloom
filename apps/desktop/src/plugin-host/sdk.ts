@@ -45,6 +45,7 @@ import type {
   TaskCard,
   TaskDetail,
   TaskId,
+  TaskPatch,
   TaskResource,
   TaskUpdateEntry,
 } from "../types";
@@ -111,6 +112,14 @@ export interface PluginTaskApi {
    * 既定は「New 列の通常タスク」。インスタントタスクにするなら `isInstant: true`。
    */
   createTask(input: NewTask): Promise<Task>;
+  /**
+   * タイトル・詳細・締切を更新する(差分のみ指定する)。
+   *
+   * `origin` を持たない command なので、更新してもタスクの出所は変わらない。
+   * **ユーザーが書いた文章を勝手に上書きしないこと**(空のときだけ埋める等の
+   * 判断はプラグイン側の責任)。
+   */
+  updateTask(taskId: TaskId, patch: TaskPatch): Promise<Task>;
   /** タスク詳細(リソース・履歴・親子込み)を取る。 */
   getTask(taskId: TaskId): Promise<TaskDetail>;
   /** 全タスクを 1 本の配列で返す(`get_board` を平坦化したもの)。 */

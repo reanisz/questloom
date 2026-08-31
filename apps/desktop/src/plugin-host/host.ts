@@ -141,6 +141,7 @@ function createContext(entry: ActivePlugin): PluginContext {
     // 本体と同じ型付きラッパー (src/api.ts) を使う。origin だけ引数で固定する。
     tasks: {
       createTask: (input) => api.createTask({ ...input, origin }),
+      updateTask: (taskId, patch) => api.updateTask(taskId, patch),
       getTask: (taskId) => api.getTask(taskId),
       listTasks: async () => {
         const board = await api.getBoard();

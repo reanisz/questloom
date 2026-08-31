@@ -19,6 +19,7 @@
     "allow-get-board",
     "allow-get-task",
     "allow-create-task",
+    "allow-update-task",
     "allow-move-task",
     "allow-complete-task",
     "allow-add-task-update",

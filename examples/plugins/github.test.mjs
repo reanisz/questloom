@@ -28,15 +28,20 @@ import { describe, it } from "node:test";
 globalThis.defineQuestloomPlugin = (plugin) => plugin;
 
 const {
+  buildPrDescription,
   buildReasons,
+  collectDescriptionTargets,
   collectPullRequestTargets,
   decideNoticeAction,
   mergeCi,
   parsePullRequestUrl,
+  pullRequestApiPath,
   selectNewComments,
+  shouldFillDescription,
   shouldNotifyCiFailure,
   summarizeCheckRuns,
   summarizeCombinedStatus,
+  truncateBody,
 } = await import("./github.ts");
 
 describe("parsePullRequestUrl", () => {
@@ -283,5 +288,145 @@ describe("buildReasons", () => {
   it("何も無ければ空(= 通知を作らない)", () => {
     assert.deepEqual(buildReasons([], null), []);
     assert.deepEqual(buildReasons([], { state: "success", failed: [] }), []);
+  });
+});
+
+describe("pullRequestApiPath", () => {
+  it("PR の URL から REST API のパスを作る", () => {
+    const ref = parsePullRequestUrl("https://github.com/rust-lang/rust/pull/1234/files");
+    assert.equal(pullRequestApiPath(ref), "/repos/rust-lang/rust/pulls/1234");
+  });
+
+  it("大文字小文字は URL のまま(キーだけが小文字)", () => {
+    const ref = parsePullRequestUrl("https://github.com/Foo/Bar-Baz/pull/9");
+    assert.equal(pullRequestApiPath(ref), "/repos/Foo/Bar-Baz/pulls/9");
+  });
+});
+
+describe("shouldFillDescription", () => {
+  const origin = "plugin:github";
+  const base = { id: "t1", origin: "user", description: "", deletedAt: null };
+
+  it("詳細が空のタスクは埋める", () => {
+    assert.equal(shouldFillDescription(base, origin, false), true);
+    assert.equal(shouldFillDescription({ ...base, description: "   \n " }, origin, false), true);
+  });
+
+  it("ユーザーが書いた文章は上書きしない", () => {
+    assert.equal(shouldFillDescription({ ...base, description: "手で書いたメモ" }, origin, false), false);
+  });
+
+  it("一度記入したタスクは二度と触らない(消されても埋め直さない)", () => {
+    assert.equal(shouldFillDescription(base, origin, true), false);
+  });
+
+  it("自分が作った通知タスクと削除済みタスクは対象外", () => {
+    assert.equal(shouldFillDescription({ ...base, origin }, origin, false), false);
+    assert.equal(
+      shouldFillDescription({ ...base, deletedAt: "2026-09-01T00:00:00Z" }, origin, false),
+      false,
+    );
+  });
+
+  it("Done でも埋める(過去の PR でも手掛かりは残したい)", () => {
+    assert.equal(shouldFillDescription({ ...base, status: "done" }, origin, false), true);
+  });
+});
+
+describe("collectDescriptionTargets", () => {
+  const origin = "plugin:github";
+
+  it("詳細が空で PR URL を持つタスクを、タスクごとに 1 件だけ集める", () => {
+    const tasks = [
+      { id: "t1", origin: "user", description: "", deletedAt: null },
+      { id: "t2", origin: "user", description: "既に書いてある", deletedAt: null },
+      { id: "t3", origin: "user", description: "", deletedAt: null },
+      { id: "t4", origin, description: "", deletedAt: null },
+    ];
+    const resources = [
+      // 最初に見つかった PR を使う。
+      { taskId: "t1", kind: "url", value: "https://github.com/o/r/pull/1" },
+      { taskId: "t1", kind: "url", value: "https://github.com/o/r/pull/2" },
+      // 詳細が埋まっているタスクは対象外。
+      { taskId: "t2", kind: "url", value: "https://github.com/o/r/pull/3" },
+      // PR 以外・URL 以外は無視。
+      { taskId: "t3", kind: "url", value: "https://example.com/" },
+      { taskId: "t3", kind: "file", value: "https://github.com/o/r/pull/4" },
+      // 自分が作った通知タスクは対象外。
+      { taskId: "t4", kind: "url", value: "https://github.com/o/r/pull/5" },
+    ];
+    assert.deepEqual(
+      collectDescriptionTargets(tasks, resources, origin, new Set()).map((t) => [t.taskId, t.ref.key]),
+      [["t1", "o/r#1"]],
+    );
+  });
+
+  it("記入済みのタスクは外す", () => {
+    const tasks = [{ id: "t1", origin: "user", description: "", deletedAt: null }];
+    const resources = [{ taskId: "t1", kind: "url", value: "https://github.com/o/r/pull/1" }];
+    assert.deepEqual(collectDescriptionTargets(tasks, resources, origin, new Set(["t1"])), []);
+  });
+
+  it("ボードに無いタスクのリソースは無視する", () => {
+    const resources = [{ taskId: "ghost", kind: "url", value: "https://github.com/o/r/pull/1" }];
+    assert.deepEqual(collectDescriptionTargets([], resources, origin, new Set()), []);
+  });
+});
+
+describe("truncateBody", () => {
+  it("改行を LF にそろえて前後の空白を落とす", () => {
+    assert.equal(truncateBody("\r\n  一行目\r\n二行目  \r\n"), "一行目\n二行目");
+  });
+
+  it("上限を超えたら切って … を付ける", () => {
+    assert.equal(truncateBody("abcdefghij", 4), "abcd…");
+    // 切れ目の空白は残さない。
+    assert.equal(truncateBody("abc defghij", 4), "abc…");
+  });
+
+  it("上限ちょうどなら切らない", () => {
+    assert.equal(truncateBody("abcd", 4), "abcd");
+  });
+});
+
+describe("buildPrDescription", () => {
+  const ref = parsePullRequestUrl("https://github.com/rust-lang/rust/pull/42");
+
+  it("タイトル・出典・本文を並べる", () => {
+    const description = buildPrDescription(
+      { title: "Fix the thing", state: "open", user: { login: "alice" }, body: "本文です。" },
+      ref,
+    );
+    assert.equal(description, "Fix the thing\nrust-lang/rust#42 (open) by alice\n\n本文です。");
+  });
+
+  it("本文が空なら本文部分を省く", () => {
+    const description = buildPrDescription(
+      { title: "Fix", state: "open", user: { login: "alice" }, body: null },
+      ref,
+    );
+    assert.equal(description, "Fix\nrust-lang/rust#42 (open) by alice");
+  });
+
+  it("merged フラグを state より優先する", () => {
+    assert.match(
+      buildPrDescription({ title: "T", state: "closed", merged: true }, ref),
+      /^T\nrust-lang\/rust#42 \(merged\)$/,
+    );
+    assert.match(
+      buildPrDescription({ title: "T", state: "closed", merged: false }, ref),
+      /\(closed\)$/,
+    );
+  });
+
+  it("タイトルや作者が取れなくても壊れない", () => {
+    assert.equal(buildPrDescription({}, ref), "rust-lang/rust#42\nrust-lang/rust#42 (open)");
+  });
+
+  it("長い本文は 400 文字で切る", () => {
+    const body = "あ".repeat(500);
+    const description = buildPrDescription({ title: "T", body }, ref);
+    const tail = description.split("\n\n")[1];
+    assert.equal(tail, `${"あ".repeat(400)}…`);
   });
 });

@@ -330,6 +330,7 @@ mod tests {
                 "get_board",
                 "get_task",
                 "create_task",
+                "update_task",
                 "move_task",
                 "complete_task",
                 "add_task_update",

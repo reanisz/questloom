@@ -11,6 +11,12 @@
  * を検知したら「PR を確認する: owner/repo#123」というインスタントの子タスクを New に作る。
  * 既に未完了の通知タスクがあれば、新しく作らずアップデート履歴へ追記する。
  *
+ * もう一つ、**description の自動記入**をする。PR の URL が付いたタスクの description が
+ * 空なら、PR のタイトル・状態・作者・本文の先頭を書き込む。タスクイベント
+ * (`ctx.onTaskEvent`)で即座に反応し、ポーリングでも取りこぼしを拾う。
+ * 一度記入したタスクは KV に記録して二度と触らない(ユーザーの文章を上書きしないため)。
+ * こちらは **PAT が無くても動く**(認証なしで public リポジトリの PR は読める)。
+ *
  * ## 使い方
  *
  * 1. このファイルを設定画面の「プラグイン」節に出ているフォルダ
@@ -19,6 +25,7 @@
  * 3. 設定画面のプラグイン節で **Personal Access Token** を入れて保存する。
  *    必要なスコープは PR を読めるだけ(public のみなら fine-grained の Pull requests: Read、
  *    private も見るならそのリポジトリを対象に含めること)。
+ *    PR の監視には PAT が要る。description の自動記入だけなら未設定でもよい。
  *
  * ## 実装メモ
  *
@@ -31,6 +38,8 @@
  *   認証付き GET と ETag による条件付きリクエストがそのまま通る。
  * - PR ごとの前回状態は `ctx.kv` に持つ(キーは `pr:<owner>/<repo>#<num>`)。
  *   PR がクローズ/マージされたら破棄し、どのタスクからも参照されなくなったキーも掃除する。
+ * - description を記入したタスクは `desc:<taskId>` に記録する
+ *   (値は `{ pr, at }`)。ボードから消えたタスクの記録は掃除する。
  * - 判定ロジックは純関数に切り出してファイル末尾で `export` している
  *   (ホストは default export しか見ないので無害。`examples/plugins/github.test.mjs` が検証する)。
  */
@@ -48,6 +57,19 @@ const API_VERSION = "2022-11-28";
 
 /** KV に置く PR 状態のキー接頭辞。 */
 const PR_KEY_PREFIX = "pr:";
+
+/** description を記入済みのタスクを覚えておく KV キーの接頭辞。 */
+const DESC_KEY_PREFIX = "desc:";
+
+/** description に載せる PR 本文の最大文字数。超えたら切って「…」を付ける。 */
+const DESCRIPTION_BODY_LIMIT = 400;
+
+/**
+ * タスクイベントから description 記入までの待ち時間(ミリ秒)。
+ *
+ * リソース追加の直後は他の更新も連続しがちなので、少し待ってまとめて処理する。
+ */
+const FILL_DEBOUNCE_MS = 1_500;
 
 /** 自分の login をキャッシュする KV キー。 */
 const SELF_LOGIN_KEY = "selfLogin";
@@ -145,6 +167,12 @@ interface GhPullRequest {
   state?: string;
   merged?: boolean;
   head?: { sha?: string };
+  /** PR のタイトル(description の自動記入で使う)。 */
+  title?: string;
+  /** PR の本文。空のことも null のこともある。 */
+  body?: string | null;
+  /** 作成者。 */
+  user?: GhUser | null;
 }
 
 interface GhComment {
@@ -171,6 +199,17 @@ interface GhStatusContext {
 interface GhCombinedStatus {
   state?: string;
   statuses?: GhStatusContext[];
+}
+
+/** 2xx 以外が返ってきたことを表す例外。ステータスで扱いを変えるために持つ。 */
+class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
 }
 
 /** レート制限に当たったことを表す例外。捕まえたらそのラウンドを打ち切る。 */
@@ -258,6 +297,119 @@ function collectPullRequestTargets(
   for (const target of targets) target.taskIds.sort();
   targets.sort((a, b) => (a.ref.key < b.ref.key ? -1 : a.ref.key > b.ref.key ? 1 : 0));
   return targets;
+}
+
+/* ------------------------------------------- description の自動記入(純関数) */
+
+/** PR 本体を取りに行く REST API のパス(`GET /repos/{owner}/{repo}/pulls/{number}`)。 */
+function pullRequestApiPath(ref: PullRequestRef): string {
+  return `/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`;
+}
+
+/** `shouldFillDescription` / `collectDescriptionTargets` が受け取るタスク。 */
+interface FillTaskLike {
+  id: string;
+  origin: string;
+  description: string;
+  /** ソフトデリート時刻。生きているタスクは `null`。 */
+  deletedAt?: string | null;
+}
+
+/** description を記入する対象 1 件。 */
+interface DescriptionTarget {
+  taskId: string;
+  ref: PullRequestRef;
+}
+
+/**
+ * このタスクの description を PR の情報で埋めてよいか。
+ *
+ * **ユーザーが書いた文章は絶対に上書きしない**のが要件なので、条件は厳しくとる。
+ *
+ * - 既に何か書かれていれば触らない(空白だけなら空とみなす)。
+ * - 一度記入したタスクは二度と触らない (`alreadyFilled`)。
+ *   記入後にユーザーが消したとしても、それは「空にした」という意思表示なので埋め直さない。
+ * - このプラグインが作った通知タスクは対象外(description は自分で組み立てている)。
+ * - 削除済み(ソフトデリート)のタスクも対象外。
+ *
+ * Done のタスクは除いていない。過去の PR でも手掛かりが残る方が嬉しいため。
+ */
+function shouldFillDescription(
+  task: FillTaskLike,
+  pluginOrigin: string,
+  alreadyFilled: boolean,
+): boolean {
+  if (alreadyFilled) return false;
+  if (task.origin === pluginOrigin) return false;
+  if (task.deletedAt) return false;
+  return String(task.description ?? "").trim() === "";
+}
+
+/**
+ * description を埋めるべきタスクと、その元になる PR を組み立てる。
+ *
+ * 1 タスクにつき 1 件(関連リソースの並び順で最初に見つかった PR)。戻りはタスク id の昇順。
+ */
+function collectDescriptionTargets(
+  tasks: readonly FillTaskLike[],
+  resources: readonly TargetResourceLike[],
+  pluginOrigin: string,
+  filledTaskIds: ReadonlySet<string>,
+): DescriptionTarget[] {
+  const eligible = new Set<string>();
+  for (const task of tasks) {
+    if (shouldFillDescription(task, pluginOrigin, filledTaskIds.has(task.id))) {
+      eligible.add(task.id);
+    }
+  }
+
+  const picked = new Map<string, DescriptionTarget>();
+  for (const resource of resources) {
+    if (resource.kind !== "url") continue;
+    if (!eligible.has(resource.taskId) || picked.has(resource.taskId)) continue;
+    const ref = parsePullRequestUrl(resource.value);
+    if (!ref) continue;
+    picked.set(resource.taskId, { taskId: resource.taskId, ref });
+  }
+
+  const targets = [...picked.values()];
+  targets.sort((a, b) => (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
+  return targets;
+}
+
+/** PR の状態を 1 語で表す(`merged` は `state` に出ないので `merged` フラグを優先する)。 */
+function prStateLabel(pr: GhPullRequest): string {
+  if (pr.merged === true) return "merged";
+  const state = (pr.state ?? "").trim().toLowerCase();
+  return state === "" ? "open" : state;
+}
+
+/** PR 本文を description に載せられる長さへ切り詰める。改行は LF にそろえる。 */
+function truncateBody(body: string, limit: number = DESCRIPTION_BODY_LIMIT): string {
+  const normalized = body.replace(/\r\n?/g, "\n").trim();
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit).trimEnd()}…`;
+}
+
+/**
+ * PR の情報から description を組み立てる。
+ *
+ * ```
+ * <PR タイトル>
+ * <owner>/<repo>#<番号> (open) by <作者>
+ *
+ * <本文の先頭>
+ * ```
+ *
+ * 本文が空なら 2 行目までで終わる。PR の URL は関連リソースに残っているので載せない。
+ */
+function buildPrDescription(pr: GhPullRequest, ref: PullRequestRef): string {
+  const slug = `${ref.owner}/${ref.repo}#${ref.number}`;
+  const title = (pr.title ?? "").trim() || slug;
+  const author = (pr.user?.login ?? "").trim();
+  const meta = `${slug} (${prStateLabel(pr)})${author ? ` by ${author}` : ""}`;
+  const body = truncateBody(String(pr.body ?? ""));
+  return body ? `${title}\n${meta}\n\n${body}` : `${title}\n${meta}`;
 }
 
 /** RFC 3339 文字列をミリ秒に直す。読めなければ `NaN`。 */
@@ -447,19 +599,25 @@ interface GhClient {
    * `If-None-Match` を付け、200 なら新しい ETag を書き戻す。
    *
    * @throws {RateLimitError} レート制限に当たった場合。
-   * @throws {Error} その他の非 2xx。
+   * @throws {HttpError} その他の非 2xx。
    */
   get<T>(path: string, etags: Record<string, string>): Promise<GhResult<T>>;
 }
 
+/**
+ * クライアントを作る。
+ *
+ * `pat` が空文字なら `Authorization` を付けずに投げる。認証なしでも public な PR は
+ * 読めるので、description の自動記入は PAT 未設定でも動く(レート制限は厳しくなる)。
+ */
 function createClient(ctx: Ctx, pat: string): GhClient {
   return {
     async get<T>(path: string, etags: Record<string, string>): Promise<GhResult<T>> {
       const headers: Record<string, string> = {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${pat}`,
         "X-GitHub-Api-Version": API_VERSION,
       };
+      if (pat) headers.Authorization = `Bearer ${pat}`;
       const known = etags[path];
       if (known) headers["If-None-Match"] = known;
 
@@ -485,11 +643,17 @@ function createClient(ctx: Ctx, pat: string): GhClient {
             })。次回のポーリングまで待ちます。`,
           );
         }
-        throw new Error(`GET ${path} が ${response.status} を返しました(権限不足の可能性)。`);
+        throw new HttpError(
+          response.status,
+          `GET ${path} が ${response.status} を返しました(権限不足の可能性)。`,
+        );
       }
 
       if (!response.ok) {
-        throw new Error(`GET ${path} が ${response.status} ${response.statusText} を返しました。`);
+        throw new HttpError(
+          response.status,
+          `GET ${path} が ${response.status} ${response.statusText} を返しました。`,
+        );
       }
 
       const etag = response.headers.get("etag");
@@ -698,6 +862,114 @@ async function pruneStates(ctx: Ctx, targets: readonly PullRequestTarget[]): Pro
   }
 }
 
+/* ------------------------------------------- description の自動記入(実行部) */
+
+/** KV に残す「記入済み」の記録。 */
+interface DescriptionRecord {
+  /** 記入元の PR (`owner/repo#番号`)。 */
+  pr: string;
+  /** 記入した時刻 (RFC 3339)。 */
+  at: string;
+}
+
+/** 記入済み記録の KV キー。 */
+function descKey(taskId: string): string {
+  return `${DESC_KEY_PREFIX}${taskId}`;
+}
+
+/**
+ * 記入済みのタスク id を読む。
+ *
+ * 読めなかったときは `null` を返す。**「まだ記入していない」と誤認して
+ * ユーザーの文章を上書きするより、そのラウンドを諦める方が安全**なため。
+ */
+async function loadFilledTaskIds(ctx: Ctx): Promise<Set<string> | null> {
+  try {
+    const keys = await ctx.kv.keys();
+    return new Set(
+      keys
+        .filter((key) => key.startsWith(DESC_KEY_PREFIX))
+        .map((key) => key.slice(DESC_KEY_PREFIX.length)),
+    );
+  } catch (error) {
+    ctx.log.warn(`記入済みの記録を読めませんでした: ${describeError(error)}`);
+    return null;
+  }
+}
+
+/** ボードから消えたタスクの記入済み記録を捨てる。 */
+async function pruneDescriptionRecords(
+  ctx: Ctx,
+  tasks: readonly { id: string }[],
+): Promise<void> {
+  const alive = new Set(tasks.map((task) => task.id));
+  let keys: string[];
+  try {
+    keys = await ctx.kv.keys();
+  } catch {
+    return; // 列挙できないだけなら次回に回す(loadFilledTaskIds が既に警告している)。
+  }
+  for (const key of keys) {
+    if (!key.startsWith(DESC_KEY_PREFIX)) continue;
+    if (alive.has(key.slice(DESC_KEY_PREFIX.length))) continue;
+    await ctx.kv.set(key, null);
+    ctx.log.debug(`消えたタスクの記入済み記録を破棄しました: ${key}`);
+  }
+}
+
+/**
+ * description が空のタスクを PR の情報で埋める。
+ *
+ * PR 監視と違って **PAT が無くても動く**(認証なしで public な PR は読める)ので、
+ * ポーリング本体より前に、PAT の有無と関係なく走らせる。
+ *
+ * @param prune ボードから消えたタスクの記録も掃除するか(ポーリングのときだけ真)。
+ */
+async function fillDescriptions(
+  ctx: Ctx,
+  settings: Record<string, unknown>,
+  prune: boolean,
+): Promise<void> {
+  if (settings.enabled === false) return;
+
+  const tasks = await ctx.tasks.listTasks();
+  if (prune) await pruneDescriptionRecords(ctx, tasks);
+
+  const filled = await loadFilledTaskIds(ctx);
+  if (!filled) return;
+
+  const pluginOrigin = `plugin:${ctx.manifest.id}`;
+  const resources = await ctx.tasks.listAllResources();
+  const targets = collectDescriptionTargets(tasks, resources, pluginOrigin, filled);
+  if (targets.length === 0) return;
+
+  const client = createClient(ctx, String(settings.pat ?? "").trim());
+  for (const target of targets) {
+    try {
+      // ETag は使わない(1 タスクにつき 1 回きりの取得なので使い回す相手がいない)。
+      const result = await client.get<GhPullRequest>(pullRequestApiPath(target.ref), {});
+      if (!result.data) continue;
+      await ctx.tasks.updateTask(target.taskId, {
+        description: buildPrDescription(result.data, target.ref),
+      });
+      const record: DescriptionRecord = { pr: target.ref.key, at: new Date().toISOString() };
+      await ctx.kv.set(descKey(target.taskId), record);
+      ctx.log(`タスク ${target.taskId} の詳細を ${target.ref.key} から記入しました。`);
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        ctx.log.warn(`${error.message} (残りの description 記入は中断しました)`);
+        return;
+      }
+      if (error instanceof HttpError && (error.status === 403 || error.status === 404)) {
+        // private / 削除済み / 認証なしでは見えない PR。触れないだけなので静かに流す。
+        ctx.log.debug(`${target.ref.key} は取得できませんでした (${error.status})。`);
+        continue;
+      }
+      ctx.log.warn(`${target.ref.key} の PR 情報を取得できませんでした: ${describeError(error)}`);
+    }
+  }
+}
+
 /** ポーリング 1 ラウンド。 */
 async function poll(ctx: Ctx): Promise<void> {
   const settings = await ctx.settings.get();
@@ -705,6 +977,15 @@ async function poll(ctx: Ctx): Promise<void> {
     ctx.log.debug("無効化されているためスキップします。");
     return;
   }
+
+  // イベントを取りこぼしていた分をここで拾う。PAT の有無に関係なく走らせる。
+  // ここで失敗しても PR の監視は続ける(2 つの機能は互いに独立)。
+  try {
+    await fillDescriptions(ctx, settings, true);
+  } catch (error) {
+    ctx.log.warn(`description の自動記入に失敗しました: ${describeError(error)}`);
+  }
+
   const pat = String(settings.pat ?? "").trim();
   if (!pat) {
     ctx.log("PAT が未設定のためスキップします(設定画面のプラグイン節で設定してください)。");
@@ -757,7 +1038,8 @@ export default defineQuestloomPlugin({
     version: "0.1.0",
     description:
       "未完了タスクに紐づいた GitHub PR を監視し、新しいコメントや CI 失敗を検知したら" +
-      "「PR を確認する」子タスクを New に作る。",
+      "「PR を確認する」子タスクを New に作る。PR の URL が付いたタスクの詳細が空なら、" +
+      "PR のタイトル・状態・本文の先頭を自動で書き込む(こちらは PAT 不要)。",
     // ctx.fetch はここに書いたホストにしか出られない(完全一致)。
     fetchDomains: ["api.github.com"],
     settingsSchema: [
@@ -766,7 +1048,9 @@ export default defineQuestloomPlugin({
         label: "Personal Access Token",
         type: "secret",
         default: "",
-        hint: "PR を読める最小限の権限で発行すること。現状は DB に平文で保存される。",
+        hint:
+          "PR を読める最小限の権限で発行すること。現状は DB に平文で保存される。" +
+          "未設定でも description の自動記入(public な PR のみ)は動く。",
       },
       {
         key: "pollIntervalMinutes",
@@ -817,6 +1101,46 @@ export default defineQuestloomPlugin({
       stopSchedule = ctx.schedule(interval, runOnce);
     };
 
+    /* --- description の自動記入(タスクイベント駆動) ------------------- */
+
+    /** 記入処理が走っている間は真。自分の更新で再入するのを防ぐ。 */
+    let filling = false;
+    /** 記入中に届いたイベント。終わったらもう一度だけ回す。 */
+    let fillAgain = false;
+    /** デバウンス用のタイマー(webview では number だが、環境差を吸収しておく)。 */
+    let fillTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const fillNow = async (): Promise<void> => {
+      if (filling) {
+        fillAgain = true;
+        return;
+      }
+      filling = true;
+      try {
+        await fillDescriptions(ctx, await ctx.settings.get(), false);
+      } catch (error) {
+        ctx.log.warn(`description の自動記入に失敗しました: ${describeError(error)}`);
+      } finally {
+        filling = false;
+      }
+      if (fillAgain) {
+        fillAgain = false;
+        scheduleFill();
+      }
+    };
+
+    /** 少し待ってから記入を走らせる(連続する変更をまとめるため)。 */
+    function scheduleFill(): void {
+      if (fillTimer !== null) clearTimeout(fillTimer);
+      fillTimer = setTimeout(() => {
+        fillTimer = null;
+        void fillNow();
+      }, FILL_DEBOUNCE_MS);
+    }
+
+    // リソースが付いた直後に反応する。取りこぼしはポーリングが拾う。
+    const offTasks = ctx.onTaskEvent(scheduleFill);
+
     const offSettings = ctx.settings.onChange((next) => {
       // PAT が差し替わった可能性があるので、自分の login のキャッシュは捨てる。
       void ctx.kv.set(SELF_LOGIN_KEY, null).catch((error: unknown) => {
@@ -829,6 +1153,8 @@ export default defineQuestloomPlugin({
 
     return () => {
       offSettings();
+      offTasks();
+      if (fillTimer !== null) clearTimeout(fillTimer);
       stopSchedule?.();
       ctx.log("GitHub プラグインを停止しました。");
     };
@@ -840,13 +1166,18 @@ export default defineQuestloomPlugin({
 // ホストは default export しか見ないので、名前付き export を足しても動作には影響しない。
 // `examples/plugins/github.test.mjs` がここを検証する。
 export {
+  buildPrDescription,
   buildReasons,
+  collectDescriptionTargets,
   collectPullRequestTargets,
   decideNoticeAction,
   mergeCi,
   parsePullRequestUrl,
+  pullRequestApiPath,
   selectNewComments,
+  shouldFillDescription,
   shouldNotifyCiFailure,
   summarizeCheckRuns,
   summarizeCombinedStatus,
+  truncateBody,
 };
