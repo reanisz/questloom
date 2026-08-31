@@ -348,6 +348,25 @@ manifest の `settingsSchema` からフォームを自動生成し、プラグ�
   参照するのは https://v2.tauri.app のドキュメントのみとする。
 - 権限は capabilities(`apps/desktop/src-tauri/capabilities/`)で最小限に構成する。
 
+### ウィンドウの生成は setup フックの中で行う
+
+`tauri.conf.json` の 3 つのウィンドウ定義は**すべて `"create": false`** にしてあり、生成は
+`src-tauri/src/lib.rs` の `create_windows`(setup フック内、`app.manage` の後)が
+`WebviewWindowBuilder::from_config` で行う。
+
+Tauri v2 は「conf 定義のウィンドウを生成 → ユーザーの setup フック」の順に動くため、
+`create: true`(既定)のままだと webview の最初の `invoke` が `app.manage(AppState)` を
+追い越し、`state not managed for field 'state' on command 'get_board'` になる。
+dev サーバー経由ではフロントのロードが遅くて表面化しないが、アセット同梱ビルド
+(`npm run build; cargo run -p questloom-desktop --features tauri/custom-protocol`)では
+毎回初回描画が失敗する。フロントは `tasks-changed` 駆動なので、次のイベントが来るまで
+ボードが空のまま残る。
+
+**ウィンドウの属性(サイズ・可視性・フォーカス等)は conf 側に置いたままにすること。**
+Rust 側は定義をそのまま `from_config` に渡すだけで、capability の `windows` 対応づけも
+従来どおりラベルで決まる。`create: false` が保たれていることは
+`src-tauri/src/lib.rs` の `windows_are_created_by_the_setup_hook` テストが見る。
+
 ### ウィンドウ別の command 許可(ACL)
 
 アプリ独自 command も **Tauri の ACL の対象にしている**。`build.rs` が

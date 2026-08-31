@@ -8,6 +8,14 @@
 //! オーバーレイウィンドウは New タスクがある間だけ表示される。
 //! plugin-host ウィンドウは常に非表示で、TS プラグイン([`plugin_host`])を実行する。
 //!
+//! **3 つとも `tauri.conf.json` で `"create": false` にし、生成は setup フックの中で
+//! [`create_windows`] が行う。** Tauri は「conf 定義のウィンドウを生成 → setup フック」の順で
+//! 動くため、既定のままだと webview の最初の `invoke` が [`AppState`] の `manage` を
+//! 追い越し、`state not managed for field 'state'` で初回描画が失敗しうる
+//! (アセット同梱ビルドでは毎回起きる)。属性は conf 側に残したままなので、
+//! ウィンドウの見た目・capability の対応づけは従来どおり conf と
+//! `capabilities/*.json` で決まる。
+//!
 //! **ウィンドウごとの command 許可**は `capabilities/*.json` で決まる。
 //! アプリ独自 command の一覧は [`app_commands::APP_COMMANDS`] が唯一の定義で、
 //! `build.rs` がそこから permission を生成する。下の
@@ -88,6 +96,10 @@ pub fn run() {
             // Rust 側はそのロード結果を受け取るレジストリだけを用意する。
             app.manage(plugin_host::PluginRegistry::new());
 
+            // State が出揃ってからウィンドウを作る。逆順にすると webview の初回 invoke が
+            // manage を追い越して "state not managed" になる(モジュールドキュメント参照)。
+            create_windows(app)?;
+
             tray::setup(&handle)?;
 
             events::spawn_bridge(handle.clone(), &service);
@@ -153,6 +165,24 @@ pub fn run() {
         });
 }
 
+/// `tauri.conf.json` のウィンドウ定義(`app.windows`)からウィンドウを生成する。
+///
+/// 定義はすべて `"create": false` にしてあるので、Tauri は自動生成しない。
+/// ここでは定義をそのまま [`tauri::WebviewWindowBuilder::from_config`] に渡すだけで、
+/// サイズ・可視性・フォーカス等の属性は conf 側の記述がそのまま効く。
+///
+/// # Errors
+/// ウィンドウの生成に失敗した場合。
+fn create_windows(app: &tauri::App) -> tauri::Result<()> {
+    // build() が app を借りるので、定義は先に取り出しておく。
+    let windows = app.config().app.windows.clone();
+    for config in &windows {
+        tracing::debug!(label = %config.label, "ウィンドウを生成します");
+        tauri::WebviewWindowBuilder::from_config(app.handle(), config)?.build()?;
+    }
+    Ok(())
+}
+
 /// 内蔵 MCP サーバーを止める。停止に手間取っても終了を待たせすぎない。
 fn stop_mcp(app: &tauri::AppHandle) {
     let Some(supervisor) = app.try_state::<Arc<McpSupervisor>>() else {
@@ -193,6 +223,31 @@ mod tests {
 
     fn allowed(commands: &[&str]) -> BTreeSet<String> {
         commands.iter().map(|c| allow_permission(c)).collect()
+    }
+
+    const CONFIG: &str = include_str!("../tauri.conf.json");
+
+    /// ウィンドウは Tauri に自動生成させず、`setup` の中で作る。
+    ///
+    /// 自動生成(`create` 既定 true)に戻すと、webview の最初の `invoke` が
+    /// `app.manage(AppState)` を追い越して `state not managed` になる。
+    /// アセット同梱ビルドでは初回描画が必ず失敗するので、ここで固定しておく。
+    #[test]
+    fn windows_are_created_by_the_setup_hook() {
+        let value: serde_json::Value =
+            serde_json::from_str(CONFIG).expect("tauri.conf.json は JSON として読める");
+        let windows = value["app"]["windows"]
+            .as_array()
+            .expect("app.windows は配列");
+        assert_eq!(windows.len(), 3, "main / overlay / plugin-host の 3 つ");
+        for window in windows {
+            assert_eq!(
+                window["create"],
+                serde_json::Value::Bool(false),
+                "{} は create: false にすること(生成は crate::create_windows)",
+                window["label"]
+            );
+        }
     }
 
     const MAIN: &str = include_str!("../capabilities/default.json");
