@@ -35,6 +35,7 @@ const {
   decideNoticeAction,
   mergeCi,
   parsePullRequestUrl,
+  planNotification,
   pullRequestApiPath,
   selectNewComments,
   shouldFillDescription,
@@ -124,6 +125,15 @@ describe("collectPullRequestTargets", () => {
   it("ボードに無いタスクのリソースは無視する", () => {
     const resources = [{ taskId: "ghost", kind: "url", value: "https://github.com/o/r/pull/1" }];
     assert.deepEqual(collectPullRequestTargets([], resources, origin), []);
+  });
+
+  it("監視中のタスクは未完了なので監視対象に残る(起床させる相手になる)", () => {
+    const tasks = [{ id: "w1", status: "watching", origin: "user" }];
+    const resources = [{ taskId: "w1", kind: "url", value: "https://github.com/o/r/pull/1" }];
+    assert.deepEqual(
+      collectPullRequestTargets(tasks, resources, origin).map((t) => t.taskIds),
+      [["w1"]],
+    );
   });
 });
 
@@ -270,6 +280,70 @@ describe("decideNoticeAction", () => {
   it("完了済み・削除済みなら作り直す", () => {
     assert.deepEqual(decideNoticeAction("closed", statuses), { kind: "create" });
     assert.deepEqual(decideNoticeAction("vanished", statuses), { kind: "create" });
+  });
+});
+
+describe("planNotification", () => {
+  it("参照元が監視中なら、通知タスクを作らずそのタスクを起こす", () => {
+    const statuses = new Map([["t1", "watching"]]);
+    assert.deepEqual(planNotification(["t1"], statuses, null), {
+      kind: "wake",
+      taskIds: ["t1"],
+    });
+  });
+
+  it("監視中のタスクが複数あれば全部起こす(監視中でないものは触らない)", () => {
+    const statuses = new Map([
+      ["t1", "watching"],
+      ["t2", "todo"],
+      ["t3", "watching"],
+    ]);
+    assert.deepEqual(planNotification(["t1", "t2", "t3"], statuses, null), {
+      kind: "wake",
+      taskIds: ["t1", "t3"],
+    });
+  });
+
+  it("監視中が 1 つでもあれば、通知タスクが残っていても起床を優先する", () => {
+    const statuses = new Map([
+      ["t1", "watching"],
+      ["notice", "new"],
+    ]);
+    assert.deepEqual(planNotification(["t1"], statuses, "notice"), {
+      kind: "wake",
+      taskIds: ["t1"],
+    });
+  });
+
+  it("監視中が無ければ従来どおり(未完了の通知タスクへ追記 / 無ければ作成)", () => {
+    const statuses = new Map([
+      ["t1", "todo"],
+      ["notice", "new"],
+    ]);
+    assert.deepEqual(planNotification(["t1"], statuses, "notice"), {
+      kind: "append",
+      taskId: "notice",
+    });
+    assert.deepEqual(planNotification(["t1"], statuses, null), { kind: "create" });
+  });
+
+  /**
+   * 起床したタスクは次のラウンドでは `new` なので、そのまま従来ルートへ戻る。
+   * 起床では noticeTaskId を触らないので、残っている通知タスクへの追記も効き続ける。
+   */
+  it("起きたあと(watching でなくなった後)は従来ルートに戻る", () => {
+    const woken = new Map([
+      ["t1", "new"],
+      ["notice", "new"],
+    ]);
+    assert.deepEqual(planNotification(["t1"], woken, "notice"), {
+      kind: "append",
+      taskId: "notice",
+    });
+  });
+
+  it("ボードから消えたタスクは監視中とみなさない", () => {
+    assert.deepEqual(planNotification(["ghost"], new Map(), null), { kind: "create" });
   });
 });
 

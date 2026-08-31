@@ -54,6 +54,15 @@ describe("contextMenuActions", () => {
     ]);
   });
 
+  it("監視中のタスクは未完了なので、通常タスクと同じ項目を出す", () => {
+    expect(contextMenuActions(target({ status: "watching" }))).toEqual([
+      "open",
+      "complete",
+      "move",
+      "delete",
+    ]);
+  });
+
   it("主リソースが URL のときだけ「URL を開く」を出す", () => {
     expect(contextMenuActions(target({ primaryResource: resource("url") }))).toContain("url");
   });

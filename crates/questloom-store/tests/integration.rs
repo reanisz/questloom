@@ -145,6 +145,59 @@ fn board_and_schedules_persist_across_reopen() {
     assert_eq!(board.columns.next_week[0].bucket, Some(Bucket::NextWeek));
 }
 
+/// Watching が再オープンをまたいで残り、外部 origin の追記で起床すること。
+///
+/// `status` は TEXT なのでスキーマの変更は要らない。実際に SQLite へ書いて
+/// 読み戻せることをここで担保する。
+#[test]
+fn watching_persists_across_reopen_and_wakes() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = {
+        let service = make_service(open(&dir));
+        let task = service
+            .create_task(NewTask {
+                title: "PR のレビュー待ち".to_owned(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::NextWeek))
+            .unwrap();
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Watching))
+            .unwrap();
+        task.id
+    };
+
+    // 再オープン。watching のまま読み戻せる。
+    let service = make_service(open(&dir));
+    let board = service.board().unwrap();
+    assert_eq!(board.columns.watching.len(), 1);
+    assert_eq!(board.columns.watching[0].task.id, id);
+    assert_eq!(board.columns.watching[0].task.status, TaskStatus::Watching);
+    assert_eq!(board.columns.watching[0].bucket, None);
+    // 予定は保持されている。
+    assert!(matches!(
+        board.columns.watching[0].task.scheduled,
+        Scheduled::Week(_)
+    ));
+
+    // 外部 origin の追記で New へ起きる。
+    service
+        .add_task_update(id, "コメントが付きました", Origin::Plugin("github".into()))
+        .unwrap();
+
+    let service = make_service(open(&dir));
+    let board = service.board().unwrap();
+    assert!(board.columns.watching.is_empty());
+    assert_eq!(board.columns.new.len(), 1);
+    assert_eq!(board.columns.new[0].task.id, id);
+    assert!(matches!(
+        board.columns.new[0].task.scheduled,
+        Scheduled::Week(_)
+    ));
+}
+
 /// ソフトデリートと復元が、再オープンをまたいで残ること。
 #[test]
 fn soft_delete_and_restore_persist_across_reopen() {

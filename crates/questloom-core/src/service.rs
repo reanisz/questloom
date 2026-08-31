@@ -143,6 +143,8 @@ pub struct BoardColumns {
     pub next_week: Vec<TaskCard>,
     /// Future 列。
     pub future: Vec<TaskCard>,
+    /// Watching 列(外部の変化待ち)。
+    pub watching: Vec<TaskCard>,
     /// Doing 列。
     pub doing: Vec<TaskCard>,
     /// Done 列。
@@ -159,6 +161,7 @@ impl BoardColumns {
             (BoardColumn::ThisWeek, self.this_week.as_slice()),
             (BoardColumn::NextWeek, self.next_week.as_slice()),
             (BoardColumn::Future, self.future.as_slice()),
+            (BoardColumn::Watching, self.watching.as_slice()),
             (BoardColumn::Doing, self.doing.as_slice()),
             (BoardColumn::Done, self.done.as_slice()),
         ]
@@ -174,6 +177,7 @@ impl BoardColumns {
             BoardColumn::ThisWeek => &mut self.this_week,
             BoardColumn::NextWeek => &mut self.next_week,
             BoardColumn::Future => &mut self.future,
+            BoardColumn::Watching => &mut self.watching,
             BoardColumn::Doing => &mut self.doing,
             BoardColumn::Done => &mut self.done,
         }
@@ -487,6 +491,10 @@ impl TaskService {
         self.repo.insert_task_with_resources(&task, &resources)?;
 
         self.emit(DomainEvent::TaskCreated { task_id: task.id });
+        // 外部 origin が子タスクを足したら、監視中の親を起こす。
+        if let Some(parent_id) = task.parent_id {
+            self.wake_task(parent_id, &task.origin)?;
+        }
         Ok(task)
     }
 
@@ -625,6 +633,11 @@ impl TaskService {
 
     /// アップデート履歴を追記する。
     ///
+    /// **監視中 ([`TaskStatus::Watching`]) のタスクに、ユーザー以外の origin
+    /// (`mcp` / `ai` / `plugin:*` / `system`)で追記すると起床する**
+    /// ([`wake`](Self::wake) 参照)。「外の変化を待っていたタスクが、変化を知らされて
+    /// New に戻る」という Watching の主経路。
+    ///
     /// # Errors
     /// タスクが存在しない、または永続化層のエラー。
     pub fn add_task_update(
@@ -645,8 +658,13 @@ impl TaskService {
         };
         self.repo.insert_update(&entry)?;
         task.updated_at = now;
+        // 起床も同じ 1 回の書き込みに載せる(履歴だけ入って移動が漏れる隙を作らない)。
+        let woken = self.wake(&mut task, &entry.origin)?;
         self.persist(&task)?;
         self.emit(DomainEvent::TaskUpdateAdded { task_id: id });
+        if woken {
+            self.emit_woken(id);
+        }
         Ok(entry)
     }
 
@@ -790,6 +808,59 @@ impl TaskService {
             parent_id,
         });
         Ok(task)
+    }
+
+    // ---- 起床 (Watching) ----
+
+    /// 監視中のタスクを New へ起こす。起こしたら `true`。
+    ///
+    /// docs/data-model.md の規則そのもの。
+    ///
+    /// - 起こすのは **`status == Watching`** かつ **origin がユーザー以外**のときだけ。
+    ///   ユーザー自身の編集で勝手に起きてはいけない。
+    /// - **`scheduled` は保持する**(Watching へ入れる前の予定を失わない)。
+    /// - 並び順は New 列の末尾。
+    ///
+    /// 永続化とイベント発行はしない。呼び出し側が同じ 1 回の [`persist`](Self::persist) に
+    /// 載せ、成功したら [`emit_woken`](Self::emit_woken) を呼ぶ。
+    /// 書き込みロックを取った状態で呼ぶこと。
+    fn wake(&self, task: &mut Task, origin: &Origin) -> CoreResult<bool> {
+        if task.status != TaskStatus::Watching || origin.is_user() {
+            return Ok(false);
+        }
+        task.status = TaskStatus::New;
+        task.sort_order = self.end_key(TaskStatus::New)?;
+        task.done_at = None;
+        Ok(true)
+    }
+
+    /// 別のタスク(典型的には親)を起床させ、必要なら永続化とイベント発行まで行う。
+    ///
+    /// 監視中でない・origin がユーザー・そもそも起きる必要がない場合は何もしない(冪等)。
+    /// 書き込みロックを取った状態で呼ぶこと。
+    fn wake_task(&self, id: TaskId, origin: &Origin) -> CoreResult<()> {
+        if origin.is_user() {
+            return Ok(());
+        }
+        let mut task = self.require_task(id)?;
+        if !self.wake(&mut task, origin)? {
+            return Ok(());
+        }
+        task.updated_at = self.clock.now();
+        self.persist(&task)?;
+        self.emit_woken(id);
+        Ok(())
+    }
+
+    /// 起床を購読者へ知らせる。`TaskWoken` の直後に New 列への `TaskMoved` を続ける
+    /// (UI・オーバーレイは移動イベントで再取得する)。
+    fn emit_woken(&self, id: TaskId) {
+        self.emit(DomainEvent::TaskWoken { task_id: id });
+        self.emit(DomainEvent::TaskMoved {
+            task_id: id,
+            status: TaskStatus::New,
+            bucket: None,
+        });
     }
 
     // ---- 内部ヘルパ ----
@@ -1414,6 +1485,7 @@ mod tests {
         assert_eq!(board.columns.future.len(), 1);
         assert_eq!(board.columns.doing.len(), 1);
         assert_eq!(board.columns.done.len(), 1);
+        assert!(board.columns.watching.is_empty());
         assert_eq!(board.columns.today[0].bucket, Some(Bucket::Today));
         assert_eq!(board.columns.new[0].bucket, None);
     }
@@ -1853,6 +1925,7 @@ mod tests {
                 BoardColumn::ThisWeek,
                 BoardColumn::NextWeek,
                 BoardColumn::Future,
+                BoardColumn::Watching,
                 BoardColumn::Doing,
                 BoardColumn::Done,
             ]
@@ -1864,5 +1937,287 @@ mod tests {
             .map(|(column, cards)| (column, cards.len()))
             .collect();
         assert_eq!(filled, [(BoardColumn::Doing, 1)]);
+    }
+
+    // ---- Watching(外部の変化待ち)----
+
+    /// 予定を持ったまま Watching へ入れたタスクを返す。
+    fn watching_task(service: &TaskService, title: &str) -> Task {
+        let task = service.create_task(new_task(title)).unwrap();
+        // 予定が保持されることを見たいので、一度 NextWeek に置いてから Watching へ移す。
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::NextWeek))
+            .unwrap();
+        let watching = service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Watching))
+            .unwrap();
+        assert_eq!(watching.status, TaskStatus::Watching);
+        assert!(
+            matches!(watching.scheduled, Scheduled::Week(_)),
+            "Watching へ移しても予定は保持される"
+        );
+        watching
+    }
+
+    #[test]
+    fn move_to_watching_keeps_the_schedule_and_has_no_bucket() {
+        let service = service();
+        let task = watching_task(&service, "PR のレビュー待ち");
+
+        let board = service.board().unwrap();
+        assert_eq!(board.columns.watching.len(), 1);
+        assert_eq!(board.columns.watching[0].task.id, task.id);
+        // Watching はバケットを持たない(Todo ではないため)。
+        assert_eq!(board.columns.watching[0].bucket, None);
+        assert!(board.columns.next_week.is_empty());
+    }
+
+    #[test]
+    fn non_user_update_wakes_a_watching_task() {
+        let service = service();
+        let task = watching_task(&service, "CI の結果待ち");
+        let before = task.scheduled;
+
+        service
+            .add_task_update(
+                task.id,
+                "CI が失敗しました",
+                Origin::Plugin("github".into()),
+            )
+            .unwrap();
+
+        let woken = service.find_task(task.id).unwrap().expect("生きている");
+        assert_eq!(woken.status, TaskStatus::New);
+        assert_eq!(woken.scheduled, before, "起床しても予定は保持する");
+
+        let board = service.board().unwrap();
+        assert!(board.columns.watching.is_empty());
+        assert_eq!(board.columns.new.len(), 1);
+        assert_eq!(board.columns.new[0].task.id, task.id);
+    }
+
+    #[test]
+    fn every_non_user_origin_wakes_a_watching_task() {
+        for origin in [
+            Origin::Mcp,
+            Origin::Ai,
+            Origin::System,
+            Origin::Plugin("github".into()),
+        ] {
+            let service = service();
+            let task = watching_task(&service, "待ち");
+            service
+                .add_task_update(task.id, "変化", origin.clone())
+                .unwrap();
+            assert_eq!(
+                service.find_task(task.id).unwrap().unwrap().status,
+                TaskStatus::New,
+                "{origin} では起床する"
+            );
+        }
+    }
+
+    #[test]
+    fn user_updates_do_not_wake_a_watching_task() {
+        let service = service();
+        let task = watching_task(&service, "自分でメモする");
+
+        service
+            .add_task_update(task.id, "あとで見る", Origin::User)
+            .unwrap();
+
+        let still = service.find_task(task.id).unwrap().expect("生きている");
+        assert_eq!(still.status, TaskStatus::Watching);
+        assert_eq!(service.board().unwrap().columns.watching.len(), 1);
+    }
+
+    #[test]
+    fn updates_on_non_watching_tasks_change_nothing() {
+        let service = service();
+        let task = service.create_task(new_task("ふつうのタスク")).unwrap();
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Doing))
+            .unwrap();
+
+        service
+            .add_task_update(task.id, "MCP から追記", Origin::Mcp)
+            .unwrap();
+
+        assert_eq!(
+            service.find_task(task.id).unwrap().unwrap().status,
+            TaskStatus::Doing,
+            "Watching でないタスクは動かさない"
+        );
+    }
+
+    #[test]
+    fn waking_is_idempotent() {
+        let service = service();
+        let task = watching_task(&service, "何度でも");
+
+        service
+            .add_task_update(task.id, "1 回目", Origin::Mcp)
+            .unwrap();
+        let first = service.find_task(task.id).unwrap().unwrap();
+        service
+            .add_task_update(task.id, "2 回目", Origin::Mcp)
+            .unwrap();
+        let second = service.find_task(task.id).unwrap().unwrap();
+
+        assert_eq!(second.status, TaskStatus::New);
+        assert_eq!(
+            second.sort_order, first.sort_order,
+            "既に New なら並び順も動かさない"
+        );
+    }
+
+    #[test]
+    fn waking_appends_to_the_end_of_the_new_column() {
+        let service = service();
+        let watching = watching_task(&service, "起こされる");
+        let a = service.create_task(new_task("先客 a")).unwrap();
+        let b = service.create_task(new_task("先客 b")).unwrap();
+
+        service
+            .add_task_update(watching.id, "変化", Origin::Mcp)
+            .unwrap();
+
+        let board = service.board().unwrap();
+        let ids: Vec<TaskId> = board.columns.new.iter().map(|c| c.task.id).collect();
+        assert_eq!(ids, [a.id, b.id, watching.id]);
+    }
+
+    #[test]
+    fn a_child_created_by_a_non_user_origin_wakes_the_watching_parent() {
+        let service = service();
+        let parent = watching_task(&service, "PR を見張る");
+
+        service
+            .create_task(NewTask {
+                title: "PR を確認する".to_owned(),
+                origin: Origin::Plugin("github".into()),
+                parent_id: Some(parent.id),
+                is_instant: true,
+                ..NewTask::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            service.find_task(parent.id).unwrap().unwrap().status,
+            TaskStatus::New
+        );
+    }
+
+    #[test]
+    fn a_child_created_by_the_user_leaves_the_watching_parent_alone() {
+        let service = service();
+        let parent = watching_task(&service, "見張り続ける");
+
+        service
+            .create_task(NewTask {
+                title: "自分で足した子".to_owned(),
+                parent_id: Some(parent.id),
+                ..NewTask::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            service.find_task(parent.id).unwrap().unwrap().status,
+            TaskStatus::Watching
+        );
+    }
+
+    /// 親が Watching でなければ、外部 origin の子タスク作成でも何も起きない。
+    #[test]
+    fn creating_a_child_under_a_normal_parent_changes_nothing() {
+        let service = service();
+        let parent = service.create_task(new_task("ふつうの親")).unwrap();
+        service
+            .move_task(parent.id, MoveRequest::to_column(BoardColumn::Today))
+            .unwrap();
+        let before = service.find_task(parent.id).unwrap().unwrap();
+
+        service
+            .create_task(NewTask {
+                title: "子".to_owned(),
+                origin: Origin::Mcp,
+                parent_id: Some(parent.id),
+                ..NewTask::default()
+            })
+            .unwrap();
+
+        let after = service.find_task(parent.id).unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Todo);
+        assert_eq!(after.sort_order, before.sort_order);
+    }
+
+    #[tokio::test]
+    async fn waking_broadcasts_woken_then_moved() {
+        let service = service();
+        let task = watching_task(&service, "通知");
+        let mut rx = service.subscribe();
+
+        service
+            .add_task_update(task.id, "外から変化がありました", Origin::Mcp)
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskUpdateAdded { task_id: task.id }
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskWoken { task_id: task.id }
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskMoved {
+                task_id: task.id,
+                status: TaskStatus::New,
+                bucket: None,
+            }
+        );
+    }
+
+    /// 起きなかったときは起床イベントを出さない。
+    #[tokio::test]
+    async fn a_user_update_broadcasts_no_wake() {
+        let service = service();
+        let task = watching_task(&service, "静かなまま");
+        let mut rx = service.subscribe();
+
+        service
+            .add_task_update(task.id, "メモ", Origin::User)
+            .unwrap();
+        service.notify_settings_changed();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskUpdateAdded { task_id: task.id }
+        );
+        assert_eq!(rx.recv().await.unwrap(), DomainEvent::SettingsChanged);
+    }
+
+    /// ボードの JSON 契約に `watching` 列が含まれること(フロントの `BoardColumns` と対応)。
+    #[test]
+    fn board_json_has_a_watching_column() {
+        let service = service();
+        let task = watching_task(&service, "契約");
+
+        let board = serde_json::to_value(service.board().unwrap()).unwrap();
+        let columns = board["columns"]
+            .as_object()
+            .expect("columns はオブジェクト");
+        assert_eq!(
+            columns.keys().map(String::as_str).collect::<HashSet<_>>(),
+            HashSet::from([
+                "new", "today", "tomorrow", "thisWeek", "nextWeek", "future", "watching", "doing",
+                "done",
+            ])
+        );
+        let card = &board["columns"]["watching"][0];
+        assert_eq!(card["id"], task.id.to_string());
+        assert_eq!(card["status"], "watching");
+        assert!(card["bucket"].is_null());
     }
 }

@@ -42,6 +42,8 @@ pub enum BoardColumn {
     NextWeek,
     /// Todo / Future。
     Future,
+    /// 外部の変化待ち。バケットは持たない。
+    Watching,
     /// 着手中。
     Doing,
     /// 完了。
@@ -57,6 +59,7 @@ impl BoardColumn {
     pub const fn of(status: TaskStatus, bucket: Option<Bucket>) -> Self {
         match status {
             TaskStatus::New => Self::New,
+            TaskStatus::Watching => Self::Watching,
             TaskStatus::Doing => Self::Doing,
             TaskStatus::Done => Self::Done,
             TaskStatus::Todo => match bucket {
@@ -78,13 +81,13 @@ impl BoardColumn {
             Self::ThisWeek => Some(Bucket::ThisWeek),
             Self::NextWeek => Some(Bucket::NextWeek),
             Self::Future => Some(Bucket::Future),
-            Self::New | Self::Doing | Self::Done => None,
+            Self::New | Self::Watching | Self::Doing | Self::Done => None,
         }
     }
 
     /// この列へドロップしたときの `(status, scheduled)` を求める。
     ///
-    /// New / Doing / Done 列は予定を変更しない意味を持たせるため、
+    /// New / Watching / Doing / Done 列は予定を変更しない意味を持たせるため、
     /// 呼び出し側が保持したい既存の予定を `current` に渡す。
     #[must_use]
     pub fn resolve(
@@ -101,6 +104,7 @@ impl BoardColumn {
             None => {
                 let status = match self {
                     Self::New => TaskStatus::New,
+                    Self::Watching => TaskStatus::Watching,
                     Self::Doing => TaskStatus::Doing,
                     _ => TaskStatus::Done,
                 };
@@ -649,10 +653,14 @@ mod tests {
             BoardColumn::Today.resolve(current, today, ws),
             (TaskStatus::Todo, Scheduled::Date(today))
         );
-        // New / Doing / Done は予定を保持する。
+        // New / Watching / Doing / Done は予定を保持する。
         assert_eq!(
             BoardColumn::New.resolve(current, today, ws),
             (TaskStatus::New, current)
+        );
+        assert_eq!(
+            BoardColumn::Watching.resolve(current, today, ws),
+            (TaskStatus::Watching, current)
         );
         assert_eq!(
             BoardColumn::Doing.resolve(current, today, ws),
@@ -679,6 +687,7 @@ mod tests {
         // Todo 以外はバケットを持たない。
         for (status, column) in [
             (TaskStatus::New, BoardColumn::New),
+            (TaskStatus::Watching, BoardColumn::Watching),
             (TaskStatus::Doing, BoardColumn::Doing),
             (TaskStatus::Done, BoardColumn::Done),
         ] {

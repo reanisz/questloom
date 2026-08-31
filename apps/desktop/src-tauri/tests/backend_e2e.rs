@@ -357,3 +357,90 @@ async fn the_real_app_serves_tasks_over_mcp() {
     // TempDir の後始末で一時ディレクトリごと消える(プロセスは stop 済み)。
     dir.close().expect("一時ディレクトリを片付けられる");
 }
+
+/// 実アプリで Watching の起床を一往復させる。
+///
+/// 「MCP で watching へ移す → MCP で履歴を追記 → New に現れる」。
+/// 起床はサービス層の規則なので単体テストでも見ているが、ここでは**実プロセス・実 DB**で
+/// 同じことが起きること(= 起床した状態がちゃんと永続化されること)を確かめる。
+#[tokio::test]
+#[ignore = "ビルド済みの target/debug/questloom-desktop を要する (--ignored で実行)"]
+async fn a_watching_task_wakes_up_over_mcp() {
+    const WATCHED: &str = "バックエンド e2e の監視タスク";
+
+    let exe = desktop_exe();
+    let dir = tempfile::tempdir().expect("一時ディレクトリ");
+    let port = free_port();
+
+    let mut app = SpawnedApp::spawn(&exe, dir.path(), port);
+    let mut mcp = McpClient::new(format!("http://127.0.0.1:{port}/mcp"));
+    mcp.initialize(&mut app).await;
+
+    // 予定を持った通常タスクを作る。
+    let created = mcp
+        .call(
+            "create_task",
+            json!({ "title": WATCHED, "column": "nextWeek" }),
+        )
+        .await;
+    let task_id = created["id"].as_str().expect("id が返る").to_owned();
+    assert_eq!(created["column"], "nextWeek");
+
+    // 監視中へ。予定は保持され、バケットは持たない。
+    let parked = mcp
+        .call(
+            "move_task",
+            json!({ "task_id": task_id, "column": "watching" }),
+        )
+        .await;
+    assert_eq!(parked["status"], "watching");
+    assert_eq!(parked["column"], "watching");
+    assert_eq!(parked["scheduled"]["kind"], "week");
+    assert!(parked["bucket"].is_null());
+
+    let listed = mcp
+        .call("list_tasks", json!({ "column": "watching" }))
+        .await;
+    assert!(
+        find_task(&listed, &task_id).is_some(),
+        "監視中の列に出る: {listed}"
+    );
+
+    // MCP からの追記(= ユーザー以外の変化)で New へ起きる。
+    mcp.call(
+        "add_task_update",
+        json!({ "task_id": task_id, "body": "外部で変化がありました" }),
+    )
+    .await;
+
+    let listed = mcp.call("list_tasks", json!({ "column": "new" })).await;
+    let woken = find_task(&listed, &task_id).expect("New に現れる");
+    assert_eq!(woken["status"], "new");
+    assert_eq!(woken["scheduled"]["kind"], "week", "予定は保持される");
+    let listed = mcp
+        .call("list_tasks", json!({ "column": "watching" }))
+        .await;
+    assert!(
+        find_task(&listed, &task_id).is_none(),
+        "監視中の列からは消える: {listed}"
+    );
+
+    assert!(app.is_running(), "往復のあいだアプリは生きている");
+    app.stop();
+
+    {
+        // 起床した状態が実 DB に残っていること。
+        let state = AppState::initialize(dir.path()).expect("DB を開き直せる");
+        let board = state.service.board().expect("ボードを取れる");
+        assert!(board.columns.watching.is_empty());
+        let card = board
+            .columns
+            .new
+            .iter()
+            .find(|card| card.task.id.to_string() == task_id)
+            .expect("New に残っている");
+        assert_eq!(card.task.title, WATCHED);
+    }
+
+    dir.close().expect("一時ディレクトリを片付けられる");
+}

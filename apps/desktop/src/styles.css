@@ -67,9 +67,16 @@
 
   /* ドラッグオーバーレイの幅の基準。列自体は flex で伸縮する。 */
   --column-width: 260px;
-  /* 通常表示 / 展開表示それぞれの列の下限幅。ここを超えて初めて横スクロールが出る。 */
+  /*
+   * 通常表示 / 展開表示それぞれの列の下限幅。ここを超えて初めて横スクロールが出る。
+   *
+   * 展開表示は 9 列(New / Today / Tomorrow / This Week / Next Week / Future /
+   * 監視中 / Doing / Done)。1280px 幅で横スクロールを出さないため、
+   * 9 * 128 + gap 8 * 8 + padding 20 = 1236px に収まる値にしてある。
+   * 列を足すときはこの計算をやり直すこと。
+   */
   --column-min: 220px;
-  --column-min-expanded: 150px;
+  --column-min-expanded: 128px;
   --titlebar-height: 32px;
 
   color-scheme: dark;
@@ -230,7 +237,7 @@ h3 {
   overflow-y: hidden;
 }
 
-/* 展開表示は 8 列を敷き詰めるため、余白と列幅を詰める。 */
+/* 展開表示は 9 列を敷き詰めるため、余白と列幅を詰める。 */
 .board-expanded {
   gap: 8px;
   padding: 4px 10px 16px;
@@ -347,10 +354,23 @@ h3 {
 }
 
 .column-header h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-muted);
+}
+
+/* 列の性格を示す控えめな記号(監視中の 👁 など)。 */
+.column-icon {
+  margin-right: 5px;
+  /* 絵文字に字間が乗ると間延びするので打ち消す。 */
+  letter-spacing: normal;
+  font-size: 11px;
+  opacity: 0.75;
 }
 
 .column-count {

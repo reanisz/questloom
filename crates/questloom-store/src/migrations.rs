@@ -166,6 +166,33 @@ mod tests {
         assert_eq!(rows, 1);
     }
 
+    /// `status` は自由な TEXT なので、Watching の追加にマイグレーションは要らない。
+    ///
+    /// v2 のまま置かれていた既存 DB(= マイグレーション無し)に `watching` を
+    /// 書き込み、読み戻せることで確かめる。CHECK 制約や enum テーブルを後から
+    /// 足すと、この前提が崩れて既存 DB が壊れる。
+    #[test]
+    fn a_v2_database_accepts_the_watching_status_without_a_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), CURRENT_SCHEMA_VERSION);
+        // ここから先はスキーマを一切変えずに書き込む。
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, sort_order, created_at, updated_at)
+             VALUES ('t1', '見張る', 'watching', 'a0', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("watching を弾く制約が無い");
+
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id = 't1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "watching");
+        // 追加のマイグレーションは発生しない。
+        assert_eq!(migrate(&mut conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    }
+
     /// v1 のまま置かれていた DB を開いても、行を失わずに v2 へ上がること。
     #[test]
     fn a_v1_database_is_upgraded_to_v2_without_losing_rows() {

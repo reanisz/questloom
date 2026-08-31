@@ -4,8 +4,9 @@
 
 questloom はタスク管理・通知管理のデスクトップアプリ。当面は Windows 向けスタンドアロンだが、
 将来モバイル・Web・CLI 等へ展開する可能性を見越し、コアロジックを UI から分離した Rust workspace 構成をとる。
-UI は Trello 風のボード(New / Today / Tomorrow / ThisWeek / NextWeek / Future / Doing / Done)で、
-時間バケットは DB に保存せず `scheduled_*` から導出する。加えて、内蔵 MCP サーバー経由で
+UI は Trello 風のボード(New / Today / Tomorrow / ThisWeek / NextWeek / Future / Watching / Doing / Done)で、
+時間バケットは DB に保存せず `scheduled_*` から導出する。`Watching`(監視中)は「外部の変化待ち」で、
+ユーザー以外の origin による変化を受けると自動的に New へ戻る(下記「Watching」節)。加えて、内蔵 MCP サーバー経由で
 Claude Code / Codex などの AI エージェントからタスクを操作でき、AI CLI 呼び出しやプラグイン
 (第一弾は GitHub PR 監視)による自動タスク生成を備える。
 
@@ -106,8 +107,9 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 - **GUI e2e スモーク** (`apps/desktop/e2e/smoke.spec.ts`) は WebdriverIO +
   [`@wdio/tauri-service`](https://webdriver.io/docs/wdio-tauri-service/) で実アプリを操作する。
   「起動 → ボード描画 → New へタスク作成 → カードから詳細ドロワー → 削除 →
-  『削除済み』から復元 → カードを右クリック → メニューから削除 → 復元」を
-  main ウィンドウだけで 1 本通す。設定は `apps/desktop/wdio.conf.ts`。
+  『削除済み』から復元 → カードを右クリック → メニューから削除 → 復元 →
+  監視中へ移して MCP の履歴追記で起床 → 全列展開の幅」を
+  main ウィンドウだけで 1 本通す(7 テスト)。設定は `apps/desktop/wdio.conf.ts`。
 
   **前提は「フロント同梱の debug ビルド」**。`npm run tauri dev` / `cargo run` が作る exe は
   `devUrl`(Vite dev サーバー)を読みに行くので使えない。
@@ -132,8 +134,13 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
     `task-card` / `task-drawer` / `drawer-delete` / `confirm-delete` / `open-deleted` /
     `deleted-row` / `restore-task` / `task-context-menu` / `context-<action>`(右クリック
     メニューの項目。`open` / `complete` / `promote` / `move` / `url` / `delete` /
-    `back` / `promote-<column>` / `move-<column>`))。
+    `back` / `promote-<column>` / `move-<column>`)/ `defer-box-<key>`(先送りレールの
+    ボックス)/ `toggle-expanded`(全列展開のトグル))。
     ダイアログは `ModalShell` の `aria-label` で引く。
+  - Watching の往復と展開表示の 2 本は、内蔵 MCP を spec から直接叩く
+    (`QUESTLOOM_E2E_MCP_PORT` を読んで `http://127.0.0.1:<port>/mcp` へ JSON-RPC)。
+    「UI で監視中へ移す → MCP で履歴追記 → New に戻る」を実アプリで通し、
+    展開表示では `.board` の `scrollWidth <= clientWidth` を実寸で確かめる。
   - **利用者が questloom を起動したままだと exe を差し替えられない**
     (`tauri build` が `failed to remove file ... os error 5` で落ちる)。そのときは
     リンク済みの `target/debug/deps/questloom_desktop.exe` を別の場所へ
@@ -161,6 +168,32 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 - `docs/roadmap.md` — フェーズ分割(Phase 0 スキャフォールド 〜 Phase 6 プラグイン)。
   各フェーズは「動作確認できる状態」で完了とし、フェーズごとにコミットを分ける。
 
+## Watching(監視中)
+
+`TaskStatus::Watching` / `BoardColumn::Watching` は「今すぐ作業はしないが、外の変化を
+待っている」状態。仕様の確定版は `docs/data-model.md`(「タスクの状態とバケットの考え方」)。
+
+- 時間バケットは持たない(New / Doing / Done と同じく `resolve` は**予定を保持**する)。
+  Watching から出入りしても `scheduled` は失われない。
+- **起床ルール**: ユーザー以外の origin(`mcp` / `ai` / `plugin:*` / `system`)による変化を
+  受けると、サービス層が `status` を `new` へ戻し(予定は保持、New 列の末尾)、
+  `TaskWoken` + `TaskMoved` を発行する。起床すればオーバーレイも既存経路で出る。
+- 起床の**トリガーは 2 つだけ**。どちらも呼び出し元の origin が API に載っている操作。
+  1. `add_task_update`(origin が非 User)
+  2. `create_task`(origin が非 User)で `parent_id` が Watching のタスク → 親を起こす
+- `add_resource` / `remove_resource` は**トリガーにしない**。これらの API は origin を
+  受け取っておらず、渡せるようにしても「メインウィンドウの手動追加」と「プラグインの追加」を
+  区別できない(呼び出し側の自己申告になる)。実用シナリオは履歴追記と子タスク作成でほぼ
+  覆えるため、API を広げるより起床経路を絞る方を選んだ。
+- `update_task` もトリガーにしない。フロントのユーザー編集と同じ command なので、
+  自分で書き換えただけで起きてしまう。
+- ユーザー操作(ドラッグ・右クリックメニューの「移動」)での出入りは通常の `move_task`。
+  **昇格先 (`PROMOTE_COLUMNS`) には含めない**(昇格は Todo 系のみという現仕様を維持)。
+- UI: 通常表示では先送りレールの「監視中」ボックス(`DEFER_COLUMNS`)、展開表示では 9 列目。
+  列ヘッダとレールのラベルに 👁 を添えるだけで、カード自体の装飾はしない。
+- DB は `status` が自由な TEXT なのでマイグレーション不要
+  (`migrations.rs` の `a_v2_database_accepts_the_watching_status_without_a_migration` が担保)。
+
 ## 内蔵 MCP サーバー
 
 `crates/questloom-mcp` が、公式 Rust SDK([rmcp](https://docs.rs/rmcp) 3.x)の
@@ -185,7 +218,8 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 
 引数名は snake_case、返り値の JSON は questloom-core の serde 表現(camelCase、
 日付・週・時刻は文字列)に従う。`column` は
-`new` / `today` / `tomorrow` / `thisWeek` / `nextWeek` / `future` / `doing` / `done`。
+`new` / `today` / `tomorrow` / `thisWeek` / `nextWeek` / `future` / `watching` / `doing` / `done`
+(`status` は `new` / `todo` / `doing` / `done` / `watching`)。
 
 | ツール | 引数 | 内容 |
 |---|---|---|
@@ -193,12 +227,12 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 | `get_task` | `task_id` | 詳細(関連リソース・アップデート履歴・親子込み) |
 | `create_task` | `title`, `description?`, `column?`, `deadline?`, `is_instant?`, `parent_id?`, `resources?` | 作成。既定は **インスタントタスクを New へ**。`column` 指定時は通常タスクとしてその列へ |
 | `update_task` | `task_id`, `title?`, `description?`, `deadline?`, `clear_deadline?` | タイトル・詳細・締切の更新 |
-| `move_task` | `task_id`, `column` | 指定列の末尾へ移動(時間バケット列は予定も設定される) |
+| `move_task` | `task_id`, `column` | 指定列の末尾へ移動(時間バケット列は予定も設定される。`watching` で「外部の変化待ち」にできる) |
 | `complete_task` | `task_id` | 完了にする(冪等) |
 | `delete_task` | `task_id` | 削除する(ソフトデリート。ボードから消えるだけで復元可能。子タスクへはカスケードしない。冪等) |
 | `restore_task` | `task_id` | 削除済みタスクを復元する(現ステータス列の末尾へ。冪等) |
 | `promote_task` | `task_id`, `column?` | インスタントタスクを通常タスクへ昇格(既定 `today`) |
-| `add_task_update` | `task_id`, `body` | アップデート履歴を追記 |
+| `add_task_update` | `task_id`, `body` | アップデート履歴を追記(対象が `watching` なら New へ起床させる) |
 | `add_resource` | `task_id`, `kind`, `value`, `label?`, `is_primary?` | 関連リソース(`url` / `file`)を追加 |
 
 MCP 経由で作られたタスク・履歴の `origin` は `mcp` になる。
@@ -364,8 +398,14 @@ export default defineQuestloomPlugin({
    (PR 本体 / issue コメント / レビューコメント / check-runs / combined status)。
 3. 通知の条件は「前回以降の新規コメント(`/user` で取った自分の login のものは除く)」と
    「CI 失敗への**遷移**」。head SHA が同じ同一の失敗は 1 度しか通知しない。
-4. 通知は KV に持つ直近の通知タスク id で重複を防ぐ。そのタスクが未完了で残っていれば
-   新規作成せず `add_task_update` で追記する。
+4. 通知のしかたは `planNotification` が決める。
+   - **PR を参照しているタスクが「監視中」(`watching`)なら、通知タスクを作らず
+     そのタスク自身へ `addTaskUpdate` する**。プラグインの追記は origin が
+     `plugin:github` なので、本体の起床ルールがそのタスクを New へ戻す。
+   - 監視中が無ければ従来どおり。KV に持つ直近の通知タスク id で重複を防ぎ、
+     そのタスクが未完了で残っていれば新規作成せず `add_task_update` で追記する。
+   - 起床では `noticeTaskId` を触らないので、起きた次のラウンド(もう `watching` ではない)
+     からは自然に従来ルートへ戻る。
 5. PR がマージ/クローズされたら、どのタスクからも参照されなくなったら、KV の状態を捨てる。
 6. 403/429(レート制限)に当たったらそのラウンドを打ち切ってログを出すだけ。
    PR 単位で try/catch するので、1 件の失敗で全体は止まらない。

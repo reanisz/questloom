@@ -75,6 +75,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   todo: "Todo",
   doing: "Doing",
   done: "Done",
+  watching: "監視中",
 };
 
 /** 状態の表示ラベル。 */

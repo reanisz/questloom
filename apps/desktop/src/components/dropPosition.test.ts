@@ -24,6 +24,7 @@ function columns(filled: Partial<Record<BoardColumnKey, string[]>>): Board["colu
     thisWeek: [],
     nextWeek: [],
     future: [],
+    watching: [],
     doing: [],
     done: [],
   };
@@ -66,6 +67,11 @@ describe("columnOf", () => {
     expect(columnOf(board, `${COLUMN_DROPPABLE_PREFIX}archive`)).toBeNull();
     expect(columnOf(board, "z")).toBeNull();
   });
+
+  it("監視中も他の列と同じ droppable として扱える", () => {
+    expect(columnOf(board, columnId("watching"))).toBe("watching");
+    expect(locate(columns({ watching: ["w"] }), "w")).toBe("watching");
+  });
 });
 
 describe("resolveDropPosition — 列へ落とす", () => {
@@ -103,6 +109,25 @@ describe("resolveDropPosition — 列へ落とす", () => {
     expect(
       resolveDropPosition(board, "a", `${COLUMN_DROPPABLE_PREFIX}archive`, rect(0), rect(0)),
     ).toBeNull();
+  });
+
+  /** レールの「監視中」ボックスも列と同じ droppable id なので、同じ経路で落ちる。 */
+  it("監視中のボックスへ落としたらその列の末尾へ", () => {
+    const board = columns({ today: ["a"], watching: ["w1", "w2"] });
+    expect(resolveDropPosition(board, "a", columnId("watching"), rect(0), rect(0))).toEqual({
+      column: "watching",
+      prevId: "w2",
+      nextId: null,
+    });
+  });
+
+  it("監視中から New へ戻すのも通常の移動として扱う", () => {
+    const board = columns({ new: ["n"], watching: ["w"] });
+    expect(resolveDropPosition(board, "w", columnId("new"), rect(0), rect(0))).toEqual({
+      column: "new",
+      prevId: "n",
+      nextId: null,
+    });
   });
 });
 

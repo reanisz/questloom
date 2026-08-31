@@ -11,6 +11,10 @@
  * を検知したら「PR を確認する: owner/repo#123」というインスタントの子タスクを New に作る。
  * 既に未完了の通知タスクがあれば、新しく作らずアップデート履歴へ追記する。
  *
+ * ただし **PR を参照しているタスクが「監視中」(`watching`)のときは、子タスクを作らず
+ * そのタスク自身へ履歴を追記する**。プラグインの追記は origin が `plugin:github` なので、
+ * questloom 本体の起床ルールがそのタスクを New へ戻す(= 待っていたものが手元に返る)。
+ *
  * もう一つ、**description の自動記入**をする。PR の URL が付いたタスクの description が
  * 空なら、PR のタイトル・状態・作者・本文の先頭を書き込む。タスクイベント
  * (`ctx.onTaskEvent`)で即座に反応し、ポーリングでも取りこぼしを拾う。
@@ -535,6 +539,39 @@ function decideNoticeAction(
   return { kind: "append", taskId: noticeTaskId };
 }
 
+/** 変化を検知したときの通知のしかた。 */
+type NotifyPlan =
+  | { kind: "wake"; taskIds: string[] }
+  | { kind: "append"; taskId: string }
+  | { kind: "create" };
+
+/**
+ * 変化をどう伝えるかを決める。
+ *
+ * **PR を参照しているタスクが「監視中」(`watching`)なら、通知タスクを作らず
+ * そのタスク自身へ履歴を追記する**。プラグインの追記は origin が `plugin:github`
+ * (= ユーザー以外)なので、questloom 本体の起床ルールが本体を New へ戻してくれる。
+ * 「外の変化を待っていたタスクが、変化と同時に手元へ戻る」のが Watching の本筋なので、
+ * わざわざ子タスクを増やすより素直。
+ *
+ * 監視中のタスクが無ければ従来どおり(未完了の通知タスクがあれば追記、無ければ新規作成)。
+ * 起床した次のラウンドではそのタスクはもう `watching` ではないので、自動的に従来ルートへ戻る。
+ * 起床では `noticeTaskId` を触らないので、既存の重複防止もそのまま効き続ける。
+ *
+ * @param taskIds この PR を参照している未完了タスク(id 昇順)。
+ * @param taskStatuses ボード上の全タスクの状態。
+ * @param noticeTaskId 直近で作った通知タスクの id。
+ */
+function planNotification(
+  taskIds: readonly string[],
+  taskStatuses: ReadonlyMap<string, string>,
+  noticeTaskId: string | null,
+): NotifyPlan {
+  const watching = taskIds.filter((id) => taskStatuses.get(id) === "watching");
+  if (watching.length > 0) return { kind: "wake", taskIds: watching };
+  return decideNoticeAction(noticeTaskId, taskStatuses);
+}
+
 /** 通知の理由(description / アップデート本文)を組み立てる。 */
 function buildReasons(newComments: readonly CommentInfo[], ci: CiSummary | null): string[] {
   const reasons: string[] = [];
@@ -803,8 +840,14 @@ async function pollOne(
   const reasons = buildReasons(newComments, notifyCi ? ci : null);
   if (reasons.length > 0) {
     const body = `${ref.owner}/${ref.repo}#${ref.number}: ${reasons.join(" / ")}`;
-    const action = decideNoticeAction(state.noticeTaskId, taskStatuses);
-    if (action.kind === "append") {
+    const action = planNotification(target.taskIds, taskStatuses, state.noticeTaskId);
+    if (action.kind === "wake") {
+      // 監視中の本体へ直接知らせる。追記の origin は plugin:github なので本体が New へ起きる。
+      for (const taskId of action.taskIds) {
+        await ctx.tasks.addTaskUpdate(taskId, body);
+      }
+      ctx.log(`監視中のタスク ${action.taskIds.length} 件を起こしました: ${body}`);
+    } else if (action.kind === "append") {
       await ctx.tasks.addTaskUpdate(action.taskId, body);
       ctx.log(`既存の通知タスクへ追記しました: ${body}`);
     } else {
@@ -1173,6 +1216,7 @@ export {
   decideNoticeAction,
   mergeCi,
   parsePullRequestUrl,
+  planNotification,
   pullRequestApiPath,
   selectNewComments,
   shouldFillDescription,

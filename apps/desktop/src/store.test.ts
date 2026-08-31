@@ -51,6 +51,7 @@ function board(columns: Partial<Record<BoardColumnKey, string[]>>): Board {
     thisWeek: [],
     nextWeek: [],
     future: [],
+    watching: [],
     doing: [],
     done: [],
   };
@@ -117,6 +118,12 @@ describe("applyLocalMove", () => {
   it("nextId が移動先に無ければ先頭へ落とす", () => {
     useBoardStore.getState().applyLocalMove("a", "doing", null, "存在しない");
     expect(ids("doing")).toEqual(["a", "x", "y"]);
+  });
+
+  it("監視中の列へも同じ経路で動かせる", () => {
+    useBoardStore.getState().applyLocalMove("b", "watching", null, null);
+    expect(ids("today")).toEqual(["a", "c"]);
+    expect(ids("watching")).toEqual(["b"]);
   });
 
   it("ボードに無いカードは何も動かさない", () => {

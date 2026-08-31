@@ -5,7 +5,7 @@ import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable"
 
 import * as api from "../api";
 import { useBoardStore } from "../store";
-import type { BoardColumnKey, TaskCard } from "../types";
+import { columnIcon, type BoardColumnKey, type TaskCard } from "../types";
 import { QuickAdd } from "./QuickAdd";
 import { TaskCardView } from "./TaskCardView";
 
@@ -44,6 +44,7 @@ export function Column({ columnKey, label, cards, focused, over, onCardContextMe
   const mutate = useBoardStore((state) => state.mutate);
   // ドロップ先は列全体。ヘッダやクイック追加の上が死角にならないようにする。
   const { setNodeRef } = useDroppable({ id: `${COLUMN_DROPPABLE_PREFIX}${columnKey}` });
+  const icon = columnIcon(columnKey);
 
   // New で作成し、New 以外の列なら続けて move_task で列相当の状態・予定へ移す。
   // 列 → status/scheduled の変換をバックエンドの move_task に一元化するための手順。
@@ -63,7 +64,15 @@ export function Column({ columnKey, label, cards, focused, over, onCardContextMe
       className={`column${over ? " column-over" : ""}${focused ? " column-focused" : ""}`}
     >
       <header className="column-header">
-        <h2>{label}</h2>
+        {/* 記号は装飾なので読み上げからは外す(ラベルだけで意味が通る)。 */}
+        <h2>
+          {icon && (
+            <span className="column-icon" aria-hidden="true">
+              {icon}
+            </span>
+          )}
+          {label}
+        </h2>
         <span className="column-count">{cards.length}</span>
       </header>
 

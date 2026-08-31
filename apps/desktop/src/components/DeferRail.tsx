@@ -1,7 +1,7 @@
 /**
- * 先送りバケット (Tomorrow / This Week / Next Week / Future) の細いサイドレール。
+ * 先送りバケット (Tomorrow / This Week / Next Week / Future / 監視中) の細いサイドレール。
  *
- * 通常表示ではこの 4 バケットを列として展開せず、ラベル + 件数だけのドロップボックスにする。
+ * 通常表示ではこの 5 つを列として展開せず、ラベル + 件数だけのドロップボックスにする。
  * ボックスは列と同じ droppable id (`column:<key>`) を持つので、BoardView の onDragEnd は
  * 列へのドロップと同じ経路で処理でき、ドロップ位置はバケット末尾になる。
  * クリックすると全列展開表示へ切り替え、そのバケットの列を強調する。
@@ -9,8 +9,21 @@
 
 import { useDroppable } from "@dnd-kit/core";
 
-import { columnLabel, DEFER_COLUMNS, type BoardColumnKey, type BoardColumns } from "../types";
+import {
+  columnIcon,
+  columnLabel,
+  DEFER_COLUMNS,
+  type BoardColumnKey,
+  type BoardColumns,
+} from "../types";
 import { COLUMN_DROPPABLE_PREFIX } from "./Column";
+
+/** ボックスの説明文。監視中だけは「先送り」ではないので言い回しを変える。 */
+function boxTitle(columnKey: BoardColumnKey, label: string): string {
+  return columnKey === "watching"
+    ? `${label} を展開表示で開く(ドラッグして外部の変化待ちにもできます)`
+    : `${label} を展開表示で開く(ドラッグして先送りもできます)`;
+}
 
 interface BoxProps {
   columnKey: BoardColumnKey;
@@ -25,16 +38,25 @@ interface BoxProps {
 function DeferBox({ columnKey, count, dragging, over, onOpen }: BoxProps) {
   const { setNodeRef } = useDroppable({ id: `${COLUMN_DROPPABLE_PREFIX}${columnKey}` });
   const label = columnLabel(columnKey);
+  const icon = columnIcon(columnKey);
 
   return (
     <button
       type="button"
       ref={setNodeRef}
+      data-testid={`defer-box-${columnKey}`}
       className={`defer-box${dragging ? " defer-box-armed" : ""}${over ? " defer-box-over" : ""}`}
-      title={`${label} を展開表示で開く(ドラッグして先送りもできます)`}
+      title={boxTitle(columnKey, label)}
       onClick={() => onOpen(columnKey)}
     >
-      <span className="defer-box-label">{label}</span>
+      <span className="defer-box-label">
+        {icon && (
+          <span className="column-icon" aria-hidden="true">
+            {icon}
+          </span>
+        )}
+        {label}
+      </span>
       <span className={`defer-box-count${count > 0 ? " defer-box-count-filled" : ""}`}>{count}</span>
     </button>
   );
@@ -50,7 +72,7 @@ interface Props {
 
 export function DeferRail({ columns, dragging, overColumn, onOpen }: Props) {
   return (
-    <aside className="defer-rail" aria-label="先送り">
+    <aside className="defer-rail" aria-label="先送りと監視中">
       <div className="defer-rail-title">先送り</div>
       {DEFER_COLUMNS.map((key) => (
         <DeferBox

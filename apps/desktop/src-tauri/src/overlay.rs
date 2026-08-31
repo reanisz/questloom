@@ -100,6 +100,8 @@ fn place<R: Runtime>(window: &WebviewWindow<R>) {
 /// `DayChanged` も含めるのは、日付をまたいだ直後の取りこぼしを避けるための保険。
 ///
 /// タイトルやリソースの変更(`TaskUpdated` など)は表示 / 非表示を変えないので無視する。
+/// 監視中タスクの起床 (`TaskWoken`) も無視でよい。起床には必ず New 列への
+/// `TaskMoved` が続くので、そちらで判定し直される。
 /// オーバーレイの**中身**はフロントが `questloom://tasks-changed` を受けて取り直すため、
 /// ここで弾いても表示内容が古くなることはない。
 const fn affects_visibility(event: &DomainEvent) -> bool {
@@ -185,6 +187,8 @@ mod tests {
                 task_id: id,
                 parent_id: None,
             },
+            // 起床そのものは無視でよい(直後に New 列への TaskMoved が続く)。
+            DomainEvent::TaskWoken { task_id: id },
         ] {
             assert!(!affects_visibility(&event), "{event:?} で再評価は要らない");
         }

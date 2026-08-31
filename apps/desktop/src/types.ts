@@ -17,8 +17,13 @@ export type ResourceId = string;
 /** アップデート履歴の識別子 (UUID v7)。 */
 export type UpdateId = string;
 
-/** タスクの状態。 */
-export type TaskStatus = "new" | "todo" | "doing" | "done";
+/**
+ * タスクの状態。
+ *
+ * `watching` は「外部の変化待ち」。ユーザー以外の origin(mcp / ai / plugin:*)による
+ * 履歴追記・子タスク作成を受けると、バックエンドが自動的に `new` へ戻す(起床)。
+ */
+export type TaskStatus = "new" | "todo" | "doing" | "done" | "watching";
 
 /** Todo タスクの表示バケット(導出値)。 */
 export type Bucket = "today" | "tomorrow" | "thisWeek" | "nextWeek" | "future";
@@ -31,6 +36,7 @@ export type BoardColumnKey =
   | "thisWeek"
   | "nextWeek"
   | "future"
+  | "watching"
   | "doing"
   | "done";
 
@@ -286,6 +292,7 @@ export const BOARD_COLUMNS: readonly { key: BoardColumnKey; label: string }[] = 
   { key: "thisWeek", label: "This Week" },
   { key: "nextWeek", label: "Next Week" },
   { key: "future", label: "Future" },
+  { key: "watching", label: "監視中" },
   { key: "doing", label: "Doing" },
   { key: "done", label: "Done" },
 ];
@@ -301,13 +308,29 @@ export const PRIMARY_COLUMNS = [
   "done",
 ] as const satisfies readonly BoardColumnKey[];
 
-/** 先送りバケット。通常表示ではレールのコンパクトなドロップボックスとして表示する。 */
+/**
+ * 先送りバケット。通常表示ではレールのコンパクトなドロップボックスとして表示する。
+ *
+ * `watching`(外部の変化待ち)は時間バケットではないが、「今すぐ気にしなくてよいことの
+ * 置き場」という点は同じなのでレールに並べる。列としての展開は展開表示のときだけ。
+ */
 export const DEFER_COLUMNS = [
   "tomorrow",
   "thisWeek",
   "nextWeek",
   "future",
+  "watching",
 ] as const satisfies readonly BoardColumnKey[];
+
+/** 列ヘッダ・レールのラベルに添える控えめな記号。無い列は undefined。 */
+const COLUMN_ICONS: Partial<Record<BoardColumnKey, string>> = {
+  watching: "👁",
+};
+
+/** 列キーの記号(あれば)。Watching であることを一目で分かるようにするためだけのもの。 */
+export function columnIcon(key: BoardColumnKey): string | undefined {
+  return COLUMN_ICONS[key];
+}
 
 /** 通常表示で列として表示する列か。 */
 export function isPrimaryColumn(key: BoardColumnKey): boolean {

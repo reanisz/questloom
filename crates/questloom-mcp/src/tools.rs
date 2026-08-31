@@ -24,10 +24,13 @@ use serde_json::{json, Value};
 
 /// MCP クライアントへ提示する使い方の説明。
 const INSTRUCTIONS: &str = "questloom task board. Tasks live in one of the columns \
-new / today / tomorrow / thisWeek / nextWeek / future / doing / done. \
+new / today / tomorrow / thisWeek / nextWeek / future / watching / doing / done. \
 Time buckets are derived from the schedule, so moving a task to a column sets its schedule. \
 Tasks created here default to instant tasks in the New column, which show up in the user's \
-overlay for one-click completion; pass `column` to create a regular task instead.";
+overlay for one-click completion; pass `column` to create a regular task instead. \
+The `watching` column parks a task that is waiting on something external: any change you \
+make from here (add_task_update, or create_task with that task as `parent_id`) wakes it \
+back up into New so the user sees it.";
 
 // ---- 引数に使う列挙型 ----
 //
@@ -45,6 +48,8 @@ pub enum StatusArg {
     Doing,
     /// 完了。
     Done,
+    /// 外部の変化待ち。
+    Watching,
 }
 
 impl From<StatusArg> for TaskStatus {
@@ -54,6 +59,7 @@ impl From<StatusArg> for TaskStatus {
             StatusArg::Todo => Self::Todo,
             StatusArg::Doing => Self::Doing,
             StatusArg::Done => Self::Done,
+            StatusArg::Watching => Self::Watching,
         }
     }
 }
@@ -74,6 +80,8 @@ pub enum ColumnArg {
     NextWeek,
     /// いつかやる。
     Future,
+    /// 外部の変化待ち。
+    Watching,
     /// 着手中。
     Doing,
     /// 完了。
@@ -89,6 +97,7 @@ impl From<ColumnArg> for BoardColumn {
             ColumnArg::ThisWeek => Self::ThisWeek,
             ColumnArg::NextWeek => Self::NextWeek,
             ColumnArg::Future => Self::Future,
+            ColumnArg::Watching => Self::Watching,
             ColumnArg::Doing => Self::Doing,
             ColumnArg::Done => Self::Done,
         }
@@ -145,7 +154,7 @@ impl From<ResourceArg> for NewResource {
 /// `list_tasks` の引数。
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksArgs {
-    /// Only return tasks in this status ("new", "todo", "doing", "done").
+    /// Only return tasks in this status ("new", "todo", "doing", "done", "watching").
     #[serde(default)]
     pub status: Option<StatusArg>,
     /// Only return tasks in this board column.
@@ -373,7 +382,9 @@ impl QuestloomTools {
     }
 
     #[tool(
-        description = "Move a task to the end of a board column. Time-bucket columns also set the task's schedule."
+        description = "Move a task to the end of a board column. Time-bucket columns also set the \
+                       task's schedule. Use \"watching\" to park a task that is waiting on something \
+                       external; it wakes back into New on the next non-user change."
     )]
     pub fn move_task(
         &self,
@@ -450,7 +461,10 @@ impl QuestloomTools {
         )
     }
 
-    #[tool(description = "Append a progress note to a task's update history.")]
+    #[tool(
+        description = "Append a progress note to a task's update history. A task in the \
+                       \"watching\" column wakes back into New when this is called."
+    )]
     pub fn add_task_update(
         &self,
         Parameters(args): Parameters<AddTaskUpdateArgs>,
@@ -601,6 +615,7 @@ mod tests {
             TaskStatus::Todo,
             TaskStatus::Doing,
             TaskStatus::Done,
+            TaskStatus::Watching,
         ] {
             let json = serde_json::to_value(status).expect("core 型は JSON 化できる");
             let arg: StatusArg =
@@ -615,6 +630,7 @@ mod tests {
             BoardColumn::ThisWeek,
             BoardColumn::NextWeek,
             BoardColumn::Future,
+            BoardColumn::Watching,
             BoardColumn::Doing,
             BoardColumn::Done,
         ] {

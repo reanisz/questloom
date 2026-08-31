@@ -60,6 +60,16 @@ pub enum DomainEvent {
         /// 対象タスク。
         task_id: TaskId,
     },
+    /// 監視中 ([`TaskStatus::Watching`]) のタスクが外部の変化で起こされた。
+    ///
+    /// 直後に New 列への [`TaskMoved`](Self::TaskMoved) が続く。
+    /// 「なぜ New に現れたか」を購読側へ伝えるためのイベントなので、
+    /// 移動そのものは `TaskMoved` を見ればよい。
+    #[serde(rename_all = "camelCase")]
+    TaskWoken {
+        /// 対象タスク。
+        task_id: TaskId,
+    },
     /// アップデート履歴が追記された。
     #[serde(rename_all = "camelCase")]
     TaskUpdateAdded {
@@ -102,6 +112,7 @@ impl DomainEvent {
             | Self::TaskPromoted { task_id }
             | Self::TaskDeleted { task_id }
             | Self::TaskRestored { task_id }
+            | Self::TaskWoken { task_id }
             | Self::TaskUpdateAdded { task_id }
             | Self::TaskResourcesChanged { task_id }
             | Self::TaskParentChanged { task_id, .. } => Some(*task_id),
@@ -138,6 +149,15 @@ mod tests {
         let json = serde_json::to_value(DomainEvent::TaskRestored { task_id: id }).unwrap();
         assert_eq!(json["type"], "taskRestored");
         assert_eq!(json["taskId"], id.to_string());
+
+        let json = serde_json::to_value(DomainEvent::TaskWoken { task_id: id }).unwrap();
+        assert_eq!(json["type"], "taskWoken");
+        assert_eq!(json["taskId"], id.to_string());
+        assert_eq!(
+            DomainEvent::TaskWoken { task_id: id }.task_id(),
+            Some(id),
+            "起床イベントも対象タスクを持つ"
+        );
     }
 
     #[test]

@@ -79,11 +79,12 @@ function App() {
               <button
                 type="button"
                 className="btn btn-sm btn-ghost"
+                data-testid="toggle-expanded"
                 aria-pressed={expanded}
                 title={
                   expanded
                     ? "New / Today / Doing / Done + 先送りレールの表示に戻す"
-                    : "先送りバケットも列として展開する"
+                    : "先送りバケット・監視中も列として展開する"
                 }
                 onClick={() => setExpanded(!expanded)}
               >

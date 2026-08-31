@@ -394,3 +394,115 @@ fn invalid_arguments_are_reported() {
         .expect("Err にはならない");
     assert_eq!(blank.is_error, Some(true));
 }
+
+/// AI / エージェントが「監視にしておく」を実行し、あとから変化を知らせて起こす筋書き。
+#[test]
+fn watching_column_parks_a_task_and_an_update_wakes_it() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::NextWeek),
+            ..new_task("レビュー待ちの PR")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+
+    // 監視へ移す。予定は保持され、バケットは持たない。
+    let parked = json(
+        &tools
+            .move_task(Parameters(MoveTaskArgs {
+                task_id: task_id.clone(),
+                column: ColumnArg::Watching,
+            }))
+            .expect("move_task"),
+    );
+    assert_eq!(parked["status"], "watching");
+    assert_eq!(parked["column"], "watching");
+    assert!(parked["bucket"].is_null());
+    assert_eq!(parked["scheduled"]["kind"], "week");
+
+    // 列・ステータスの両方で絞り込める。
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: Some(ColumnArg::Watching),
+            status: None,
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: None,
+            status: Some(StatusArg::Watching),
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["tasks"][0]["column"], "watching");
+
+    // MCP からの履歴追記は「ユーザー以外の変化」なので起床する。
+    json(
+        &tools
+            .add_task_update(Parameters(AddTaskUpdateArgs {
+                task_id: task_id.clone(),
+                body: "レビューが付きました".to_owned(),
+            }))
+            .expect("add_task_update"),
+    );
+
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: Some(ColumnArg::New),
+            status: None,
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["tasks"][0]["id"], task_id.as_str());
+    assert_eq!(listed["tasks"][0]["status"], "new");
+    // 起床しても予定は残っている。
+    assert_eq!(listed["tasks"][0]["scheduled"]["kind"], "week");
+    assert_eq!(
+        list(
+            &tools,
+            ListTasksArgs {
+                column: Some(ColumnArg::Watching),
+                status: None,
+            },
+        )["count"],
+        0
+    );
+}
+
+/// 監視中のタスクを親にして子タスクを作ると、親が起きる。
+#[test]
+fn creating_a_child_wakes_a_watching_parent() {
+    let tools = tools();
+    let parent = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::Watching),
+            ..new_task("CI の結果待ち")
+        },
+    );
+    let parent_id = parent["id"].as_str().unwrap().to_owned();
+    assert_eq!(parent["status"], "watching");
+
+    create(
+        &tools,
+        CreateTaskArgs {
+            parent_id: Some(parent_id.clone()),
+            ..new_task("CI の失敗を調べる")
+        },
+    );
+
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs {
+                task_id: parent_id.clone(),
+            }))
+            .expect("get_task"),
+    );
+    assert_eq!(detail["status"], "new", "親が New へ起きる");
+}

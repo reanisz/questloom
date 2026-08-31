@@ -75,6 +75,81 @@ async function waitForText(
 /** New 列のカードのセレクタ。 */
 const NEW_CARDS = '[data-testid="column-new"] [data-testid="task-card"]';
 
+/* ---------------------------------------------------- 内蔵 MCP の最小クライアント */
+
+/**
+ * このアプリが待ち受けている MCP のエンドポイント。
+ *
+ * ポートは `wdio.conf.ts` が空きポートを取って `QUESTLOOM_E2E_MCP_PORT` に書き戻し、
+ * `QUESTLOOM_MCP_PORT` としてアプリへ渡している(本物の 39150 は使わない)。
+ */
+const MCP_URL = `http://127.0.0.1:${process.env.QUESTLOOM_E2E_MCP_PORT ?? ""}/mcp`;
+
+/** `initialize` で受け取るセッション id。以降のリクエストに付ける。 */
+let mcpSession: string | null = null;
+
+/**
+ * Streamable HTTP の応答を JSON として読む。
+ *
+ * 結果は SSE (`data: {...}`) で返りうるので、中身のある最初の `data:` 行を拾う。
+ */
+async function readMcpJson(response: Response): Promise<Record<string, unknown>> {
+  const body = await response.text();
+  const line = body
+    .split("\n")
+    .map((raw) => raw.trim())
+    .filter((raw) => raw.startsWith("data:"))
+    .map((raw) => raw.slice("data:".length).trim())
+    .find((data) => data.length > 0);
+  return JSON.parse(line ?? body.trim()) as Record<string, unknown>;
+}
+
+async function postMcp(body: unknown): Promise<Response> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  if (mcpSession) headers["mcp-session-id"] = mcpSession;
+  return fetch(MCP_URL, { method: "POST", headers, body: JSON.stringify(body) });
+}
+
+/** MCP のハンドシェイク。1 度だけ行う。 */
+async function initMcp(): Promise<void> {
+  if (mcpSession) return;
+  const response = await postMcp({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "questloom-gui-e2e", version: "0.1.0" },
+    },
+  });
+  if (!response.ok) throw new Error(`MCP の initialize に失敗しました (${response.status})`);
+  mcpSession = response.headers.get("mcp-session-id");
+  await readMcpJson(response);
+  await postMcp({ jsonrpc: "2.0", method: "notifications/initialized" });
+}
+
+/** MCP のツールを呼び、結果テキスト(questloom はいつも JSON を返す)をパースして返す。 */
+async function callMcp(tool: string, args: Record<string, unknown>): Promise<any> {
+  await initMcp();
+  const response = await postMcp({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: tool, arguments: args },
+  });
+  const payload = (await readMcpJson(response)) as any;
+  if (payload.result?.isError === true) {
+    throw new Error(`${tool} がエラーを返しました: ${JSON.stringify(payload)}`);
+  }
+  const text = payload.result?.content?.[0]?.text;
+  if (typeof text !== "string") throw new Error(`${tool} の応答が読めません: ${JSON.stringify(payload)}`);
+  return JSON.parse(text);
+}
+
 describe("questloom GUI スモーク", () => {
   before(async () => {
     await switchToMainWindow();
@@ -179,5 +254,79 @@ describe("questloom GUI スモーク", () => {
     await browser.keys("Escape");
     await dialog.waitForExist({ reverse: true, timeout: SETTLE_TIMEOUT });
     await waitForText(NEW_CARDS, TITLE, true, `New 列に「${TITLE}」が戻りません`);
+  });
+
+  /**
+   * Watching(監視中)の往復。
+   *
+   * 「右クリック → 移動 → 監視中」で先送りレールへ引っ込め、MCP からの履歴追記
+   * (= ユーザー以外の変化)で New に戻ってくることを見る。起床はサービス層の規則だが、
+   * ここでは**実アプリの UI が実際に New へ描き直す**ところまで通す。
+   */
+  it("監視中へ移すとレールに入り、MCP の履歴追記で New へ戻る", async () => {
+    const card = await findByText(NEW_CARDS, TITLE);
+    if (!card) throw new Error(`「${TITLE}」のカードが見つかりません`);
+    await card.click({ button: "right" });
+
+    await $('[data-testid="task-context-menu"]').waitForDisplayed();
+    await $('[data-testid="context-move"]').click();
+    await $('[data-testid="context-move-watching"]').click();
+
+    // New から消え、通常表示のレールの「監視中」ボックスに数えられる。
+    await waitForText(NEW_CARDS, TITLE, false, `New 列から「${TITLE}」が消えません`);
+    const box = $('[data-testid="defer-box-watching"]');
+    await box.waitForDisplayed();
+    await browser.waitUntil(async () => (await box.getText()).includes("1"), {
+      timeout: SETTLE_TIMEOUT,
+      interval: 250,
+      timeoutMsg: "監視中ボックスの件数が 1 になりません",
+    });
+
+    // MCP から見ても watching にいる。
+    const listed = await callMcp("list_tasks", { column: "watching" });
+    const task = listed.tasks.find((item: { title: string }) => item.title === TITLE);
+    if (!task) throw new Error(`MCP の watching 列に「${TITLE}」がいません`);
+
+    // ユーザー以外の origin の追記で起床する。
+    await callMcp("add_task_update", { task_id: task.id, body: "外部で変化がありました" });
+
+    // ボードは tasks-changed を受けて描き直され、カードが New に戻る。
+    await waitForText(NEW_CARDS, TITLE, true, `起床した「${TITLE}」が New 列に現れません`);
+    await browser.waitUntil(async () => (await box.getText()).includes("0"), {
+      timeout: SETTLE_TIMEOUT,
+      interval: 250,
+      timeoutMsg: "監視中ボックスの件数が 0 に戻りません",
+    });
+  });
+
+  /**
+   * 展開表示は 9 列(監視中を含む)。既定のウィンドウ幅 1280px で横スクロールを出さない
+   * ことを実寸で見る(`--column-min-expanded` の見積もりが崩れたら落ちる)。
+   */
+  it("全列を展開しても横スクロールが出ない", async () => {
+    const toggle = $('[data-testid="toggle-expanded"]');
+    await toggle.click();
+    await $('[data-testid="column-watching"]').waitForDisplayed();
+
+    for (const key of ["new", "tomorrow", "thisWeek", "nextWeek", "future", "watching", "done"]) {
+      await expect($(`[data-testid="column-${key}"]`)).toBeExisting();
+    }
+
+    const overflow = await browser.execute(() => {
+      const board = document.querySelector(".board");
+      if (!board) return null;
+      return {
+        scrollWidth: board.scrollWidth,
+        clientWidth: board.clientWidth,
+        columns: board.querySelectorAll("section.column").length,
+      };
+    });
+    if (!overflow) throw new Error("ボードが見つかりません");
+    expect(overflow.columns).toBe(9);
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+
+    // 通常表示へ戻して次回以降に影響を残さない(表示モードは localStorage に残る)。
+    await toggle.click();
+    await $('[data-testid="defer-box-watching"]').waitForDisplayed();
   });
 });

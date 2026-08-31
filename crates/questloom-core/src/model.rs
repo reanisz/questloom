@@ -75,6 +75,13 @@ pub enum TaskStatus {
     Doing,
     /// 完了。
     Done,
+    /// 外部の変化待ち。
+    ///
+    /// 「今すぐ作業はしないが、外の動きを待っている」状態。ユーザー以外の origin
+    /// (`mcp` / `ai` / `plugin:*` / `system`)による変化を受けると、サービス層が
+    /// 自動的に [`New`](Self::New) へ戻す(起床)。詳しくは
+    /// [`TaskService::add_task_update`](crate::service::TaskService::add_task_update) を参照。
+    Watching,
 }
 
 impl TaskStatus {
@@ -86,6 +93,7 @@ impl TaskStatus {
             Self::Todo => "todo",
             Self::Doing => "doing",
             Self::Done => "done",
+            Self::Watching => "watching",
         }
     }
 }
@@ -124,6 +132,7 @@ impl FromStr for TaskStatus {
             "todo" => Ok(Self::Todo),
             "doing" => Ok(Self::Doing),
             "done" => Ok(Self::Done),
+            "watching" => Ok(Self::Watching),
             other => Err(ParseDomainError::new("TaskStatus", other)),
         }
     }
@@ -272,6 +281,17 @@ pub enum Origin {
     Plugin(String),
     /// システムによる自動記録。
     System,
+}
+
+impl Origin {
+    /// ユーザー自身の操作か。
+    ///
+    /// [`TaskStatus::Watching`] の起床判定に使う。「ユーザー以外 = 外部の変化」なので、
+    /// ここが偽なら監視中のタスクを起こす。
+    #[must_use]
+    pub const fn is_user(&self) -> bool {
+        matches!(self, Self::User)
+    }
 }
 
 impl fmt::Display for Origin {
@@ -451,10 +471,37 @@ mod tests {
             TaskStatus::Todo,
             TaskStatus::Doing,
             TaskStatus::Done,
+            TaskStatus::Watching,
         ] {
             assert_eq!(status.as_str().parse::<TaskStatus>().unwrap(), status);
         }
         assert!("bogus".parse::<TaskStatus>().is_err());
+    }
+
+    /// serde 表現(= フロント・MCP が見る綴り)を固定する。
+    #[test]
+    fn task_status_serde_spelling() {
+        assert_eq!(
+            serde_json::to_value(TaskStatus::Watching).unwrap(),
+            serde_json::json!("watching")
+        );
+        assert_eq!(
+            serde_json::from_value::<TaskStatus>(serde_json::json!("watching")).unwrap(),
+            TaskStatus::Watching
+        );
+    }
+
+    #[test]
+    fn only_user_origin_is_the_user() {
+        assert!(Origin::User.is_user());
+        for origin in [
+            Origin::Mcp,
+            Origin::Ai,
+            Origin::System,
+            Origin::Plugin("github".to_owned()),
+        ] {
+            assert!(!origin.is_user(), "{origin}");
+        }
     }
 
     #[test]
