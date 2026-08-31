@@ -1,0 +1,287 @@
+/**
+ * `github.ts` の判定ロジック(純関数)の検証。
+ *
+ * 実行:
+ *
+ * ```powershell
+ * node --test examples/plugins/github.test.mjs
+ * ```
+ *
+ * Node 22.18+ / 24 は `.ts` を型注釈の除去だけで読めるので、追加のビルドは要らない。
+ * プラグイン本体は読み込み時に `defineQuestloomPlugin` を呼ぶため、
+ * import の前にグローバルへスタブを置いてから動的 import する。
+ *
+ * 型そのものの検査は tsc に任せる(グローバル宣言を効かせるため sdk.ts も渡す):
+ *
+ * ```powershell
+ * cd apps/desktop
+ * ./node_modules/.bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters `
+ *   --target ES2020 --module ESNext --moduleResolution bundler `
+ *   --lib ES2020,DOM,DOM.Iterable --skipLibCheck `
+ *   ../../examples/plugins/github.ts src/plugin-host/sdk.ts
+ * ```
+ */
+
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+globalThis.defineQuestloomPlugin = (plugin) => plugin;
+
+const {
+  buildReasons,
+  collectPullRequestTargets,
+  decideNoticeAction,
+  mergeCi,
+  parsePullRequestUrl,
+  selectNewComments,
+  shouldNotifyCiFailure,
+  summarizeCheckRuns,
+  summarizeCombinedStatus,
+} = await import("./github.ts");
+
+describe("parsePullRequestUrl", () => {
+  it("PR の URL を owner / repo / 番号に分解する", () => {
+    assert.deepEqual(parsePullRequestUrl("https://github.com/rust-lang/rust/pull/1234"), {
+      owner: "rust-lang",
+      repo: "rust",
+      number: 1234,
+      key: "rust-lang/rust#1234",
+      url: "https://github.com/rust-lang/rust/pull/1234",
+    });
+  });
+
+  it("末尾のパス・クエリ・フラグメントが付いていても拾う", () => {
+    for (const suffix of ["/files", "/commits/abc", "#issuecomment-42", "?w=1"]) {
+      const ref = parsePullRequestUrl(`https://github.com/o/r/pull/7${suffix}`);
+      assert.equal(ref?.key, "o/r#7", suffix);
+      // 主リソースには正規化した URL を使う。
+      assert.equal(ref?.url, "https://github.com/o/r/pull/7");
+    }
+  });
+
+  it("www 付き・http でも拾い、キーは小文字にそろえる", () => {
+    assert.equal(parsePullRequestUrl("http://www.github.com/Foo/Bar-Baz/pull/9")?.key, "foo/bar-baz#9");
+  });
+
+  it("PR 以外・別ホストは拾わない", () => {
+    const rejected = [
+      "https://github.com/o/r/issues/1",
+      "https://github.com/o/r/pull/",
+      "https://github.com/o/r/pull/abc",
+      "https://github.com/o/r",
+      "https://gitlab.com/o/r/pull/1",
+      "https://evil.github.com/o/r/pull/1",
+      "https://github.com.evil.test/o/r/pull/1",
+      "C:/tmp/notes.txt",
+      "",
+    ];
+    for (const url of rejected) {
+      assert.equal(parsePullRequestUrl(url), null, url);
+    }
+  });
+});
+
+describe("collectPullRequestTargets", () => {
+  const origin = "plugin:github";
+
+  it("未完了タスクの PR URL だけを集め、同じ PR はまとめる", () => {
+    const tasks = [
+      { id: "t1", status: "todo", origin: "user" },
+      { id: "t2", status: "new", origin: "user" },
+      { id: "t3", status: "done", origin: "user" },
+    ];
+    const resources = [
+      { taskId: "t1", kind: "url", value: "https://github.com/o/r/pull/1" },
+      { taskId: "t2", kind: "url", value: "https://github.com/o/r/pull/1/files" },
+      { taskId: "t2", kind: "url", value: "https://github.com/o/r/pull/2" },
+      // Done タスクのリソースは対象外。
+      { taskId: "t3", kind: "url", value: "https://github.com/o/r/pull/3" },
+      // URL 以外・PR 以外は無視。
+      { taskId: "t1", kind: "file", value: "https://github.com/o/r/pull/4" },
+      { taskId: "t1", kind: "url", value: "https://example.com/" },
+    ];
+    const targets = collectPullRequestTargets(tasks, resources, origin);
+    assert.deepEqual(
+      targets.map((target) => [target.ref.key, target.taskIds]),
+      [
+        ["o/r#1", ["t1", "t2"]],
+        ["o/r#2", ["t2"]],
+      ],
+    );
+  });
+
+  it("自分が作った通知タスクは監視対象にしない(自己増殖の防止)", () => {
+    const tasks = [{ id: "n1", status: "new", origin }];
+    const resources = [{ taskId: "n1", kind: "url", value: "https://github.com/o/r/pull/1" }];
+    assert.deepEqual(collectPullRequestTargets(tasks, resources, origin), []);
+  });
+
+  it("ボードに無いタスクのリソースは無視する", () => {
+    const resources = [{ taskId: "ghost", kind: "url", value: "https://github.com/o/r/pull/1" }];
+    assert.deepEqual(collectPullRequestTargets([], resources, origin), []);
+  });
+});
+
+describe("selectNewComments", () => {
+  const comments = [
+    { id: 1, createdAt: "2026-08-31T00:00:00Z", login: "alice", kind: "issue" },
+    { id: 2, createdAt: "2026-08-31T01:00:00Z", login: "me", kind: "issue" },
+    { id: 3, createdAt: "2026-08-31T02:00:00Z", login: "bob", kind: "review" },
+  ];
+
+  it("前回時刻より後のものだけを、自分のコメントを除いて返す", () => {
+    const picked = selectNewComments(comments, "2026-08-31T00:00:00Z", 1, "me");
+    assert.deepEqual(
+      picked.map((comment) => comment.id),
+      [3],
+    );
+  });
+
+  it("同時刻は id で判定する(同じ秒に複数付いても取りこぼさない)", () => {
+    const same = [
+      { id: 10, createdAt: "2026-08-31T00:00:00Z", login: "bob", kind: "issue" },
+      { id: 11, createdAt: "2026-08-31T00:00:00Z", login: "bob", kind: "issue" },
+    ];
+    const picked = selectNewComments(same, "2026-08-31T00:00:00Z", 10, null);
+    assert.deepEqual(
+      picked.map((comment) => comment.id),
+      [11],
+    );
+  });
+
+  it("ミリ秒付きの起点と秒精度の時刻を文字列比較しない", () => {
+    // 文字列比較だと "…:52Z" > "…:52.500Z" になってしまう。
+    const later = [{ id: 1, createdAt: "2026-08-31T00:00:52Z", login: "bob", kind: "issue" }];
+    assert.deepEqual(selectNewComments(later, "2026-08-31T00:00:52.500Z", null, null), []);
+  });
+
+  it("結果は作成時刻の昇順(最後の 1 件が最新)", () => {
+    const shuffled = [comments[2], comments[0], comments[1]];
+    const picked = selectNewComments(shuffled, null, null, null);
+    assert.deepEqual(
+      picked.map((comment) => comment.id),
+      [1, 2, 3],
+    );
+  });
+});
+
+describe("summarizeCheckRuns / summarizeCombinedStatus / mergeCi", () => {
+  it("失敗系の conclusion を failure として拾い、ジョブ名を残す", () => {
+    for (const conclusion of ["failure", "timed_out", "cancelled", "action_required"]) {
+      const summary = summarizeCheckRuns([{ name: "build", status: "completed", conclusion }]);
+      assert.deepEqual(summary, { state: "failure", failed: ["build"] }, conclusion);
+    }
+  });
+
+  it("未完了があれば pending、成功系だけなら success、空なら none", () => {
+    assert.equal(summarizeCheckRuns([{ name: "a", status: "in_progress" }]).state, "pending");
+    assert.equal(
+      summarizeCheckRuns([
+        { name: "a", status: "completed", conclusion: "success" },
+        { name: "b", status: "completed", conclusion: "skipped" },
+        { name: "c", status: "completed", conclusion: "neutral" },
+      ]).state,
+      "success",
+    );
+    assert.equal(summarizeCheckRuns([]).state, "none");
+  });
+
+  it("失敗は未完了より優先する(赤いまま回っていても失敗を見逃さない)", () => {
+    const summary = summarizeCheckRuns([
+      { name: "a", status: "in_progress" },
+      { name: "b", status: "completed", conclusion: "failure" },
+    ]);
+    assert.deepEqual(summary, { state: "failure", failed: ["b"] });
+  });
+
+  it("combined status を 4 段階に丸める", () => {
+    assert.deepEqual(
+      summarizeCombinedStatus({
+        state: "failure",
+        statuses: [
+          { context: "ci/circleci", state: "failure" },
+          { context: "ci/ok", state: "success" },
+        ],
+      }),
+      { state: "failure", failed: ["ci/circleci"] },
+    );
+    assert.equal(summarizeCombinedStatus({ state: "pending", statuses: [] }).state, "pending");
+    assert.equal(summarizeCombinedStatus({ state: "success", statuses: [] }).state, "success");
+    assert.equal(summarizeCombinedStatus(null).state, "none");
+  });
+
+  it("check-runs と combined status のうち深刻な方を採る", () => {
+    assert.deepEqual(
+      mergeCi({ state: "success", failed: [] }, { state: "failure", failed: ["ci/x"] }),
+      { state: "failure", failed: ["ci/x"] },
+    );
+    assert.equal(mergeCi({ state: "pending", failed: [] }, { state: "success", failed: [] }).state, "pending");
+    assert.equal(mergeCi(null, null).state, "none");
+  });
+});
+
+describe("shouldNotifyCiFailure", () => {
+  const failure = { state: "failure", failed: ["build"] };
+
+  it("失敗していなければ通知しない", () => {
+    assert.equal(
+      shouldNotifyCiFailure({ ciSha: "a", ciNotified: null }, "a", { state: "pending", failed: [] }),
+      false,
+    );
+  });
+
+  it("同じ head SHA の同じ失敗は 1 度しか通知しない", () => {
+    assert.equal(shouldNotifyCiFailure({ ciSha: "a", ciNotified: null }, "a", failure), true);
+    assert.equal(shouldNotifyCiFailure({ ciSha: "a", ciNotified: "failure" }, "a", failure), false);
+  });
+
+  it("head SHA が進んだら、前回も失敗でも新しい失敗として通知する", () => {
+    assert.equal(shouldNotifyCiFailure({ ciSha: "a", ciNotified: "failure" }, "b", failure), true);
+  });
+
+  it("初めて観測した PR が既に赤ければ通知する", () => {
+    assert.equal(shouldNotifyCiFailure({ ciSha: null, ciNotified: null }, "a", failure), true);
+  });
+
+  it("成功に戻ってからまた落ちたら通知する", () => {
+    assert.equal(shouldNotifyCiFailure({ ciSha: "a", ciNotified: null }, "a", failure), true);
+  });
+});
+
+describe("decideNoticeAction", () => {
+  const statuses = new Map([
+    ["open", "new"],
+    ["closed", "done"],
+  ]);
+
+  it("通知タスクがまだ無ければ作る", () => {
+    assert.deepEqual(decideNoticeAction(null, statuses), { kind: "create" });
+  });
+
+  it("未完了の通知タスクが残っていれば追記する(重複作成の防止)", () => {
+    assert.deepEqual(decideNoticeAction("open", statuses), { kind: "append", taskId: "open" });
+  });
+
+  it("完了済み・削除済みなら作り直す", () => {
+    assert.deepEqual(decideNoticeAction("closed", statuses), { kind: "create" });
+    assert.deepEqual(decideNoticeAction("vanished", statuses), { kind: "create" });
+  });
+});
+
+describe("buildReasons", () => {
+  it("コメントと CI の理由を並べる", () => {
+    const comments = [
+      { id: 1, createdAt: "2026-08-31T00:00:00Z", login: "a", kind: "issue" },
+      { id: 2, createdAt: "2026-08-31T00:01:00Z", login: "b", kind: "review" },
+    ];
+    assert.deepEqual(buildReasons(comments, { state: "failure", failed: ["build", "test"] }), [
+      "新しいコメントが 2 件(うちレビューコメント 1 件)",
+      "CI が失敗: build, test",
+    ]);
+  });
+
+  it("何も無ければ空(= 通知を作らない)", () => {
+    assert.deepEqual(buildReasons([], null), []);
+    assert.deepEqual(buildReasons([], { state: "success", failed: [] }), []);
+  });
+});

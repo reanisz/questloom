@@ -18,7 +18,7 @@ questloom/
 ├── README.md
 ├── docs/                            # 設計ドキュメント(実装前に必ず参照)
 ├── examples/
-│   └── plugins/                     # TS プラグインのサンプル(hello.ts)
+│   └── plugins/                     # TS プラグイン(hello.ts / github.ts + github.test.mjs)
 ├── apps/
 │   └── desktop/                     # Tauri デスクトップアプリ
 │       ├── src/                     # フロントエンド (React 19 + TypeScript)
@@ -198,7 +198,7 @@ Tauri command として配線する。ヘッダの「✨ AI」ボタンと、タ
 | ホスト(ロード・activate・dispose・リロード) | `apps/desktop/src/plugin-host/host.ts` |
 | **SDK の型定義(プラグイン作者向けリファレンス)** | `apps/desktop/src/plugin-host/sdk.ts` |
 | トランスパイル (esbuild-wasm) | `apps/desktop/src/plugin-host/transpile.ts` |
-| サンプル | `examples/plugins/hello.ts` |
+| サンプル | `examples/plugins/hello.ts`(最小)、`examples/plugins/github.ts`(実用例) |
 
 ### プラグインの形
 
@@ -246,6 +246,80 @@ export default defineQuestloomPlugin({
 - ファイルを足したり書き換えたら、設定画面の「プラグインを再読み込み」
   (`questloom://plugins-reload` を emit)で dispose → 再ロードされる。
 
+### GitHub プラグイン(Phase 6b)
+
+`examples/plugins/github.ts` が TS プラグイン層のパイロット実装。
+未完了タスクに紐づいた GitHub PR を監視し、新しいコメント・CI 失敗を検知したら
+「PR を確認する: owner/repo#123」というインスタントの子タスクを New に作る。
+
+#### 導入
+
+1. `examples/plugins/github.ts` を `%APPDATA%\dev.reanisz.questloom\plugins\` へコピーする。
+2. 設定画面の「プラグイン」節で「プラグインを再読み込み」を押す。
+3. 同じ節に生えるフォームで **Personal Access Token** を入れて保存する
+   (PAT 未設定のうちは「PAT が未設定のためスキップします」とログに出るだけで何もしない)。
+
+| 設定 | 既定 | 内容 |
+|---|---|---|
+| `pat` (secret) | `""` | GitHub PAT。PR を読めるだけの最小権限で発行する |
+| `pollIntervalMinutes` (number) | `5` | ポーリング間隔。保存すると即座に張り直して 1 回走る |
+| `enabled` (boolean) | `true` | 偽ならポーリングしない |
+
+#### 動作
+
+1. `get_board` + `plugin_list_task_resources` で全タスクの関連リソースを走査し、
+   `https://github.com/<owner>/<repo>/pull/<番号>` を検出する。
+   **Done のタスクと、このプラグイン自身が作ったタスク (`origin == plugin:github`) は対象外**。
+2. PR ごとに直列で(レート制限にやさしく)REST API を叩く。
+   すべて `Authorization: Bearer <pat>` + `X-GitHub-Api-Version: 2022-11-28` +
+   `If-None-Match`(ETag)付き。1 PR あたり最大 5 リクエスト
+   (PR 本体 / issue コメント / レビューコメント / check-runs / combined status)。
+3. 通知の条件は「前回以降の新規コメント(`/user` で取った自分の login のものは除く)」と
+   「CI 失敗への**遷移**」。head SHA が同じ同一の失敗は 1 度しか通知しない。
+4. 通知は KV に持つ直近の通知タスク id で重複を防ぐ。そのタスクが未完了で残っていれば
+   新規作成せず `add_task_update` で追記する。
+5. PR がマージ/クローズされたら、どのタスクからも参照されなくなったら、KV の状態を捨てる。
+6. 403/429(レート制限)に当たったらそのラウンドを打ち切ってログを出すだけ。
+   PR 単位で try/catch するので、1 件の失敗で全体は止まらない。
+
+KV(`plugin_kv` の `github` 名前空間)に持つのは、PR ごとの
+`pr:<owner>/<repo>#<番号>` キー(最終コメント時刻/id、CI の head SHA・判定・通知済み状態、
+エンドポイントごとの ETag、作成済み通知タスクの id)と、自分の login (`selfLogin`)。
+PR を初めて観測したラウンドではコメントの通知はせず「今」を起点に記録するだけにする
+(過去ログを丸ごと通知しないため)。CI が既に赤い場合だけは初回でも通知する。
+
+#### 検証
+
+```powershell
+# 判定ロジック(純関数)のテスト
+node --test examples/plugins/github.test.mjs
+
+# 型検査(グローバル宣言を効かせるため sdk.ts も一緒に渡す)
+cd apps/desktop
+./node_modules/.bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters `
+  --target ES2020 --module ESNext --moduleResolution bundler `
+  --lib ES2020,DOM,DOM.Iterable --skipLibCheck `
+  ../../examples/plugins/github.ts src/plugin-host/sdk.ts
+```
+
+`examples` は `apps/desktop/tsconfig.json` の `include` に**入れない**
+(フロント本体のビルドを汚さないため)。型検査は上のように単発で回す。
+
+#### 既知の制限
+
+- **PAT は `settings` テーブルに平文で保存される。** `type: "secret"` は設定画面で
+  伏せ字にするだけで、暗号化も資格情報マネージャー連携もしていない。
+  DB (`%APPDATA%\dev.reanisz.questloom`) を読める者は PAT を読める。keyring 化は今後の課題。
+- **CORS 前提。** `ctx.fetch` は webview の `fetch` なので api.github.com 側の CORS 応答に依存する。
+  現状 api.github.com は `Access-Control-Allow-Origin: *` を返し、プリフライトの
+  `Access-Control-Allow-Headers` に `Authorization` / `If-None-Match` / `X-GitHub-Api-Version` を、
+  `Access-Control-Expose-Headers` に `ETag` / `X-RateLimit-*` / `Retry-After` を含むので通る。
+  GitHub がこれを変えたら Rust 側にプロキシ command を足す必要がある。
+- GitHub Enterprise Server(自前ホスト)には未対応。API ベース URL は `api.github.com` 固定。
+- コメントは 1 ページ(100 件)しか読まない。1 回のポーリング間隔に 100 件を超える更新があると
+  次回に回る(`since` が進むので取りこぼしはしない)。
+- questloom が起動している間だけ動く。閉じている間の変化は次の起動時にまとめて拾う。
+
 ## 設定画面
 
 ヘッダ右端の歯車ボタンから、ボードを置き換えるページとして開く(`apps/desktop/src/components/SettingsPage.tsx`。
@@ -266,5 +340,7 @@ manifest の `settingsSchema` からフォームを自動生成し、プラグ�
   参照するのは https://v2.tauri.app のドキュメントのみとする。
 - 権限は capabilities(`apps/desktop/src-tauri/capabilities/`)で最小限に構成する。
 - MCP・その他のリッスンは 127.0.0.1 のみにバインドする。
-- GitHub PAT 等のシークレットは DB に置かず、Windows 資格情報マネージャー(keyring crate)に保存する。
+- GitHub PAT 等のシークレットは、最終的には DB ではなく Windows 資格情報マネージャー
+  (keyring crate)に置く方針。**ただし現状は未実装**で、プラグイン設定の `type: "secret"` は
+  `settings` テーブルに平文で入る(上記「GitHub プラグイン」の既知の制限を参照)。
 - crate 間の依存は上記の依存方向を守る。特に `questloom-core` を汚染しないこと。
