@@ -1,7 +1,27 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "plugin-host",
-  "description": "Capability for the hidden TypeScript plugin host window",
+  "description": "Capability for the hidden TypeScript plugin host window. Third party plugin code runs here, so it only gets the plugin runtime commands plus the task operations exposed through ctx.tasks. Settings and AI commands are deliberately left out.",
   "windows": ["plugin-host"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+
+    "allow-plugin-list-sources",
+    "allow-plugin-kv-get",
+    "allow-plugin-kv-set",
+    "allow-plugin-kv-keys",
+    "allow-plugin-get-settings",
+    "allow-plugin-list-task-resources",
+    "allow-plugin-log",
+    "allow-plugin-fetch-allowed",
+    "allow-plugin-publish-loaded",
+
+    "allow-get-board",
+    "allow-get-task",
+    "allow-create-task",
+    "allow-move-task",
+    "allow-complete-task",
+    "allow-add-task-update",
+    "allow-add-resource"
+  ]
 }

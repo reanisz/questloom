@@ -18,12 +18,11 @@ use questloom_core::model::TaskId;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, State};
 
-use crate::commands::CommandResult;
+use crate::commands::{fail, CommandResult};
 use crate::mcp::McpSupervisor;
 use crate::state::AppState;
 
-/// AI 実行の進捗を webview へ通知するイベント名。
-pub const AI_STATUS: &str = "questloom://ai-status";
+pub use crate::contract::AI_STATUS;
 
 /// 実行状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -71,13 +70,6 @@ fn status_sink<R: Runtime>(app: AppHandle<R>) -> impl Fn(AiProgress) + Send + Sy
             tracing::error!(%error, "AI 進捗イベントの emit に失敗しました");
         }
     }
-}
-
-/// エラーを文字列にし、ログへも残す。
-fn fail(error: impl std::fmt::Display) -> String {
-    let message = error.to_string();
-    tracing::warn!(%message, "AI の実行でエラーが発生しました");
-    message
 }
 
 /// State から AI サービスを組み立てる。
@@ -212,12 +204,7 @@ mod tests {
         assert_eq!(status.feature, AiFeature::FreeInstruction);
     }
 
-    #[test]
-    fn event_name_is_valid_for_tauri() {
-        assert!(AI_STATUS
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')));
-    }
+    // イベント名そのものの妥当性は crate::contract のループテストで見る。
 
     /// キャンセルはランナーへ委譲するだけ。
     #[test]

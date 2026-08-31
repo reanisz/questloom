@@ -10,17 +10,23 @@
 
 use std::sync::Arc;
 
+use questloom_core::events::DomainEvent;
 use questloom_core::model::TaskStatus;
 use questloom_core::service::TaskService;
 use tauri::{AppHandle, LogicalPosition, Manager, Runtime, WebviewWindow};
-use tokio::sync::broadcast::error::RecvError;
 
+use crate::events::{spawn_domain_watcher, DomainSignal};
 use crate::state::AppState;
 
 /// オーバーレイウィンドウのラベル(`tauri.conf.json` と一致させること)。
 pub const OVERLAY_WINDOW: &str = "overlay";
 
 /// メインディスプレイ左上からのマージン(論理ピクセル)。
+///
+/// `tauri.conf.json` の overlay ウィンドウの初期位置 (`x: 12`, `y: 12`) と同じ値。
+/// あちらは起動直後の暫定位置で、実際の配置は [`place`] がメインディスプレイの
+/// 原点を見て毎回やり直す。JSON にはコメントが書けないので、
+/// **片方を変えたらもう片方も直すこと**をここに書いておく。
 const MARGIN: f64 = 12.0;
 
 /// New タスク件数と設定に応じて、オーバーレイの表示 / 非表示を切り替える。
@@ -85,25 +91,40 @@ fn place<R: Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
-/// ドメインイベントを購読し、そのたびに表示判定をやり直すタスクを開始する。
+/// 表示判定をやり直す必要があるイベントか。
 ///
-/// 判定はタスク件数と設定にしか依存しないため、イベントの種類は区別しない。
+/// 判定材料は「New タスクが 1 件以上あるか」と「オーバーレイが有効か」だけなので、
+/// New 件数を動かしうるタスク系イベントと `SettingsChanged` に絞る。
+/// `DayChanged` も含めるのは、日付をまたいだ直後の取りこぼしを避けるための保険。
+///
+/// タイトルやリソースの変更(`TaskUpdated` など)は表示 / 非表示を変えないので無視する。
+/// オーバーレイの**中身**はフロントが `questloom://tasks-changed` を受けて取り直すため、
+/// ここで弾いても表示内容が古くなることはない。
+const fn affects_visibility(event: &DomainEvent) -> bool {
+    matches!(
+        event,
+        DomainEvent::TaskCreated { .. }
+            | DomainEvent::TaskMoved { .. }
+            | DomainEvent::TaskCompleted { .. }
+            | DomainEvent::TaskPromoted { .. }
+            | DomainEvent::DayChanged { .. }
+            | DomainEvent::SettingsChanged
+    )
+}
+
+/// ドメインイベントを購読し、表示判定をやり直すタスクを開始する。
+///
+/// 判定は DB へのクエリを伴うので、[`affects_visibility`] が真のイベントだけに反応する
+/// (AI の一括作成のようなバーストで、無関係なイベントごとにクエリが走らないように)。
 pub fn spawn_watcher<R: Runtime>(app: AppHandle<R>, service: &Arc<TaskService>) {
-    let mut receiver = service.subscribe();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(_) => sync(&app),
-                Err(RecvError::Lagged(missed)) => {
-                    tracing::warn!(missed, "オーバーレイ更新でイベントを取りこぼしました");
-                    sync(&app);
-                }
-                Err(RecvError::Closed) => {
-                    tracing::debug!("オーバーレイの購読を終了します");
-                    break;
-                }
+    spawn_domain_watcher(service, "overlay", move |signal| match signal {
+        DomainSignal::Event(event) => {
+            if affects_visibility(&event) {
+                sync(&app);
             }
         }
+        // 何が落ちたか分からないので、取りこぼし時は必ず judge し直す。
+        DomainSignal::Lagged(_) => sync(&app),
     });
 }
 
@@ -111,6 +132,7 @@ pub fn spawn_watcher<R: Runtime>(app: AppHandle<R>, service: &Arc<TaskService>) 
 mod tests {
     use super::*;
     use crate::state::test_support;
+    use questloom_core::model::TaskId;
     use questloom_core::service::NewTask;
     use questloom_core::settings::BoardSettings;
 
@@ -126,6 +148,40 @@ mod tests {
             })
             .unwrap();
         assert!(should_show(&service, true));
+    }
+
+    /// 表示 / 非表示を動かしうるイベントだけを拾うこと。
+    #[test]
+    fn only_visibility_relevant_events_trigger_a_resync() {
+        let id = TaskId::new();
+        for event in [
+            DomainEvent::TaskCreated { task_id: id },
+            DomainEvent::TaskCompleted { task_id: id },
+            DomainEvent::TaskPromoted { task_id: id },
+            DomainEvent::TaskMoved {
+                task_id: id,
+                status: TaskStatus::Todo,
+                bucket: None,
+            },
+            DomainEvent::DayChanged {
+                date: chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
+            },
+            DomainEvent::SettingsChanged,
+        ] {
+            assert!(affects_visibility(&event), "{event:?} は再評価が要る");
+        }
+
+        for event in [
+            DomainEvent::TaskUpdated { task_id: id },
+            DomainEvent::TaskUpdateAdded { task_id: id },
+            DomainEvent::TaskResourcesChanged { task_id: id },
+            DomainEvent::TaskParentChanged {
+                task_id: id,
+                parent_id: None,
+            },
+        ] {
+            assert!(!affects_visibility(&event), "{event:?} で再評価は要らない");
+        }
     }
 
     #[test]

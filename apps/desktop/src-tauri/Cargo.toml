@@ -36,6 +36,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# url: プラグインの fetch 許可ドメイン判定 (plugin_host::is_fetch_allowed) の URL パースに使う。
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

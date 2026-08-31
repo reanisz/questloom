@@ -16,8 +16,8 @@ use questloom_core::service::TaskService;
 use questloom_core::settings::CoreSettings;
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::Shortcut;
-use tokio::sync::broadcast::error::RecvError;
 
+use crate::events::{spawn_domain_watcher, DomainSignal};
 use crate::state::AppState;
 use crate::{autostart, mcp, shortcut};
 
@@ -67,23 +67,11 @@ fn apply_current<R: Runtime>(app: &AppHandle<R>) {
 ///
 /// 設定の実体は [`AppState`] が持つので、イベントは「読み直す合図」として使う。
 pub fn spawn_watcher<R: Runtime>(app: AppHandle<R>, service: &Arc<TaskService>) {
-    let mut receiver = service.subscribe();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(DomainEvent::SettingsChanged) => apply_current(&app),
-                Ok(_) => {}
-                Err(RecvError::Lagged(missed)) => {
-                    // 取りこぼした中に設定変更が含まれうるので、念のため反映し直す。
-                    tracing::warn!(missed, "設定監視でイベントを取りこぼしました");
-                    apply_current(&app);
-                }
-                Err(RecvError::Closed) => {
-                    tracing::debug!("設定変更の購読を終了します");
-                    break;
-                }
-            }
-        }
+    spawn_domain_watcher(service, "settings", move |signal| match signal {
+        DomainSignal::Event(DomainEvent::SettingsChanged)
+        // 取りこぼした中に設定変更が含まれうるので、念のため反映し直す。
+        | DomainSignal::Lagged(_) => apply_current(&app),
+        DomainSignal::Event(_) => {}
     });
 }
 

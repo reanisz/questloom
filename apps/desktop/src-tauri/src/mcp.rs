@@ -83,7 +83,10 @@ impl McpSupervisor {
         })
     }
 
-    /// サーバーを停止する(アプリ終了時用)。
+    /// サーバーを停止する。
+    ///
+    /// アプリ終了時に `lib.rs` の [`RunEvent::Exit`](tauri::RunEvent::Exit) から
+    /// タイムアウト付きで呼ばれる。停止済みでも安全に呼べる(冪等)。
     pub async fn stop(&self) {
         let mut running = self.running.lock().await;
         if let Some(current) = running.take() {

@@ -3,6 +3,10 @@
  *
  * ここは `apps/desktop/src-tauri/src/plugin_host.rs` と 1 対 1 で対応する。
  * plugin-host ウィンドウとメインウィンドウ(設定画面)の両方から使う。
+ *
+ * **どの command をどちらのウィンドウから呼べるかは capability で決まる。**
+ * `plugin_directory` / `plugin_set_settings` / `plugin_list_loaded` は設定画面専用で、
+ * plugin-host からは ACL に拒否される(`src-tauri/capabilities/plugin-host.json`)。
  */
 
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -10,6 +14,12 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { call } from "../tauri";
 import type { LoadedPlugin, PluginSourceFile } from "../types";
 import type { PluginSettings, PluginTaskResource } from "./sdk";
+
+/*
+ * イベント名は Rust 側の `apps/desktop/src-tauri/src/contract.rs` が発行元で、
+ * ここはその写し。codegen はしていないので、**片方を変えたらもう片方も直すこと**
+ * (タスク・AI 系のイベント名は `src/api.ts` 側にある)。
+ */
 
 /** ホストがロード結果を公開したときのイベント名。 */
 export const PLUGINS_LOADED = "questloom://plugins-loaded";

@@ -25,30 +25,18 @@ use questloom_core::repository::TaskRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use url::{Host, Url};
 
-use crate::commands::CommandResult;
+use crate::commands::{fail, CommandResult};
 use crate::state::AppState;
+
+pub use crate::contract::{PLUGINS_LOADED, PLUGINS_RELOAD, PLUGIN_SETTINGS_CHANGED};
 
 /// プラグインファイルを置くディレクトリ名(`<app_data_dir>` からの相対)。
 pub const PLUGINS_DIR: &str = "plugins";
 
 /// プラグイン設定の名前空間の接頭辞。`settings` テーブルのキーは `plugin:<id>`。
 const SETTINGS_PREFIX: &str = "plugin:";
-
-/// プラグインのロード結果が更新されたことを知らせるイベント名。
-pub const PLUGINS_LOADED: &str = "questloom://plugins-loaded";
-
-/// 全プラグインの再読み込みを要求するイベント名(発行元は設定画面)。
-pub const PLUGINS_RELOAD: &str = "questloom://plugins-reload";
-
-/// プラグイン設定が外部(設定画面)から変更されたことを知らせるイベント名。
-pub const PLUGIN_SETTINGS_CHANGED: &str = "questloom://plugin-settings-changed";
-
-fn fail(error: impl std::fmt::Display) -> String {
-    let message = error.to_string();
-    tracing::warn!(%message, "プラグイン command でエラーが発生しました");
-    message
-}
 
 /// ファイル名がプラグインソースとして受け入れられるか。
 ///
@@ -90,35 +78,25 @@ pub fn is_fetch_allowed(url: &str, domains: &[String]) -> bool {
 }
 
 /// `http(s)://host[:port]/...` からホスト名を取り出す。それ以外のスキームは `None`。
+///
+/// パースは [`url`] crate に任せる(手書きの authority 分解より取りこぼしが少ない)。
+/// その上でプラグイン向けに次を足す。
+///
+/// - スキームは `http` / `https` のみ。
+/// - 認証情報付き URL (`user:pass@host`) はホストの誤認を招くため一律拒否。
+/// - IP リテラル(IPv4 / IPv6)は扱わない。許可ドメインはホスト名で書かせる。
 fn url_host(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .or_else(|| {
-            let lower = url.to_ascii_lowercase();
-            if lower.starts_with("https://") {
-                Some(&url["https://".len()..])
-            } else if lower.starts_with("http://") {
-                Some(&url["http://".len()..])
-            } else {
-                None
-            }
-        })?;
-    // authority は最初の `/` `?` `#` まで。
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .filter(|part| !part.is_empty())?;
-    // 認証情報付き URL (`user:pass@host`) はホストの誤認を招くため拒否する。
-    if authority.contains('@') {
+    let parsed = Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    // IPv6 リテラルは扱わない(プラグインの用途では不要)。
-    if authority.contains('[') {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return None;
     }
-    let host = authority.split(':').next()?;
-    normalize_host(host)
+    match parsed.host()? {
+        Host::Domain(domain) => normalize_host(domain),
+        Host::Ipv4(_) | Host::Ipv6(_) => None,
+    }
 }
 
 /// ホスト名を比較用に正規化する。空・非 ASCII は `None`。
@@ -631,12 +609,58 @@ mod tests {
         assert!(manifest.settings_schema.is_empty());
     }
 
+    // イベント名そのものの妥当性は crate::contract のループテストで見る。
+
+    /// ホスト JS が読む形(camelCase)を固定する。
     #[test]
-    fn event_names_are_valid_for_tauri() {
-        for name in [PLUGINS_LOADED, PLUGINS_RELOAD, PLUGIN_SETTINGS_CHANGED] {
-            assert!(name
-                .chars()
-                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')));
-        }
+    fn plugin_source_json_is_camel_case() {
+        let modified = DateTime::parse_from_rfc3339("2026-08-31T01:02:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let json = serde_json::to_value(PluginSource {
+            file_name: "hello.ts".to_owned(),
+            source: "export default {}".to_owned(),
+            modified_at: Some(modified),
+        })
+        .unwrap();
+        assert_eq!(json["fileName"], "hello.ts");
+        assert_eq!(json["source"], "export default {}");
+        assert_eq!(json["modifiedAt"], "2026-08-31T01:02:03Z");
+        assert_eq!(json.as_object().map(serde_json::Map::len), Some(3));
+
+        // 更新時刻が取れなかったファイルは null(JS 側は省略扱いにする)。
+        let json = serde_json::to_value(PluginSource {
+            file_name: "hello.ts".to_owned(),
+            source: String::new(),
+            modified_at: None,
+        })
+        .unwrap();
+        assert!(json["modifiedAt"].is_null());
+    }
+
+    /// 設定変更通知のペイロードも camelCase。
+    #[test]
+    fn settings_changed_payload_is_camel_case() {
+        let json = serde_json::to_value(SettingsChangedPayload {
+            plugin_id: "github".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(json["pluginId"], "github");
+    }
+
+    /// 全タスクの関連リソースも camelCase。
+    #[test]
+    fn plugin_task_resource_json_is_camel_case() {
+        let id = TaskId::new();
+        let json = serde_json::to_value(PluginTaskResource {
+            task_id: id,
+            kind: "url".to_owned(),
+            value: "https://example.com".to_owned(),
+            label: "例".to_owned(),
+            is_primary: true,
+        })
+        .unwrap();
+        assert_eq!(json["taskId"], id.to_string());
+        assert_eq!(json["isPrimary"], true);
     }
 }

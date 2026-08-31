@@ -30,6 +30,12 @@ import type {
   TaskUpdateEntry,
 } from "./types";
 
+/*
+ * イベント名は Rust 側の `apps/desktop/src-tauri/src/contract.rs` が発行元で、
+ * ここはその写し。codegen はしていないので、**片方を変えたらもう片方も直すこと**
+ * (プラグイン基盤のイベント名は `src/plugin-host/api.ts` 側にある)。
+ */
+
 /** タスク関連の変更通知イベント名。ペイロードは見ずに再フェッチすればよい。 */
 export const TASKS_CHANGED = "questloom://tasks-changed";
 

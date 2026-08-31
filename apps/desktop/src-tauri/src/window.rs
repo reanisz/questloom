@@ -7,14 +7,10 @@ use questloom_core::model::TaskId;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 
+pub use crate::contract::OPEN_TASK;
+
 /// メインウィンドウのラベル(`tauri.conf.json` と一致させること)。
 pub const MAIN_WINDOW: &str = "main";
-
-/// メインウィンドウでタスク詳細を開かせるイベント名。
-///
-/// オーバーレイから通常タスクをクリックしたときに、[`TASKS_CHANGED`](crate::events::TASKS_CHANGED)
-/// とは別経路でメインウィンドウのみへ送る。
-pub const OPEN_TASK: &str = "questloom://open-task";
 
 /// [`OPEN_TASK`] のペイロード。
 #[derive(Debug, Clone, Serialize)]
@@ -84,13 +80,7 @@ pub fn toggle_main<R: Runtime>(app: &AppHandle<R>) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn event_name_is_valid_for_tauri() {
-        // Tauri v2 が許容するのは英数字と `-` `/` `:` `_` のみ。
-        assert!(OPEN_TASK
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')));
-    }
+    // イベント名そのものの妥当性は crate::contract のループテストで見る。
 
     #[test]
     fn open_task_payload_is_camel_case() {

@@ -117,7 +117,12 @@ impl AiRunner {
         }
     }
 
-    /// 実行中の機能。
+    /// 実行中の機能。実行中でなければ `None`。
+    ///
+    /// 現時点の呼び出し元は crate 内のテストだけ。デスクトップ側は進捗を
+    /// `questloom://ai-status` イベントで受け取っていて、状態を問い合わせる必要が
+    /// 無いため配線していない。ランナーの状態を外から確かめられる唯一の口として
+    /// 公開したままにしておく(将来 `get_runtime_status` に載せる余地もある)。
     #[must_use]
     pub fn running_feature(&self) -> Option<AiFeature> {
         Self::lock(&self.current).as_ref().map(|job| job.feature)

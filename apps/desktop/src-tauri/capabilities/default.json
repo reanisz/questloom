@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. The board / task drawer / settings page live here, so it gets every app command.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -10,6 +10,42 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
-    "opener:default"
+    "opener:default",
+
+    "allow-get-board",
+    "allow-get-task",
+    "allow-create-task",
+    "allow-update-task",
+    "allow-move-task",
+    "allow-complete-task",
+    "allow-promote-task",
+    "allow-add-task-update",
+    "allow-add-resource",
+    "allow-remove-resource",
+    "allow-set-parent",
+
+    "allow-get-settings",
+    "allow-get-default-settings",
+    "allow-set-settings",
+    "allow-get-runtime-status",
+    "allow-show-main-window",
+
+    "allow-ai-create-tasks",
+    "allow-ai-split-task",
+    "allow-ai-free-instruction",
+    "allow-ai-cancel",
+
+    "allow-plugin-directory",
+    "allow-plugin-list-sources",
+    "allow-plugin-kv-get",
+    "allow-plugin-kv-set",
+    "allow-plugin-kv-keys",
+    "allow-plugin-get-settings",
+    "allow-plugin-set-settings",
+    "allow-plugin-list-task-resources",
+    "allow-plugin-log",
+    "allow-plugin-fetch-allowed",
+    "allow-plugin-publish-loaded",
+    "allow-plugin-list-loaded"
   ]
 }

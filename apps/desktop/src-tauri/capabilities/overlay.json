@@ -1,12 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay",
-  "description": "Capability for the overlay notification window",
+  "description": "Capability for the overlay notification window. It only lists New tasks, so it may read the board, complete a task and raise the main window.",
   "windows": ["overlay"],
   "permissions": [
     "core:default",
     "core:window:allow-set-size",
     "opener:allow-open-url",
-    "opener:allow-default-urls"
+    "opener:allow-default-urls",
+
+    "allow-get-board",
+    "allow-complete-task",
+    "allow-show-main-window"
   ]
 }
