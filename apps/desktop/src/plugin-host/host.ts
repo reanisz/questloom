@@ -114,6 +114,40 @@ function hostLog(level: PluginLogLevel, message: string): void {
   forwardLog(HOST_ID, level, message);
 }
 
+/* ----------------------------------------------------------------- settings */
+
+/**
+ * プラグインへ渡す設定値を組み立てる。
+ *
+ * `settingsSchema` の既定値に、`settings` テーブルの保存値と、
+ * **OS の資格情報ストアにあるシークレット**を重ねる。シークレットは DB には
+ * 入っていないので、`type: "secret"` の項目だけ `plugin_secret_get` で取り直す。
+ * プラグインから見た形は従来どおり(`settings.pat` のように普通に読める)。
+ *
+ * 資格情報ストアが読めなかった項目はログを出して飛ばす。旧バージョンから
+ * 移行した直後で平文がまだ `settings` に残っている場合は、そちらの値が使われる。
+ */
+async function readPluginSettings(entry: ActivePlugin): Promise<PluginSettings> {
+  const id = entry.manifest.id;
+  const schema = entry.manifest.settingsSchema ?? [];
+  const settings = mergeSettings(schema, await papi.pluginGetSettings(id));
+
+  for (const field of schema) {
+    if (field.type !== "secret") continue;
+    try {
+      const secret = await papi.pluginSecretGet(id, field.key);
+      if (secret !== null) settings[field.key] = secret;
+    } catch (error) {
+      forwardLog(
+        id,
+        "warn",
+        `シークレット "${field.key}" を読めませんでした: ${describeError(error)}`,
+      );
+    }
+  }
+  return settings;
+}
+
 /* ------------------------------------------------------------------ context */
 
 /** プラグイン用のロガーを作る。 */
@@ -155,8 +189,7 @@ function createContext(entry: ActivePlugin): PluginContext {
     },
 
     settings: {
-      get: async () =>
-        mergeSettings(entry.manifest.settingsSchema, await papi.pluginGetSettings(id)),
+      get: () => readPluginSettings(entry),
       onChange: (handler) => {
         entry.settingsHandlers.add(handler);
         return () => {
@@ -392,10 +425,7 @@ async function notifySettingsChanged(pluginId: string): Promise<void> {
   if (!entry || entry.settingsHandlers.size === 0) return;
   let settings: PluginSettings;
   try {
-    settings = mergeSettings(
-      entry.manifest.settingsSchema,
-      await papi.pluginGetSettings(pluginId),
-    );
+    settings = await readPluginSettings(entry);
   } catch (error) {
     hostLog("warn", `${pluginId} の設定を読めませんでした: ${describeError(error)}`);
     return;

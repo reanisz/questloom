@@ -38,6 +38,7 @@ pub mod events;
 pub mod mcp;
 pub mod overlay;
 pub mod plugin_host;
+pub mod secrets;
 pub mod settings;
 pub mod shortcut;
 pub mod state;
@@ -102,6 +103,8 @@ pub fn run() {
             let state = AppState::initialize(&data_dir)?;
             let service = Arc::clone(&state.service);
             let settings = state.settings();
+            // MCP の Bearer トークンはコア設定ではなく資格情報ストアにある(crate::secrets)。
+            let mcp_token = state.mcp_token();
             app.manage(state);
             app.manage(Arc::new(mcp::McpSupervisor::new(Arc::clone(&service))));
             app.manage(Arc::new(questloom_ai::AiRunner::new()));
@@ -121,7 +124,7 @@ pub fn run() {
             settings::spawn_watcher(handle.clone(), &service);
 
             // 起動時点の設定・タスク状況を反映する。
-            settings::apply(&handle, &settings);
+            settings::apply(&handle, &settings, mcp_token);
             overlay::sync(&handle);
             Ok(())
         })
@@ -154,6 +157,8 @@ pub fn run() {
             commands::set_settings,
             commands::get_runtime_status,
             commands::show_main_window,
+            commands::get_mcp_token_status,
+            commands::set_mcp_token,
             ai::ai_create_tasks,
             ai::ai_split_task,
             ai::ai_free_instruction,
@@ -170,6 +175,9 @@ pub fn run() {
             plugin_host::plugin_fetch_allowed,
             plugin_host::plugin_publish_loaded,
             plugin_host::plugin_list_loaded,
+            plugin_host::plugin_secret_get,
+            plugin_host::plugin_secret_set,
+            plugin_host::plugin_secret_status,
         ])
         .build(tauri::generate_context!())
         .expect("Tauri アプリの起動に失敗しました")
@@ -291,13 +299,26 @@ mod tests {
         }
     }
 
-    /// メインウィンドウ(ボード・ドロワー・設定画面)は全 command を使える。
+    /// main ウィンドウだけに配らない command。
+    ///
+    /// シークレットの**読み出し**は plugin-host 専用にする。プラグインコードは値が
+    /// 無いと動かないので読み出しを許すが、設定画面には要らない(設定画面が扱うのは
+    /// `plugin_secret_set` / `plugin_secret_status` だけで、値は一度書いたら
+    /// アプリから読み出せない)。
+    const NOT_FOR_MAIN: &[&str] = &["plugin_secret_get"];
+
+    /// メインウィンドウ(ボード・ドロワー・設定画面)は
+    /// [`NOT_FOR_MAIN`] を除く全 command を使える。
     #[test]
     fn app_commands_match_the_capabilities() {
+        let expected: BTreeSet<String> = allowed(APP_COMMANDS)
+            .difference(&allowed(NOT_FOR_MAIN))
+            .cloned()
+            .collect();
         assert_eq!(
             app_permissions(MAIN),
-            allowed(APP_COMMANDS),
-            "main の capability は APP_COMMANDS と一致させること"
+            expected,
+            "main の capability は APP_COMMANDS から NOT_FOR_MAIN を除いたものと一致させること"
         );
     }
 
@@ -323,6 +344,7 @@ mod tests {
                 "plugin_kv_set",
                 "plugin_kv_keys",
                 "plugin_get_settings",
+                "plugin_secret_get",
                 "plugin_list_task_resources",
                 "plugin_log",
                 "plugin_fetch_allowed",
@@ -354,11 +376,15 @@ mod tests {
             "get_default_settings",
             "set_settings",
             "get_runtime_status",
+            "get_mcp_token_status",
+            "set_mcp_token",
             "ai_create_tasks",
             "ai_split_task",
             "ai_free_instruction",
             "ai_cancel",
             "plugin_set_settings",
+            "plugin_secret_set",
+            "plugin_secret_status",
             "plugin_directory",
             "plugin_list_loaded",
         ]);
@@ -370,6 +396,22 @@ mod tests {
                     "{name} に {permission} を渡してはいけない"
                 );
             }
+        }
+    }
+
+    /// シークレットの読み出しは plugin-host だけ。
+    ///
+    /// 設定画面(main)もオーバーレイも値を読めない。一度書いたシークレットを
+    /// アプリの画面から取り出す経路を残さないため。
+    #[test]
+    fn only_the_plugin_host_can_read_secrets() {
+        let reader = allow_permission("plugin_secret_get");
+        assert!(app_permissions(PLUGIN_HOST).contains(&reader));
+        for (name, capability) in [("default", MAIN), ("overlay", OVERLAY)] {
+            assert!(
+                !app_permissions(capability).contains(&reader),
+                "{name} に {reader} を渡してはいけない"
+            );
         }
     }
 }

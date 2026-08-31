@@ -104,12 +104,19 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   cargo test -p questloom-desktop --test backend_e2e -- --ignored
   ```
 
+  3 本目
+  (`a_plaintext_token_is_migrated_to_the_credential_manager_by_the_real_app`)は
+  **本物の資格情報マネージャーに書き込む**。service 名を実行ごとに分け、成否によらず
+  最後にエントリを消す。`secrets::tests::keyring_store_round_trips_against_the_real_backend`
+  (`cargo test -p questloom-desktop --lib secrets -- --ignored`)も同様。
+
 - **GUI e2e スモーク** (`apps/desktop/e2e/smoke.spec.ts`) は WebdriverIO +
   [`@wdio/tauri-service`](https://webdriver.io/docs/wdio-tauri-service/) で実アプリを操作する。
   「起動 → ボード描画 → New へタスク作成 → カードから詳細ドロワー → 削除 →
   『削除済み』から復元 → カードを右クリック → メニューから削除 → 復元 →
-  監視中へ移して MCP の履歴追記で起床 → 全列展開の幅」を
-  main ウィンドウだけで 1 本通す(7 テスト)。設定は `apps/desktop/wdio.conf.ts`。
+  監視中へ移して MCP の履歴追記で起床 → 全列展開の幅 →
+  プラグインのシークレット(書き込み・ACL・平文からの移送)→ MCP トークン」を
+  main ウィンドウだけで 1 本通す(9 テスト)。設定は `apps/desktop/wdio.conf.ts`。
 
   **前提は「フロント同梱の debug ビルド」**。`npm run tauri dev` / `cargo run` が作る exe は
   `devUrl`(Vite dev サーバー)を読みに行くので使えない。
@@ -125,10 +132,20 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   - driver は `driverProvider: "external"`(= `cargo install tauri-driver --locked` で入る
     `tauri-driver`)。未導入なら `autoInstallTauriDriver` が自動で入れる(初回は数分)。
     Windows の `msedgedriver` は WebView2 の版に合わせてサービスが自動 DL する。
-  - **本物のデータは触らない。** `wdio.conf.ts` が実行ごとに一時ディレクトリと空きポートを取り、
-    `QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` として渡す(下記参照)。
+  - **本物のデータは触らない。** `wdio.conf.ts` が実行ごとに一時ディレクトリ・空きポート・
+    資格情報 service 名を取り、`QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` /
+    `QUESTLOOM_KEYRING_SERVICE` として渡す(下記参照)。
     終了時に一時ディレクトリと、居残った `tauri-driver` / `msedgedriver` /
     `questloom-desktop` を片付ける(**起動前から居たプロセスには手を出さない**)。
+    **資格情報エントリだけは spec 側で消す**(Node からは消せないので、シークレットを
+    書いたテストは最後に必ず `null` を書いて解除する)。
+  - シークレットの spec 用に、`wdio.conf.ts` が一時プロファイルの `plugins/` へ
+    `e2esecret.ts`(secret 項目を 1 つ持つ最小プラグイン)を置く。
+    プラグインディレクトリも `QUESTLOOM_DATA_DIR` に従うので、利用者の本物の
+    プラグインは読み込まれない。
+  - UI から辿れない配線(シークレット・稼働状態)は、spec の `invoke` ヘルパで
+    `window.__TAURI_INTERNALS__.invoke` を直接呼んで確かめる。main の ACL で
+    許されていない command(`plugin_secret_get`)が拒まれることもここで見る。
   - セレクタは最小限の `data-testid`(`titlebar` / `column-<key>` /
     `quick-add-open-<key>`(クイック追加を開くテキストボタン)/ `quick-add-<key>`(開いた後の入力欄)/
     `task-card` / `task-drawer` / `drawer-delete` / `confirm-delete` / `open-deleted` /
@@ -155,9 +172,17 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 (`apps/desktop/src-tauri/src/env_override.rs`)。どちらも未設定なら従来どおり。
 
 - `QUESTLOOM_DATA_DIR` — `app_data_dir()`(`%APPDATA%\dev.reanisz.questloom`)の代わりに
-  このディレクトリを使う。
+  このディレクトリを使う。DB・バックアップだけでなく **`plugins/` の探索先もここに従う**
+  (`plugin_host::plugins_dir` は `AppState::data_dir` を基準にする)。
+  `app_data_dir()` を直接引くと、一時プロファイルのはずのテストが利用者の本物の
+  プラグインを読み込んでしまう。
 - `QUESTLOOM_MCP_PORT` — コア設定の `mcpPort` を無視してこのポートで待ち受ける
   (本物の 39150 と衝突させないため)。`u16` として読めない値は無視して設定値に落ちる。
+- `QUESTLOOM_KEYRING_SERVICE` — シークレットの service 名(既定 `questloom`)を差し替える。
+  **資格情報エントリはデータディレクトリと違ってユーザー単位でグローバル**なので、
+  `QUESTLOOM_DATA_DIR` だけでは本物のエントリと分離できない。実アプリを起動する
+  テスト・検証では必ず一緒に渡すこと(`wdio.conf.ts` と `tests/backend_e2e.rs` は
+  実行ごとにユニークな名前を渡している)。
 
 ## 設計ドキュメント
 
@@ -201,9 +226,14 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 アプリ起動時、設定 `mcpEnabled` が真なら自動的に立ち上がる。
 
 - エンドポイント: **`http://127.0.0.1:39150/mcp`**(バインドは 127.0.0.1 のみ)
-- 関連設定(`CoreSettings`): `mcpEnabled`(既定 true)、`mcpPort`(既定 39150)、
-  `mcpToken`(既定 null。設定すると `Authorization: Bearer <token>` を要求し、
-  不一致は 401)。設定を変更すると `SettingsChanged` を受けてサーバーが張り直される。
+- 関連設定(`CoreSettings`): `mcpEnabled`(既定 true)、`mcpPort`(既定 39150)。
+  設定を変更すると `SettingsChanged` を受けてサーバーが張り直される。
+- **Bearer トークンはコア設定に入っていない。** 実体は Windows 資格情報マネージャー
+  (service `questloom` / エントリ `core/mcp-token`。「シークレットの保存先」節を参照)で、
+  設定すると `Authorization: Bearer <token>` を要求し、不一致は 401 になる。
+  読み書きは `get_mcp_token_status`(設定済みか否かだけ)/ `set_mcp_token`(設定・解除)の
+  2 つの command で、**値をアプリ側へ読み出す経路は無い**。変更すると
+  `SettingsChanged` が飛んでサーバーが張り直される。
 - ポート使用中などで起動に失敗した場合は error ログを出すだけで、アプリは動き続ける。
 
 Claude Code への登録:
@@ -350,10 +380,15 @@ export default defineQuestloomPlugin({
 - **questloom が起動している間だけ動く**。常駐サービスではなく、アプリ終了でポーリングも止まる。
 - `fetchDomains` はサブドメインのワイルドカードを持たない(完全一致のみ)。
   判定の実体は Rust 側 `plugin_host::is_fetch_allowed`(テストもそこにある)。
-- シークレット項目 (`type: "secret"`) は現状 **DB の `settings` テーブルに平文で入る**。
-  資格情報マネージャーへの移行は今後の課題。
+- シークレット項目 (`type: "secret"`) の値は **Windows 資格情報マネージャー**に入る
+  (`plugin:<id>/<key>`。「シークレットの保存先」節を参照)。プラグインから見た形は
+  他の項目と同じで、`ctx.settings.get()` が値を混ぜて返す。ただし**設定画面には
+  「設定済み / 未設定」しか出ない**(一度書いた値は画面から読み出せない)。
 - ホスト JS とプラグインは同じ JS realm で動くため、`fetchDomains` は
-  セキュリティ境界ではなく**事故防止のガードレール**として扱う。
+  セキュリティ境界ではなく**事故防止のガードレール**として扱う。同じ理由で、
+  シークレットの ACL 分離(`plugin_secret_get` は plugin-host のみ)も
+  **プラグイン同士を隔てるものではない**(同じ realm なので互いの値に手が届く)。
+  外(DB を読める第三者・バックアップ・ログ)からシークレットを守るための仕組みである。
 
 ### 開発時の確認
 
@@ -383,7 +418,7 @@ export default defineQuestloomPlugin({
 
 | 設定 | 既定 | 内容 |
 |---|---|---|
-| `pat` (secret) | `""` | GitHub PAT。PR を読めるだけの最小権限で発行する。空なら認証なしで叩く |
+| `pat` (secret) | `""` | GitHub PAT。PR を読めるだけの最小権限で発行する。空なら認証なしで叩く。値は Windows 資格情報マネージャー(`plugin:github/pat`)に入り、設定画面には「設定済み / 未設定」しか出ない |
 | `pollIntervalMinutes` (number) | `5` | ポーリング間隔。保存すると即座に張り直して 1 回走る |
 | `enabled` (boolean) | `true` | 偽なら 2 つの機能とも動かない |
 
@@ -459,9 +494,12 @@ cd apps/desktop
 
 #### 既知の制限
 
-- **PAT は `settings` テーブルに平文で保存される。** `type: "secret"` は設定画面で
-  伏せ字にするだけで、暗号化も資格情報マネージャー連携もしていない。
-  DB (`%APPDATA%\dev.reanisz.questloom`) を読める者は PAT を読める。keyring 化は今後の課題。
+- **PAT は Windows 資格情報マネージャー**(service `questloom` / エントリ
+  `plugin:github/pat`)に入る。DB (`%APPDATA%\dev.reanisz.questloom`) には残らない。
+  以前のバージョンが `settings` テーブルへ平文で書いた PAT は、次のプラグイン
+  ロード時に自動で移送され JSON からは消える(「シークレットの保存先」節を参照)。
+  ただし**同じ realm で動く他のプラグインからは `ctx.settings.get()` 越しに見えない
+  だけで、ホスト JS を経由すれば手が届く**。プラグイン同士の隔離ではないことに注意。
 - **CORS 前提。** `ctx.fetch` は webview の `fetch` なので api.github.com 側の CORS 応答に依存する。
   現状 api.github.com は `Access-Control-Allow-Origin: *` を返し、プリフライトの
   `Access-Control-Allow-Headers` に `Authorization` / `If-None-Match` / `X-GitHub-Api-Version` を、
@@ -475,6 +513,51 @@ cd apps/desktop
   ユーザーが description を消しても埋め直さない(上書き事故を避けるための割り切り)。
   PAT 無しの認証なしリクエストは GitHub のレート制限が厳しい(IP あたり 60 req/h)。
 
+## シークレットの保存先(資格情報マネージャー)
+
+**シークレットは DB に置かない。** 実体は OS の資格情報ストア(Windows なら資格情報
+マネージャー)で、[keyring](https://docs.rs/keyring) crate 越しに読み書きする。
+`settings` テーブルには値も痕跡も入らない。
+
+| 項目 | エントリ名 |
+|---|---|
+| 内蔵 MCP サーバーの Bearer トークン | `core/mcp-token` |
+| プラグインの `type: "secret"` 項目 | `plugin:<id>/<key>` |
+
+- service 名は **`questloom`**。テスト・検証で本物のエントリを汚さないよう、
+  `QUESTLOOM_KEYRING_SERVICE` で丸ごと差し替えられる(下記「テスト用の環境変数」)。
+- 実装は `apps/desktop/src-tauri/src/secrets.rs`。`SecretStore` trait +
+  keyring 実装 (`KeyringSecretStore`) + テスト用インメモリ実装 (`MemorySecretStore`)。
+  `questloom-core` は OS 非依存を保つため、この層はシェル(src-tauri)にだけ置く。
+- エントリ名は `SecretKey::mcp_token()` / `SecretKey::plugin(id, key)` からしか作れない。
+  区画に使えるのは英数字・`-`・`_`・`.` のみで、webview から渡された id / key は
+  境界で必ず検査する。
+- **平文フォールバックはしない。** 資格情報ストアが使えない環境では読み書きとも
+  エラーにして UI に出す(黙って DB へ落とさない)。
+- 一度書いた値は **UI からは読み出せない**。設定画面が見るのは「設定済み / 未設定」だけで、
+  値を読む command (`plugin_secret_get`) は plugin-host ウィンドウにしか配っていない。
+
+### 旧バージョンからの移送(1 回限り)
+
+平文で `settings` に残っている値は、次のタイミングで自動的に資格情報ストアへ移り、
+JSON からは消える。移送に失敗した場合は error ログを出して**平文をそのまま残し**、
+次回にやり直す(認証が黙って外れる方が危ないため)。
+
+| 対象 | いつ | どこ |
+|---|---|---|
+| `mcpToken` | 起動時(`AppState::initialize`) | `state.rs::adopt_mcp_token` |
+| プラグインの secret 項目 | ホストがロード結果を公開したとき (`plugin_publish_loaded`) | `plugin_host.rs::migrate_plugin_secrets` |
+
+プラグイン側を **manifest 駆動**にしてあるのは、どのキーがシークレットかは
+`settingsSchema` を持つホストからしか分からないため。`plugin:github` の `pat` だけを
+ハードコードすると同梱の例以外のプラグインが救われないので、公開された manifest を
+見て移送する。書き込み自体は Rust 側で完結する(値の出どころも DB)ので、
+plugin-host に設定の書き込み権限を渡す必要はない。
+
+`CoreSettings.mcp_token` は `legacy_mcp_token` に改名し、`#[serde(rename = "mcpToken",
+skip_serializing)]` を付けてある。**読めるが二度と書き戻さない**移行専用の受け皿で、
+新しいコードがここを読むのは移送処理だけ。
+
 ## 設定画面
 
 ヘッダ右端の歯車ボタンから、ボードを置き換えるページとして開く(`apps/desktop/src/components/SettingsPage.tsx`。
@@ -483,6 +566,19 @@ Esc / 閉じるでボードへ戻る)。節は 一般 / ショートカットと
 manifest の `settingsSchema` からフォームを自動生成し、プラグインごとの保存ボタンで
 `plugin_set_settings` を呼ぶ(下記の一括「保存」は使わない)。
 自動保存はせず「保存」ボタンで `set_settings` を一括呼び出しする(未保存のまま閉じるときは確認)。
+
+**シークレットはどちらの「保存」にも載らない**(値は資格情報マネージャーにあり、
+`CoreSettings` にも `plugin:<id>` の JSON にも入らない)。画面の形は共通で、
+「設定済み / 未設定」のインジケータ + 新しい値の入力欄 + クリアの 3 点セット。
+既存の値は読み出せないので、入力欄が空なら「変更しない」の意味になる。
+
+- MCP のトークン(`components/McpSection.tsx`)は「設定 / 変更 / クリア」の操作で
+  即座に `set_mcp_token` を呼ぶ(下の一括保存とは無関係)。成功すると MCP サーバーが
+  張り直されるので、稼働状態も取り直す。Claude Code への登録コマンド例には値を
+  差し込めないので、`--header` の形だけを見せる。
+- プラグインの secret 項目はカードの「保存」で `plugin_secret_set` を呼ぶ
+  (非シークレットの `plugin_set_settings` とは別の呼び出し)。
+
 検証はフロント (`apps/desktop/src/settings.ts`) とバックエンドの両方で行い、不正なら保存しない。
 バックエンドの検証は `questloom_core::settings::CoreSettings::validate`(値の範囲・AI プロバイダ定義の
 整合性)に、`apps/desktop/src-tauri/src/settings.rs::validate` がショートカット文字列のパースを
@@ -536,15 +632,21 @@ CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-
 
 | ウィンドウ | 許可 |
 |---|---|
-| `main` | 全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`) は**ここだけ** |
+| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`) と MCP トークン (`get_mcp_token_status` / `set_mcp_token`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
-| `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings` と設定画面専用の `plugin_directory` / `plugin_list_loaded` を除く)+ `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
+| `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings`、設定画面専用の `plugin_directory` / `plugin_list_loaded` / `plugin_secret_set` / `plugin_secret_status` を除く)+ シークレットの読み出し `plugin_secret_get` + `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
 
 plugin-host では第三者のプラグインコードが動くので、`get_settings` / `set_settings` /
-`get_runtime_status`(MCP トークンが載る)/ `ai_*` / タスクの削除・復元は**渡さない**。許可されていない
+`get_runtime_status`(MCP の URL が載る)/ `get_mcp_token_status` / `set_mcp_token` /
+`ai_*` / タスクの削除・復元は**渡さない**。許可されていない
 command を invoke すると Tauri が拒否する。command を足したら `APP_COMMANDS` と
 `capabilities/default.json` の両方に足すこと(食い違いは `src-tauri/src/lib.rs` の
 テストが検出する)。
+
+シークレットだけは許可の向きが逆で、**値を読む `plugin_secret_get` は plugin-host にしか
+渡さない**(プラグインコードは値が無いと動かない)。設定画面は書き込み
+(`plugin_secret_set`)と状態確認(`plugin_secret_status`)だけを持ち、値は読めない。
+main に配らない command は `lib.rs` の `NOT_FOR_MAIN` に列挙してある。
 
 ### CSP
 
@@ -564,7 +666,7 @@ CSP が効くのは**アセットを同梱したビルドだけ**(`npm run tauri
 読むので CSP ヘッダが付かない)。CSP を変えたら
 `npm run build; cargo run -p questloom-desktop --features tauri/custom-protocol` で確認すること。
 - MCP・その他のリッスンは 127.0.0.1 のみにバインドする。
-- GitHub PAT 等のシークレットは、最終的には DB ではなく Windows 資格情報マネージャー
-  (keyring crate)に置く方針。**ただし現状は未実装**で、プラグイン設定の `type: "secret"` は
-  `settings` テーブルに平文で入る(上記「GitHub プラグイン」の既知の制限を参照)。
+- **シークレット(MCP トークン・GitHub PAT 等)は DB に置かない。** 実体は Windows
+  資格情報マネージャー(keyring crate、service `questloom`)で、`settings` テーブルには
+  値も痕跡も入らない。詳細は「シークレットの保存先」節を参照。
 - crate 間の依存は上記の依存方向を守る。特に `questloom-core` を汚染しないこと。

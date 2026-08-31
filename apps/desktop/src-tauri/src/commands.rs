@@ -174,6 +174,25 @@ pub fn set_settings(state: State<'_, AppState>, settings: CoreSettings) -> Comma
     state.save_settings(settings).map_err(fail)
 }
 
+/// 内蔵 MCP サーバーの Bearer トークンが設定されているかを返す。
+///
+/// **値そのものは返さない。** 実体は OS の資格情報ストアにあり、一度書いたら
+/// アプリからは読み出せない(設定画面は「設定済み / 未設定」だけを見せる)。
+#[tauri::command]
+pub fn get_mcp_token_status(state: State<'_, AppState>) -> CommandResult<bool> {
+    Ok(state.mcp_token_is_set())
+}
+
+/// 内蔵 MCP サーバーの Bearer トークンを設定・解除する。
+///
+/// `None`(または空白のみ)で解除。保存先は OS の資格情報ストアで、書けなかった
+/// 場合は**平文へ落とさずエラーを返す**。成功すると MCP サーバーが張り直される。
+/// 戻り値は設定後の状態(設定済みなら `true`)。
+#[tauri::command]
+pub fn set_mcp_token(state: State<'_, AppState>, token: Option<String>) -> CommandResult<bool> {
+    state.set_mcp_token(token.as_deref()).map_err(fail)
+}
+
 /// デスクトップ側の稼働状態。設定画面での確認用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

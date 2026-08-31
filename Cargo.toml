@@ -13,7 +13,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# keyring 4 が 1.88 を要求するため、それに合わせてある。
+rust-version = "1.88"
 license = "MIT"
 authors = ["reanisz"]
 repository = "https://github.com/reanisz/questloom"
@@ -31,6 +32,10 @@ questloom-plugin-github = { path = "crates/plugins/questloom-plugin-github" }
 anyhow = "1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# keyring: シークレット(MCP トークン・プラグインの secret 項目)を OS の資格情報ストア
+# (Windows では資格情報マネージャー)へ置くために使う。既定 feature の `v1` が
+# プラットフォームごとの store を自動登録する。
+keyring = "4"
 reqwest = { version = "0.13", default-features = false }
 # rmcp: MCP の公式 Rust SDK。既定 feature (base64 / macros / server) に加えて
 # Streamable HTTP サーバー transport と JSON Schema 生成を有効にする。

@@ -11,12 +11,15 @@
  * (`autoDownloadEdgeDriver`、既定 true)。
  *
  * **本物のデータを触らないこと**が最優先なので、起動する exe には
- * `QUESTLOOM_DATA_DIR`(実行ごとの一時ディレクトリ)と `QUESTLOOM_MCP_PORT`(空きポート)を
- * 必ず渡す。これで `%APPDATA%\dev.reanisz.questloom` と 39150 には一切触らない。
+ * `QUESTLOOM_DATA_DIR`(実行ごとの一時ディレクトリ)、`QUESTLOOM_MCP_PORT`(空きポート)、
+ * `QUESTLOOM_KEYRING_SERVICE`(実行ごとの service 名)を必ず渡す。これで
+ * `%APPDATA%\dev.reanisz.questloom`・39150 番・本物の資格情報エントリには一切触らない。
+ * 資格情報エントリはデータディレクトリと違ってユーザー単位でグローバルなので、
+ * service 名も分けないと隔離できない。
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -49,11 +52,44 @@ function findFreePort(): Promise<number> {
 const dataDir =
   process.env.QUESTLOOM_E2E_DATA_DIR ?? mkdtempSync(join(tmpdir(), "questloom-e2e-"));
 const mcpPort = process.env.QUESTLOOM_E2E_MCP_PORT ?? String(await findFreePort());
+const keyringService =
+  process.env.QUESTLOOM_E2E_KEYRING_SERVICE ?? `questloom-e2e-${process.pid}`;
 process.env.QUESTLOOM_E2E_DATA_DIR = dataDir;
 process.env.QUESTLOOM_E2E_MCP_PORT = mcpPort;
+process.env.QUESTLOOM_E2E_KEYRING_SERVICE = keyringService;
 
 /** 起動するアプリに渡す上書き。tauri-driver 経由で exe まで継承される。 */
-const appEnv = { QUESTLOOM_DATA_DIR: dataDir, QUESTLOOM_MCP_PORT: mcpPort };
+const appEnv = {
+  QUESTLOOM_DATA_DIR: dataDir,
+  QUESTLOOM_MCP_PORT: mcpPort,
+  QUESTLOOM_KEYRING_SERVICE: keyringService,
+};
+
+/**
+ * シークレット移送の spec が使う最小プラグイン。
+ *
+ * プラグインは**起動時に読み込まれる**ので、spec が動き出してからでは間に合わない。
+ * 一時プロファイルの `plugins/` へ先に置いておく(プラグインディレクトリも
+ * `QUESTLOOM_DATA_DIR` に従うので、利用者の本物のプラグインは読み込まれない)。
+ */
+const SECRET_PLUGIN_ID = "e2esecret";
+const SECRET_PLUGIN_SOURCE = `
+export default defineQuestloomPlugin({
+  manifest: {
+    id: "${SECRET_PLUGIN_ID}",
+    name: "e2e secret",
+    settingsSchema: [
+      { key: "pat", label: "PAT", type: "secret", default: "" },
+      { key: "note", label: "note", type: "string", default: "" },
+    ],
+  },
+  activate(ctx) {
+    ctx.log("e2e secret plugin activated");
+  },
+});
+`;
+mkdirSync(join(dataDir, "plugins"), { recursive: true });
+writeFileSync(join(dataDir, "plugins", `${SECRET_PLUGIN_ID}.ts`), SECRET_PLUGIN_SOURCE, "utf8");
 
 // tauri-driver は `cargo install` で `~/.cargo/bin` に入るが、そこが PATH に無いシェルからも
 // 走らせたいので明示的に足しておく(msedgedriver をサービスが PATH 経由で見つける都合上、
@@ -136,7 +172,7 @@ export const config: WebdriverIO.Config = {
         autoInstallTauriDriver: true,
         autoDownloadEdgeDriver: true,
         // tauri-driver に渡した env は、そこから spawn される exe に継承される。
-        // **この 2 つだけ**にすること。サービス側が `{ ...process.env, ...env }` で混ぜるので、
+        // **この 3 つだけ**にすること。サービス側が `{ ...process.env, ...env }` で混ぜるので、
         // ここに PATH を載せると msedgedriver を自動 DL した後の PATH 追記を上書きしてしまい、
         // tauri-driver が native driver を見つけられず exit code 1 で即死する。
         env: appEnv,

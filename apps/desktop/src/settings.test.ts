@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import {
   AI_TIMEOUT_RANGE,
   claudeMcpCommand,
+  MCP_TOKEN_PLACEHOLDER,
   emptyProvider,
   formatArgs,
   fromDraft,
@@ -42,7 +43,6 @@ function defaults(): CoreSettings {
     autostart: false,
     mcpEnabled: true,
     mcpPort: 39150,
-    mcpToken: null,
     aiProviders: [
       {
         id: "claude",
@@ -141,11 +141,14 @@ describe("toDraft / fromDraft", () => {
     expect(fromDraft(value).mcpPort).toBe(39150);
   });
 
-  it("トークンは空文字列 ⇄ null に読み替える(空欄 = 認証なし)", () => {
-    expect(toDraft({ ...defaults(), mcpToken: null }).mcpToken).toBe("");
-    expect(fromDraft(draft({ mcpToken: "" })).mcpToken).toBeNull();
-    expect(fromDraft(draft({ mcpToken: "   " })).mcpToken).toBeNull();
-    expect(fromDraft(draft({ mcpToken: "  s3cret  " })).mcpToken).toBe("s3cret");
+  it("MCP トークンはドラフトにもコア設定にも載らない(実体は資格情報ストア)", () => {
+    // 平文の混入を防ぐため、往復のどちらにも `mcpToken` が現れないことを固定する。
+    expect(toDraft(defaults())).not.toHaveProperty("mcpToken");
+    expect(fromDraft(draft())).not.toHaveProperty("mcpToken");
+
+    // 旧バージョンの JSON が紛れ込んでも、保存する値には持ち越さない。
+    const legacy = { ...defaults(), mcpToken: "s3cret" } as unknown as CoreSettings;
+    expect(JSON.stringify(fromDraft(toDraft(legacy)))).not.toContain("s3cret");
   });
 
   it("画面で編集しない mcpArgs / mcpSupportsToken を保存時に失わない", () => {
@@ -313,15 +316,15 @@ describe("emptyProvider", () => {
 
 describe("claudeMcpCommand", () => {
   it("トークン未設定なら --header を付けない", () => {
-    expect(claudeMcpCommand("http://127.0.0.1:39150/mcp", "")).toBe(
+    expect(claudeMcpCommand("http://127.0.0.1:39150/mcp", false)).toBe(
       "claude mcp add --transport http questloom http://127.0.0.1:39150/mcp",
     );
-    expect(claudeMcpCommand("http://127.0.0.1:39150/mcp", "  ")).not.toContain("--header");
   });
 
-  it("トークンがあれば Authorization ヘッダを付ける", () => {
-    expect(claudeMcpCommand("http://127.0.0.1:39150/mcp", " s3cret ")).toContain(
-      '--header "Authorization: Bearer s3cret"',
-    );
+  it("トークン設定済みなら Authorization ヘッダの形だけを見せる(値は差し込めない)", () => {
+    const command = claudeMcpCommand("http://127.0.0.1:39150/mcp", true);
+    expect(command).toContain(`--header "Authorization: Bearer ${MCP_TOKEN_PLACEHOLDER}"`);
+    // 値は資格情報ストアにあり、フロントからは読めない。
+    expect(MCP_TOKEN_PLACEHOLDER).toBe("<設定したトークン>");
   });
 });

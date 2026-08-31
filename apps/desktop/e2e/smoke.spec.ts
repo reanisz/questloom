@@ -27,19 +27,34 @@ const COLUMNS = [
 /** UI の往復(invoke → イベント → 再フェッチ)を待つ上限。 */
 const SETTLE_TIMEOUT = 20_000;
 
-/** main ウィンドウのハンドルへ切り替える。既にそこなら何もしない。 */
+/**
+ * main ウィンドウのハンドルへ切り替える。既にそこなら何もしない。
+ *
+ * 起動直後はどのウィンドウもまだ描画前でありうるので、見つかるまで繰り返す
+ * (1 周しただけだと「まだ空の DOM」を見て取り違える)。
+ */
 async function switchToMainWindow(): Promise<void> {
-  const handles = await browser.getWindowHandles();
-  for (const handle of handles) {
-    await browser.switchToWindow(handle);
-    // 独自タイトルバーがあるのは main だけ(overlay は OverlayApp、
-    // plugin-host は PluginHostApp を描画する)。
-    const isMain = await browser.execute(
-      () => document.querySelector('[data-testid="titlebar"]') !== null,
-    );
-    if (isMain) return;
-  }
-  throw new Error(`main ウィンドウが見つかりません (handles=${handles.length})`);
+  let handles: string[] = [];
+  await browser.waitUntil(
+    async () => {
+      handles = await browser.getWindowHandles();
+      for (const handle of handles) {
+        await browser.switchToWindow(handle);
+        // 独自タイトルバーがあるのは main だけ(overlay は OverlayApp、
+        // plugin-host は PluginHostApp を描画する)。
+        const isMain = await browser.execute(
+          () => document.querySelector('[data-testid="titlebar"]') !== null,
+        );
+        if (isMain) return true;
+      }
+      return false;
+    },
+    {
+      timeout: 60_000,
+      interval: 500,
+      timeoutMsg: `main ウィンドウが見つかりません (handles=${handles.length})`,
+    },
+  );
 }
 
 /**
@@ -74,6 +89,23 @@ async function waitForText(
 
 /** New 列のカードのセレクタ。 */
 const NEW_CARDS = '[data-testid="column-new"] [data-testid="task-card"]';
+
+/* ------------------------------------------------------- Tauri command の直呼び */
+
+/**
+ * main ウィンドウの ACL で許されている command を webview 越しに呼ぶ。
+ *
+ * UI からは辿れない配線(シークレットの保存先など)を確かめるための逃げ道。
+ * `__TAURI_INTERNALS__.invoke` は Tauri v2 が webview に生やすもの。
+ */
+async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+  return (await browser.execute(
+    (name: string, payload: Record<string, unknown>) =>
+      (window as any).__TAURI_INTERNALS__.invoke(name, payload),
+    command,
+    args,
+  )) as T;
+}
 
 /* ---------------------------------------------------- 内蔵 MCP の最小クライアント */
 
@@ -328,5 +360,134 @@ describe("questloom GUI スモーク", () => {
     // 通常表示へ戻して次回以降に影響を残さない(表示モードは localStorage に残る)。
     await toggle.click();
     await $('[data-testid="defer-box-watching"]').waitForDisplayed();
+  });
+
+  /**
+   * プラグインのシークレットが資格情報ストアへ入り、DB にも UI にも値が残らない。
+   *
+   * `wdio.conf.ts` が一時プロファイルへ置いた `e2esecret` プラグインを使い、
+   *
+   * - 書き込み → 「設定済み」になり、値を返す経路が無いこと、
+   * - main ウィンドウから `plugin_secret_get`(値の読み出し)が ACL で拒まれること、
+   * - `plugin_set_settings` の JSON にシークレットが混ざらないこと、
+   * - **旧バージョンが平文で残した値が、読み直しで資格情報ストアへ移り
+   *   設定 JSON から消えること**(`plugin_host::migrate_plugin_secrets` を
+   *   実プロセス・実 webview・本物の資格情報マネージャーで通す)
+   *
+   * を見る。資格情報エントリはユーザー単位でグローバルなので、service 名は
+   * `wdio.conf.ts` が実行ごとに分けたうえで、このテストの最後に必ず消す。
+   */
+  it("プラグインのシークレットは資格情報ストアに入り、値は読み出せない", async () => {
+    const PLUGIN = "e2esecret";
+    const PAT = "gui-e2e-pat";
+
+    // プラグインがロードされていること(= plugin-host が動いていること)を先に確かめる。
+    await browser.waitUntil(
+      async () => {
+        const loaded = await invoke<{ manifest: { id: string } | null }[]>("plugin_list_loaded");
+        return loaded.some((plugin) => plugin.manifest?.id === PLUGIN);
+      },
+      { timeout: SETTLE_TIMEOUT, interval: 250, timeoutMsg: `${PLUGIN} がロードされません` },
+    );
+
+    // 未設定から始める(前回の残骸があっても消しておく)。
+    await invoke("plugin_secret_set", { pluginId: PLUGIN, key: "pat", value: null });
+    expect(await invoke<boolean>("plugin_secret_status", { pluginId: PLUGIN, key: "pat" })).toBe(
+      false,
+    );
+
+    // 書き込むと「設定済み」になる。返るのは状態だけで、値は返らない。
+    expect(
+      await invoke<boolean>("plugin_secret_set", { pluginId: PLUGIN, key: "pat", value: PAT }),
+    ).toBe(true);
+    expect(await invoke<boolean>("plugin_secret_status", { pluginId: PLUGIN, key: "pat" })).toBe(
+      true,
+    );
+
+    // 値を読む command は plugin-host 専用。main からは ACL に拒まれる。
+    await expect(invoke("plugin_secret_get", { pluginId: PLUGIN, key: "pat" })).rejects.toThrow();
+
+    // プラグイン設定の JSON にはシークレットが入らない。
+    await invoke("plugin_set_settings", { pluginId: PLUGIN, value: { note: "残るべき値" } });
+    const stored = await invoke<Record<string, unknown>>("plugin_get_settings", {
+      pluginId: PLUGIN,
+    });
+    expect(stored.pat).toBeUndefined();
+    expect(stored.note).toBe("残るべき値");
+
+    // 名前空間を抜け出すキーは境界で弾く。
+    await expect(
+      invoke("plugin_secret_status", { pluginId: "../core", key: "mcp-token" }),
+    ).rejects.toThrow();
+
+    // ---- 旧バージョンからの移送 ----
+
+    // 「平文が settings に残っている」状態を作り直す。
+    await invoke("plugin_secret_set", { pluginId: PLUGIN, key: "pat", value: null });
+    await invoke("plugin_set_settings", {
+      pluginId: PLUGIN,
+      value: { pat: PAT, note: "残るべき値" },
+    });
+    expect(await invoke<boolean>("plugin_secret_status", { pluginId: PLUGIN, key: "pat" })).toBe(
+      false,
+    );
+
+    // 読み直させると、公開された manifest を見て移送が走る。
+    await invoke("plugin:event|emit", { event: "questloom://plugins-reload", payload: null });
+    await browser.waitUntil(
+      () => invoke<boolean>("plugin_secret_status", { pluginId: PLUGIN, key: "pat" }),
+      { timeout: SETTLE_TIMEOUT, interval: 250, timeoutMsg: "PAT が資格情報ストアへ移りません" },
+    );
+
+    // 平文は設定から消え、他の項目は残る。
+    const migrated = await invoke<Record<string, unknown>>("plugin_get_settings", {
+      pluginId: PLUGIN,
+    });
+    expect(migrated.pat).toBeUndefined();
+    expect(migrated.note).toBe("残るべき値");
+
+    // 後始末: このテストが作った資格情報エントリを消す。
+    expect(
+      await invoke<boolean>("plugin_secret_set", { pluginId: PLUGIN, key: "pat", value: null }),
+    ).toBe(false);
+  });
+
+  /**
+   * MCP トークンも同じ扱い(設定済みかどうかだけが見える)。
+   *
+   * トークンを設定すると MCP サーバーが張り直され、`get_runtime_status` の
+   * `mcpTokenRequired` が真になる。最後に必ず解除してエントリを残さない。
+   */
+  it("MCP トークンは資格情報ストアに入り、稼働状態にだけ現れる", async () => {
+    expect(await invoke<boolean>("get_mcp_token_status")).toBe(false);
+
+    expect(await invoke<boolean>("set_mcp_token", { token: "  gui-e2e-token  " })).toBe(true);
+    expect(await invoke<boolean>("get_mcp_token_status")).toBe(true);
+
+    // コア設定にはトークンが載らない。
+    const settings = await invoke<Record<string, unknown>>("get_settings");
+    expect(settings.mcpToken).toBeUndefined();
+
+    // サーバーが張り直され、認証ありになる。
+    await browser.waitUntil(
+      async () => (await invoke<{ mcpTokenRequired: boolean }>("get_runtime_status")).mcpTokenRequired,
+      {
+        timeout: SETTLE_TIMEOUT,
+        interval: 250,
+        timeoutMsg: "MCP サーバーがトークン認証ありで張り直されません",
+      },
+    );
+
+    // 後始末: 解除して元の「認証なし」に戻す(MCP を使う他のテストを壊さないため)。
+    expect(await invoke<boolean>("set_mcp_token", { token: null })).toBe(false);
+    await browser.waitUntil(
+      async () =>
+        !(await invoke<{ mcpTokenRequired: boolean }>("get_runtime_status")).mcpTokenRequired,
+      {
+        timeout: SETTLE_TIMEOUT,
+        interval: 250,
+        timeoutMsg: "MCP サーバーが認証なしへ戻りません",
+      },
+    );
   });
 });

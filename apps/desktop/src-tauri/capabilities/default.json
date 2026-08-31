@@ -34,6 +34,9 @@
     "allow-get-runtime-status",
     "allow-show-main-window",
 
+    "allow-get-mcp-token-status",
+    "allow-set-mcp-token",
+
     "allow-ai-create-tasks",
     "allow-ai-split-task",
     "allow-ai-free-instruction",
@@ -50,6 +53,8 @@
     "allow-plugin-log",
     "allow-plugin-fetch-allowed",
     "allow-plugin-publish-loaded",
-    "allow-plugin-list-loaded"
+    "allow-plugin-list-loaded",
+    "allow-plugin-secret-set",
+    "allow-plugin-secret-status"
   ]
 }

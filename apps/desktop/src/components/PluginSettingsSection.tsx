@@ -7,6 +7,10 @@
  *
  * 保存はコア設定とは独立で、プラグインごとの「保存」ボタンで
  * `plugin_set_settings` を呼ぶ(コア設定の保存ボタンは触らない)。
+ *
+ * **`type: "secret"` の項目だけは別経路。** 値は `settings` テーブルではなく OS の
+ * 資格情報ストアに入るので、`plugin_secret_set` で保存し、画面には「設定済み /
+ * 未設定」しか出さない(値は読み出せない)。
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -25,20 +29,36 @@ import { useTauriEvent } from "../useTauriEvent";
 /** 編集中の値。数値も編集途中の文字列で持つ(打ち直しできるようにするため)。 */
 type Draft = Record<string, string | boolean>;
 
-/** 保存値をフォーム用のドラフトへ落とす。 */
+/** シークレット項目か。 */
+function isSecret(field: PluginSettingField): boolean {
+  return field.type === "secret";
+}
+
+/**
+ * 保存値をフォーム用のドラフトへ落とす。
+ *
+ * シークレットは値を持たないので対象外(下の `SecretField` が別に扱う)。
+ */
 function toDraft(schema: readonly PluginSettingField[], settings: PluginSettings): Draft {
   const draft: Draft = {};
   for (const field of schema) {
+    if (isSecret(field)) continue;
     const value = settings[field.key] ?? field.default ?? defaultForType(field.type);
     draft[field.key] = field.type === "boolean" ? Boolean(value) : String(value ?? "");
   }
   return draft;
 }
 
-/** ドラフトを保存用の値へ戻す。数値として読めないものは既定値へ落とす。 */
+/**
+ * ドラフトを保存用の値へ戻す。数値として読めないものは既定値へ落とす。
+ *
+ * **シークレットは決して含めない。** ここへ混ぜると `settings` テーブルに平文で
+ * 書き戻ってしまう。
+ */
 function fromDraft(schema: readonly PluginSettingField[], draft: Draft): PluginSettings {
   const value: PluginSettings = {};
   for (const field of schema) {
+    if (isSecret(field)) continue;
     const raw = draft[field.key];
     if (field.type === "boolean") {
       value[field.key] = Boolean(raw);
@@ -52,17 +72,102 @@ function fromDraft(schema: readonly PluginSettingField[], draft: Draft): PluginS
   return value;
 }
 
+/**
+ * シークレット 1 項目の入力。
+ *
+ * 現在の値は読めないので、出せるのは「設定済み / 未設定」と、新しい値の入力欄と、
+ * 「クリア」の予約だけ。実際の保存はカードの「保存」ボタンでまとめて行う。
+ */
+function SecretField({
+  field,
+  configured,
+  input,
+  cleared,
+  onInput,
+  onToggleClear,
+}: {
+  field: PluginSettingField;
+  /** 設定済みか。確認中は null。 */
+  configured: boolean | null;
+  input: string;
+  cleared: boolean;
+  onInput: (value: string) => void;
+  onToggleClear: () => void;
+}) {
+  return (
+    <div className="settings-field">
+      <span className="settings-field-label">{field.label || field.key}</span>
+      <div className="settings-field-control">
+        <p className="settings-status">
+          {configured === null ? (
+            <span className="muted">確認中…</span>
+          ) : cleared ? (
+            <span className="settings-warn">● 保存すると削除されます</span>
+          ) : configured ? (
+            <span className="settings-ok">● 設定済み</span>
+          ) : (
+            <span className="muted">○ 未設定</span>
+          )}
+        </p>
+        <div className="settings-inline">
+          <input
+            type="password"
+            className="settings-text"
+            spellCheck={false}
+            autoComplete="off"
+            placeholder={configured ? "新しい値(空欄なら変更しない)" : "値を入力"}
+            value={input}
+            onChange={(event) => onInput(event.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn-sm"
+            aria-pressed={cleared}
+            disabled={configured !== true && !cleared}
+            onClick={onToggleClear}
+          >
+            {cleared ? "取り消し" : "クリア"}
+          </button>
+        </div>
+        <p className="settings-hint">
+          値は Windows の資格情報マネージャーに保存され、ここからは読み出せません。
+        </p>
+        {field.hint && <p className="settings-hint">{field.hint}</p>}
+      </div>
+    </div>
+  );
+}
+
 /** プラグイン 1 件のカード。設定フォームと保存ボタンを持つ。 */
 function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
   const manifest = plugin.manifest;
   const schema = manifest?.settingsSchema ?? [];
   const pluginId = manifest?.id ?? null;
 
+  const secretFields = schema.filter(isSecret);
+
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  /** シークレットが設定済みか。未取得のキーは null 扱い。 */
+  const [secretStatus, setSecretStatus] = useState<Record<string, boolean>>({});
+  const [secretLoaded, setSecretLoaded] = useState(false);
+  /** 入力された新しい値。空なら「変更しない」。 */
+  const [secretInput, setSecretInput] = useState<Record<string, string>>({});
+  /** 保存時に削除するキー。 */
+  const [secretCleared, setSecretCleared] = useState<Record<string, boolean>>({});
+
+  /** シークレットの設定状態を取り直す。 */
+  const loadSecretStatus = useCallback(async (): Promise<Record<string, boolean>> => {
+    if (!pluginId) return {};
+    const entries = await Promise.all(
+      secretFields.map(async (field) => [field.key, await papi.pluginSecretStatus(pluginId, field.key)] as const),
+    );
+    return Object.fromEntries(entries);
+    // secretFields は manifest 由来で、プラグインが読み直されない限り変わらない。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pluginId]);
 
   useEffect(() => {
     if (!pluginId || schema.length === 0) return;
@@ -75,28 +180,53 @@ function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
       .catch((cause: unknown) => {
         if (alive) setError(toMessage(cause));
       });
+    loadSecretStatus()
+      .then((status) => {
+        if (!alive) return;
+        setSecretStatus(status);
+        setSecretLoaded(true);
+      })
+      .catch((cause: unknown) => {
+        if (alive) setError(toMessage(cause));
+      });
     return () => {
       alive = false;
     };
     // schema は manifest 由来で、プラグインが読み直されない限り変わらない。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pluginId]);
+  }, [pluginId, loadSecretStatus]);
 
   const save = useCallback(() => {
     if (!pluginId || !draft || saving) return;
     setSaving(true);
     setError(null);
     setNotice(null);
+    // 非シークレットをまとめて保存してから、変更のあるシークレットだけを個別に書く。
     papi
       .pluginSetSettings(pluginId, fromDraft(schema, draft))
+      .then(async () => {
+        for (const field of secretFields) {
+          const value = (secretInput[field.key] ?? "").trim();
+          if (value !== "") {
+            await papi.pluginSecretSet(pluginId, field.key, value);
+          } else if (secretCleared[field.key]) {
+            await papi.pluginSecretSet(pluginId, field.key, null);
+          }
+        }
+      })
       .then(() => papi.pluginGetSettings(pluginId))
-      .then((stored) => {
+      .then(async (stored) => {
         setDraft(toDraft(schema, mergeSettings(schema, stored)));
+        setSecretInput({});
+        setSecretCleared({});
+        setSecretStatus(await loadSecretStatus());
         setNotice("保存しました。");
       })
       .catch((cause: unknown) => setError(toMessage(cause)))
       .finally(() => setSaving(false));
-  }, [pluginId, draft, saving, schema]);
+    // secretFields / secretInput / secretCleared は下の依存に含めてある。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pluginId, draft, saving, schema, secretInput, secretCleared, loadSecretStatus]);
 
   const patch = (key: string, value: string | boolean) => {
     setNotice(null);
@@ -139,62 +269,59 @@ function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
 
       {schema.length > 0 && draft && (
         <>
-          {schema.map((field) => (
-            <div className="settings-field" key={field.key}>
-              <span className="settings-field-label">{field.label || field.key}</span>
-              <div className="settings-field-control">
-                {field.type === "boolean" ? (
-                  <label className="settings-check">
+          {schema.map((field) =>
+            isSecret(field) ? (
+              <SecretField
+                key={field.key}
+                field={field}
+                configured={secretLoaded ? Boolean(secretStatus[field.key]) : null}
+                input={secretInput[field.key] ?? ""}
+                cleared={Boolean(secretCleared[field.key])}
+                onInput={(value) => {
+                  setNotice(null);
+                  setSecretInput((current) => ({ ...current, [field.key]: value }));
+                }}
+                onToggleClear={() => {
+                  setNotice(null);
+                  setSecretCleared((current) => ({
+                    ...current,
+                    [field.key]: !current[field.key],
+                  }));
+                }}
+              />
+            ) : (
+              <div className="settings-field" key={field.key}>
+                <span className="settings-field-label">{field.label || field.key}</span>
+                <div className="settings-field-control">
+                  {field.type === "boolean" ? (
+                    <label className="settings-check">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draft[field.key])}
+                        onChange={(event) => patch(field.key, event.target.checked)}
+                      />
+                      <span>有効</span>
+                    </label>
+                  ) : field.type === "number" ? (
                     <input
-                      type="checkbox"
-                      checked={Boolean(draft[field.key])}
-                      onChange={(event) => patch(field.key, event.target.checked)}
-                    />
-                    <span>有効</span>
-                  </label>
-                ) : field.type === "number" ? (
-                  <input
-                    type="number"
-                    className="settings-number"
-                    value={String(draft[field.key] ?? "")}
-                    onChange={(event) => patch(field.key, event.target.value)}
-                  />
-                ) : field.type === "secret" ? (
-                  <div className="settings-inline">
-                    <input
-                      type={revealed[field.key] ? "text" : "password"}
-                      className="settings-text"
-                      spellCheck={false}
-                      autoComplete="off"
+                      type="number"
+                      className="settings-number"
                       value={String(draft[field.key] ?? "")}
                       onChange={(event) => patch(field.key, event.target.value)}
                     />
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      aria-pressed={Boolean(revealed[field.key])}
-                      onClick={() =>
-                        setRevealed((current) => ({
-                          ...current,
-                          [field.key]: !current[field.key],
-                        }))
-                      }
-                    >
-                      {revealed[field.key] ? "隠す" : "表示"}
-                    </button>
-                  </div>
-                ) : (
-                  <input
-                    type="text"
-                    className="settings-text"
-                    value={String(draft[field.key] ?? "")}
-                    onChange={(event) => patch(field.key, event.target.value)}
-                  />
-                )}
-                {field.hint && <p className="settings-hint">{field.hint}</p>}
+                  ) : (
+                    <input
+                      type="text"
+                      className="settings-text"
+                      value={String(draft[field.key] ?? "")}
+                      onChange={(event) => patch(field.key, event.target.value)}
+                    />
+                  )}
+                  {field.hint && <p className="settings-hint">{field.hint}</p>}
+                </div>
               </div>
-            </div>
-          ))}
+            ),
+          )}
 
           <div className="plugin-card-actions">
             {error && <span className="settings-error">{error}</span>}

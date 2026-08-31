@@ -8,13 +8,19 @@
 //! 3. タスク関連リソースの一括取得(ボード用 `list_all_resources` への薄い委譲)、
 //! 4. プラグインのログを tracing へ集約すること、
 //! 5. ホストがロード結果を公開するためのレジストリ、
+//! 6. `type: "secret"` の設定項目を OS の資格情報ストアへ橋渡しすること、
 //!
-//! の 5 点だけである。
+//! の 6 点だけである。
 //!
 //! セキュリティ上の注意: [`plugin_list_sources`] が読むのはプラグインディレクトリ
 //! **直下**のファイルのみで、区切り文字を含む名前は [`is_plugin_file_name`] が拒否する。
 //! fetch 先の判定は [`is_fetch_allowed`] に置き、ホスト JS から
 //! [`plugin_fetch_allowed`] 経由で使わせる(判定ロジックを 1 箇所に保つため)。
+//!
+//! シークレットは `settings` テーブルには入らない([`crate::secrets`])。
+//! 読み出し ([`plugin_secret_get`]) は plugin-host のみ、書き込みと状態確認
+//! ([`plugin_secret_set`] / [`plugin_secret_status`])は設定画面(main)のみに
+//! capability で配ってある。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -24,10 +30,11 @@ use questloom_core::model::TaskId;
 use questloom_core::repository::TaskRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, State};
 use url::{Host, Url};
 
 use crate::commands::{fail, CommandResult};
+use crate::secrets::{self, SecretKey};
 use crate::state::AppState;
 
 pub use crate::contract::{PLUGINS_LOADED, PLUGINS_RELOAD, PLUGIN_SETTINGS_CHANGED};
@@ -109,12 +116,13 @@ fn normalize_host(host: &str) -> Option<String> {
 }
 
 /// プラグインディレクトリのパスを解決し、無ければ作成する。
-fn plugins_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("データディレクトリを解決できません: {error}"))?
-        .join(PLUGINS_DIR);
+///
+/// 基準は [`AppState::data_dir`] で、`QUESTLOOM_DATA_DIR` の上書きに追随する。
+/// `app_data_dir()` を直接引くと、一時プロファイルで起動したテストが利用者の
+/// **本物のプラグイン**を読み込んでしまう(GitHub プラグインが本物の PAT で
+/// ポーリングを始めるなど、実害が出うる)。
+fn plugins_dir(data_dir: &Path) -> Result<PathBuf, String> {
+    let dir = data_dir.join(PLUGINS_DIR);
     ensure_dir(&dir)?;
     Ok(dir)
 }
@@ -235,8 +243,8 @@ impl PluginRegistry {
 
 /// プラグインディレクトリの絶対パスを返す(無ければ作成する)。設定画面の表示に使う。
 #[tauri::command]
-pub fn plugin_directory(app: AppHandle) -> CommandResult<String> {
-    plugins_dir(&app)
+pub fn plugin_directory(state: State<'_, AppState>) -> CommandResult<String> {
+    plugins_dir(&state.data_dir)
         .map(|dir| dir.display().to_string())
         .map_err(fail)
 }
@@ -246,8 +254,8 @@ pub fn plugin_directory(app: AppHandle) -> CommandResult<String> {
 /// ディレクトリが無ければ作成し、空配列を返す。読めなかったファイルは
 /// 警告ログを出して読み飛ばす(1 つの壊れたファイルで全体を止めないため)。
 #[tauri::command]
-pub fn plugin_list_sources(app: AppHandle) -> CommandResult<Vec<PluginSource>> {
-    let dir = plugins_dir(&app).map_err(fail)?;
+pub fn plugin_list_sources(state: State<'_, AppState>) -> CommandResult<Vec<PluginSource>> {
+    let dir = plugins_dir(&state.data_dir).map_err(fail)?;
     let entries = std::fs::read_dir(&dir).map_err(|error| {
         fail(format!(
             "プラグインを列挙できません ({}): {error}",
@@ -354,6 +362,9 @@ pub fn plugin_get_settings(state: State<'_, AppState>, plugin_id: String) -> Com
 /// プラグイン設定を保存し、`questloom://plugin-settings-changed` を発行する。
 ///
 /// plugin-host はこのイベントを受けて `ctx.settings.onChange` を呼び出す。
+///
+/// **シークレット (`type: "secret"`) はここを通さない。** 設定画面は
+/// [`plugin_secret_set`] を使い、この command には非シークレットの項目だけを渡す。
 #[tauri::command]
 pub fn plugin_set_settings(
     app: AppHandle,
@@ -363,14 +374,7 @@ pub fn plugin_set_settings(
 ) -> CommandResult<()> {
     let namespace = format!("{SETTINGS_PREFIX}{plugin_id}");
     state.store.set_settings(&namespace, &value).map_err(fail)?;
-    if let Err(error) = app.emit(
-        PLUGIN_SETTINGS_CHANGED,
-        SettingsChangedPayload {
-            plugin_id: plugin_id.clone(),
-        },
-    ) {
-        tracing::warn!(plugin = %plugin_id, %error, "プラグイン設定変更の通知に失敗しました");
-    }
+    notify_settings_changed(&app, &plugin_id);
     Ok(())
 }
 
@@ -380,6 +384,161 @@ pub fn plugin_set_settings(
 pub struct SettingsChangedPayload {
     /// 設定が変わったプラグインの id。
     pub plugin_id: String,
+}
+
+/// 設定変更を plugin-host へ通知する。失敗しても呼び出し元の操作は成功扱い。
+fn notify_settings_changed(app: &AppHandle, plugin_id: &str) {
+    if let Err(error) = app.emit(
+        PLUGIN_SETTINGS_CHANGED,
+        SettingsChangedPayload {
+            plugin_id: plugin_id.to_owned(),
+        },
+    ) {
+        tracing::warn!(plugin = %plugin_id, %error, "プラグイン設定変更の通知に失敗しました");
+    }
+}
+
+/* ------------------------------------------------------------------ シークレット */
+
+/// `settingsSchema` の `type` のうち、資格情報ストアへ回すもの。
+const SECRET_FIELD_TYPE: &str = "secret";
+
+/// プラグインのシークレット項目を読む。未設定なら `None`。
+///
+/// **plugin-host ウィンドウ専用**(capability で main / overlay には渡さない)。
+/// プラグインコードが実際に値を使うため、ここだけは読み出しを許す。
+#[tauri::command]
+pub fn plugin_secret_get(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    key: String,
+) -> CommandResult<Option<String>> {
+    let secret_key = SecretKey::plugin(&plugin_id, &key).map_err(fail)?;
+    state.secrets.get(&secret_key).map_err(fail)
+}
+
+/// プラグインのシークレット項目が設定されているかだけを返す。
+///
+/// 設定画面用。**値は返さない**(main ウィンドウからは読み出せない)。
+#[tauri::command]
+pub fn plugin_secret_status(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    key: String,
+) -> CommandResult<bool> {
+    let secret_key = SecretKey::plugin(&plugin_id, &key).map_err(fail)?;
+    Ok(state.secrets.get(&secret_key).map_err(fail)?.is_some())
+}
+
+/// プラグインのシークレット項目を設定・解除する。設定後の状態を返す。
+///
+/// `None`(または空白のみ)で解除。設定画面用で、保存先は OS の資格情報ストア。
+/// 書けなかった場合は**平文へ落とさずエラーを返す**。
+/// 成功したら `questloom://plugin-settings-changed` を発行し、プラグインの
+/// `ctx.settings.onChange` に新しい値を読み直させる。
+#[tauri::command]
+pub fn plugin_secret_set(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    plugin_id: String,
+    key: String,
+    value: Option<String>,
+) -> CommandResult<bool> {
+    let secret_key = SecretKey::plugin(&plugin_id, &key).map_err(fail)?;
+    let configured =
+        secrets::put(state.secrets.as_ref(), &secret_key, value.as_deref()).map_err(fail)?;
+    notify_settings_changed(&app, &plugin_id);
+    Ok(configured)
+}
+
+/// 旧バージョンが `settings` テーブルに平文で残したシークレットを資格情報ストアへ移す。
+///
+/// **manifest 駆動で行う。** Rust 側は `settingsSchema` を知らないので、
+/// どのキーがシークレットかは plugin-host が公開する manifest からしか分からない。
+/// `plugin:github` の `pat` だけをハードコードする手もあるが、それでは同梱の例以外の
+/// プラグインが救われないので、[`plugin_publish_loaded`] のたびにここを通す
+/// (移送するものが無ければ DB も資格情報ストアも触らないので、実質 1 回限り)。
+///
+/// 書き込みは Rust 側で完結し、値の出どころも DB なので、plugin-host に
+/// 設定の書き込み権限を渡す必要はない。
+fn migrate_plugin_secrets(state: &AppState, manifest: &PluginManifest) {
+    let secret_keys: Vec<&str> = manifest
+        .settings_schema
+        .iter()
+        .filter(|field| field.field_type == SECRET_FIELD_TYPE)
+        .map(|field| field.key.as_str())
+        .collect();
+    if secret_keys.is_empty() {
+        return;
+    }
+
+    let namespace = format!("{SETTINGS_PREFIX}{}", manifest.id);
+    let raw = match state.store.get_settings_json(&namespace) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(plugin = %manifest.id, %error, "プラグイン設定を読めませんでした");
+            return;
+        }
+    };
+    let Ok(Value::Object(mut stored)) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+
+    let mut changed = false;
+    for key in secret_keys {
+        let Some(Value::String(plain)) = stored.get(key) else {
+            continue;
+        };
+        let plain = plain.trim().to_owned();
+        if plain.is_empty() {
+            // 値ではないので資格情報ストアへは入れない。設定からは落とす。
+            stored.remove(key);
+            changed = true;
+            continue;
+        }
+        let secret_key = match SecretKey::plugin(&manifest.id, key) {
+            Ok(secret_key) => secret_key,
+            Err(error) => {
+                tracing::warn!(plugin = %manifest.id, %error, "シークレットを移送できません");
+                continue;
+            }
+        };
+        match state.secrets.get(&secret_key) {
+            // 資格情報ストア側が正。平文は落とすだけ。
+            Ok(Some(_)) => {
+                stored.remove(key);
+                changed = true;
+            }
+            Ok(None) => match state.secrets.set(&secret_key, &plain) {
+                Ok(()) => {
+                    tracing::info!(
+                        plugin = %manifest.id,
+                        key,
+                        "平文のシークレットを資格情報マネージャーへ移しました"
+                    );
+                    stored.remove(key);
+                    changed = true;
+                }
+                // 平文は消さずに残し、次のロードでやり直す。
+                Err(error) => tracing::error!(
+                    plugin = %manifest.id,
+                    key,
+                    %error,
+                    "シークレットを資格情報マネージャーへ移せませんでした。設定に平文のまま残ります"
+                ),
+            },
+            Err(error) => {
+                tracing::warn!(plugin = %manifest.id, key, %error, "資格情報ストアを読めませんでした");
+            }
+        }
+    }
+
+    if changed {
+        if let Err(error) = state.store.set_settings(&namespace, &Value::Object(stored)) {
+            tracing::warn!(plugin = %manifest.id, %error, "平文のシークレットを設定から消せませんでした");
+        }
+    }
 }
 
 /// 全タスクの関連リソース(ボード用 `list_all_resources` の薄い委譲)。
@@ -440,13 +599,20 @@ pub fn plugin_fetch_allowed(url: String, domains: Vec<String>) -> bool {
 }
 
 /// plugin-host がロード結果を公開する。設定画面向けに保持し、イベントで通知する。
+///
+/// あわせて、公開された manifest を頼りに平文シークレットの移送
+/// ([`migrate_plugin_secrets`])を試みる。
 #[tauri::command]
 pub fn plugin_publish_loaded(
     app: AppHandle,
+    state: State<'_, AppState>,
     registry: State<'_, PluginRegistry>,
     plugins: Vec<LoadedPlugin>,
 ) -> CommandResult<()> {
     for plugin in &plugins {
+        if let Some(manifest) = &plugin.manifest {
+            migrate_plugin_secrets(&state, manifest);
+        }
         match (&plugin.manifest, &plugin.error) {
             (_, Some(error)) => {
                 tracing::error!(file = %plugin.file_name, %error, "プラグインのロードに失敗しました");
@@ -646,6 +812,166 @@ mod tests {
         })
         .unwrap();
         assert_eq!(json["pluginId"], "github");
+    }
+
+    // ---- シークレットの移送 ----
+
+    use crate::secrets::{MemorySecretStore, SecretStore};
+    use std::sync::Arc;
+
+    /// `settingsSchema` に secret 項目を 1 つ持つ manifest。
+    fn secret_manifest(id: &str, key: &str) -> PluginManifest {
+        PluginManifest {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            version: String::new(),
+            description: String::new(),
+            fetch_domains: Vec::new(),
+            settings_schema: vec![
+                PluginSettingField {
+                    key: key.to_owned(),
+                    label: key.to_owned(),
+                    field_type: SECRET_FIELD_TYPE.to_owned(),
+                    default: None,
+                    hint: None,
+                },
+                PluginSettingField {
+                    key: "pollIntervalMinutes".to_owned(),
+                    label: "間隔".to_owned(),
+                    field_type: "number".to_owned(),
+                    default: None,
+                    hint: None,
+                },
+            ],
+        }
+    }
+
+    /// 一時プロファイル + インメモリの資格情報ストアで [`AppState`] を組む。
+    fn state_with(dir: &Path, secrets: &Arc<MemorySecretStore>) -> AppState {
+        AppState::initialize_with_secrets(
+            dir,
+            Arc::clone(secrets) as Arc<dyn crate::secrets::SecretStore>,
+        )
+        .expect("初期化できる")
+    }
+
+    fn plugin_settings(state: &AppState, id: &str) -> Value {
+        let raw = state
+            .store
+            .get_settings_json(&format!("{SETTINGS_PREFIX}{id}"))
+            .expect("読める")
+            .unwrap_or_else(|| "{}".to_owned());
+        serde_json::from_str(&raw).expect("JSON")
+    }
+
+    #[test]
+    fn plaintext_plugin_secrets_are_migrated_into_the_secret_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecretStore::new());
+        let state = state_with(dir.path(), &secrets);
+
+        // 旧バージョンが平文で保存した状態。
+        state
+            .store
+            .set_settings(
+                "plugin:github",
+                &serde_json::json!({ "pat": "  ghp_secret  ", "pollIntervalMinutes": 7 }),
+            )
+            .unwrap();
+
+        let manifest = secret_manifest("github", "pat");
+        migrate_plugin_secrets(&state, &manifest);
+
+        assert_eq!(
+            secrets
+                .get(&SecretKey::plugin("github", "pat").unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("ghp_secret")
+        );
+        let stored = plugin_settings(&state, "github");
+        assert!(stored.get("pat").is_none(), "平文は消える: {stored}");
+        assert_eq!(stored["pollIntervalMinutes"], 7, "他の項目は残る");
+
+        // 2 回目は何も起きない(冪等)。
+        migrate_plugin_secrets(&state, &manifest);
+        assert_eq!(secrets.keys(), vec!["plugin:github/pat".to_owned()]);
+    }
+
+    #[test]
+    fn migration_keeps_the_value_already_in_the_secret_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecretStore::new());
+        let state = state_with(dir.path(), &secrets);
+        secrets
+            .set(&SecretKey::plugin("github", "pat").unwrap(), "current")
+            .unwrap();
+        state
+            .store
+            .set_settings("plugin:github", &serde_json::json!({ "pat": "old" }))
+            .unwrap();
+
+        migrate_plugin_secrets(&state, &secret_manifest("github", "pat"));
+
+        assert_eq!(
+            secrets
+                .get(&SecretKey::plugin("github", "pat").unwrap())
+                .unwrap()
+                .as_deref(),
+            Some("current")
+        );
+        assert!(plugin_settings(&state, "github").get("pat").is_none());
+    }
+
+    #[test]
+    fn migration_leaves_the_plaintext_when_the_secret_store_is_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize_with_secrets(
+            dir.path(),
+            Arc::new(MemorySecretStore::failing()) as Arc<dyn crate::secrets::SecretStore>,
+        )
+        .unwrap();
+        state
+            .store
+            .set_settings("plugin:github", &serde_json::json!({ "pat": "ghp_secret" }))
+            .unwrap();
+
+        migrate_plugin_secrets(&state, &secret_manifest("github", "pat"));
+
+        // 次のロードでやり直せるよう、平文は残す。
+        assert_eq!(plugin_settings(&state, "github")["pat"], "ghp_secret");
+    }
+
+    #[test]
+    fn migration_ignores_plugins_without_secret_fields_and_blank_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecretStore::new());
+        let state = state_with(dir.path(), &secrets);
+
+        // secret 項目を持たない manifest は設定に触らない。
+        state
+            .store
+            .set_settings(
+                "plugin:hello",
+                &serde_json::json!({ "pat": "not-a-secret" }),
+            )
+            .unwrap();
+        let plain = PluginManifest {
+            settings_schema: Vec::new(),
+            ..secret_manifest("hello", "pat")
+        };
+        migrate_plugin_secrets(&state, &plain);
+        assert_eq!(plugin_settings(&state, "hello")["pat"], "not-a-secret");
+        assert!(secrets.keys().is_empty());
+
+        // 空文字列は値ではないので、ストアには入れず設定から落とすだけ。
+        state
+            .store
+            .set_settings("plugin:github", &serde_json::json!({ "pat": "   " }))
+            .unwrap();
+        migrate_plugin_secrets(&state, &secret_manifest("github", "pat"));
+        assert!(plugin_settings(&state, "github").get("pat").is_none());
+        assert!(secrets.keys().is_empty());
     }
 
     /// 全タスクの関連リソースも camelCase。

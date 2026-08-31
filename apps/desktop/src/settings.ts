@@ -57,8 +57,11 @@ export interface SettingsDraft {
   autostart: boolean;
   mcpEnabled: boolean;
   mcpPort: string;
-  /** 空文字列は「認証なし」(= `mcpToken: null`)。 */
-  mcpToken: string;
+  /*
+   * MCP のトークンはドラフトに載せない。実体は OS の資格情報ストアにあり、
+   * 保存も「保存」ボタンとは独立に `set_mcp_token` で即座に行う
+   * (`components/McpSection.tsx`)。
+   */
   aiProviders: ProviderDraft[];
   aiDefaultProviderId: string;
   aiTimeoutSecs: string;
@@ -145,7 +148,6 @@ export function toDraft(settings: CoreSettings): SettingsDraft {
     autostart: settings.autostart,
     mcpEnabled: settings.mcpEnabled,
     mcpPort: String(settings.mcpPort),
-    mcpToken: settings.mcpToken ?? "",
     aiProviders: settings.aiProviders.map((provider) => ({
       id: provider.id,
       label: provider.label,
@@ -176,7 +178,6 @@ export function fromDraft(draft: SettingsDraft): CoreSettings {
     mcpSupportsToken: provider.mcpSupportsToken,
   }));
 
-  const token = draft.mcpToken.trim();
   return {
     weekStart: draft.weekStart,
     backupGenerations: Number(draft.backupGenerations),
@@ -185,7 +186,6 @@ export function fromDraft(draft: SettingsDraft): CoreSettings {
     autostart: draft.autostart,
     mcpEnabled: draft.mcpEnabled,
     mcpPort: Number(draft.mcpPort),
-    mcpToken: token === "" ? null : token,
     aiProviders: providers,
     aiDefaultProviderId: draft.aiDefaultProviderId.trim(),
     aiTimeoutSecs: Number(draft.aiTimeoutSecs),
@@ -287,8 +287,19 @@ export function emptyProvider(): ProviderDraft {
   };
 }
 
-/** Claude Code へこの MCP サーバーを登録するコマンド例。 */
-export function claudeMcpCommand(url: string, token: string): string {
+/** トークンありのコマンド例で、実際の値の代わりに置く目印。 */
+export const MCP_TOKEN_PLACEHOLDER = "<設定したトークン>";
+
+/**
+ * Claude Code へこの MCP サーバーを登録するコマンド例。
+ *
+ * トークンは資格情報ストアにあり**アプリから読み出せない**ので、設定済みの場合も
+ * 値は差し込めない。`--header` の形だけを見せて、値は [`MCP_TOKEN_PLACEHOLDER`] を
+ * 自分で置き換えてもらう。
+ */
+export function claudeMcpCommand(url: string, tokenConfigured: boolean): string {
   const base = `claude mcp add --transport http questloom ${url}`;
-  return token.trim() === "" ? base : `${base} --header "Authorization: Bearer ${token.trim()}"`;
+  return tokenConfigured
+    ? `${base} --header "Authorization: Bearer ${MCP_TOKEN_PLACEHOLDER}"`
+    : base;
 }

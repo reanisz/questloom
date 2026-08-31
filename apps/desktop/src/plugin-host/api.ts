@@ -5,8 +5,11 @@
  * plugin-host ウィンドウとメインウィンドウ(設定画面)の両方から使う。
  *
  * **どの command をどちらのウィンドウから呼べるかは capability で決まる。**
- * `plugin_directory` / `plugin_set_settings` / `plugin_list_loaded` は設定画面専用で、
+ * `plugin_directory` / `plugin_set_settings` / `plugin_list_loaded` /
+ * `plugin_secret_set` / `plugin_secret_status` は設定画面(main)専用で、
  * plugin-host からは ACL に拒否される(`src-tauri/capabilities/plugin-host.json`)。
+ * 逆に `plugin_secret_get`(シークレットの**値**を読む)は plugin-host 専用で、
+ * 設定画面からは呼べない。
  */
 
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -51,9 +54,36 @@ export const pluginKvKeys = (pluginId: string) => call<string[]>("plugin_kv_keys
 export const pluginGetSettings = (pluginId: string) =>
   call<PluginSettings>("plugin_get_settings", { pluginId });
 
-/** プラグイン設定を保存する。保存時に `plugin-settings-changed` が発行される。 */
+/**
+ * プラグイン設定を保存する。保存時に `plugin-settings-changed` が発行される。
+ *
+ * **`type: "secret"` の項目は渡さないこと。** シークレットは `settings` テーブルには
+ * 入らず、[`pluginSecretSet`] 経由で OS の資格情報ストアへ入る。
+ */
 export const pluginSetSettings = (pluginId: string, value: PluginSettings) =>
   call<void>("plugin_set_settings", { pluginId, value });
+
+/**
+ * プラグインのシークレット項目の値を読む。未設定なら `null`。
+ *
+ * **plugin-host ウィンドウ専用**(main からは ACL に拒否される)。
+ */
+export const pluginSecretGet = (pluginId: string, key: string) =>
+  call<string | null>("plugin_secret_get", { pluginId, key });
+
+/**
+ * プラグインのシークレット項目が設定されているかだけを返す。設定画面専用。
+ */
+export const pluginSecretStatus = (pluginId: string, key: string) =>
+  call<boolean>("plugin_secret_status", { pluginId, key });
+
+/**
+ * プラグインのシークレット項目を設定・解除する。設定画面専用。
+ *
+ * `null`(または空白のみ)で解除。戻り値は設定後の状態。
+ */
+export const pluginSecretSet = (pluginId: string, key: string, value: string | null) =>
+  call<boolean>("plugin_secret_set", { pluginId, key, value });
 
 /** 全タスクの関連リソース。 */
 export const pluginListTaskResources = () =>

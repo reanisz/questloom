@@ -1,8 +1,12 @@
 //! 内蔵 MCP サーバーの起動・停止・再起動。
 //!
 //! 起動時とコア設定の変更時に [`McpSupervisor::apply`] が呼ばれ、
-//! `mcpEnabled` / `mcpPort` / `mcpToken` の変化に追随してサーバーを張り直す。
+//! `mcpEnabled` / `mcpPort` と Bearer トークンの変化に追随してサーバーを張り直す。
 //! ポート使用中などで起動に失敗しても、ログを出すだけでアプリは動き続ける。
+//!
+//! **トークンはコア設定には入っていない。** 実体は OS の資格情報ストアにあり、
+//! [`AppState::mcp_token`](crate::state::AppState::mcp_token) が持つ写しを
+//! 引数で受け取る(このモジュールは保存先を知らない)。
 //!
 //! 待受ポートは `QUESTLOOM_MCP_PORT` が設定されていればそちらが優先される
 //! ([`crate::env_override`])。テストが本物の 39150 を奪わないための逃げ道。
@@ -41,14 +45,14 @@ impl McpSupervisor {
         }
     }
 
-    /// 設定に合わせてサーバーを起動・停止・再起動する。
+    /// 設定と Bearer トークンに合わせてサーバーを起動・停止・再起動する。
     ///
     /// 構成が変わっていなければ何もしない(冪等)。
-    pub async fn apply(&self, settings: &CoreSettings) {
+    pub async fn apply(&self, settings: &CoreSettings, token: Option<String>) {
         let desired = settings.mcp_enabled.then(|| McpServerConfig {
             // 環境変数が指定されていればコア設定より優先する(crate::env_override 参照)。
             port: crate::env_override::mcp_port(settings.mcp_port),
-            token: settings.mcp_token.clone(),
+            token,
         });
 
         let mut running = self.running.lock().await;
@@ -100,8 +104,8 @@ impl McpSupervisor {
     }
 }
 
-/// 設定を MCP サーバーへ反映する。実際の起動・停止は非同期タスクで行う。
-pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings) {
+/// 設定とトークンを MCP サーバーへ反映する。実際の起動・停止は非同期タスクで行う。
+pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings, token: Option<String>) {
     let Some(supervisor) = app.try_state::<Arc<McpSupervisor>>() else {
         tracing::warn!("MCP スーパーバイザが未登録のため設定を反映できません");
         return;
@@ -109,7 +113,7 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings) {
     let supervisor = Arc::clone(supervisor.inner());
     let settings = settings.clone();
     tauri::async_runtime::spawn(async move {
-        supervisor.apply(&settings).await;
+        supervisor.apply(&settings, token).await;
     });
 }
 
@@ -130,11 +134,10 @@ mod tests {
         let settings = CoreSettings {
             mcp_enabled: true,
             mcp_port: 0,
-            mcp_token: None,
             ..CoreSettings::default()
         };
 
-        supervisor.apply(&settings).await;
+        supervisor.apply(&settings, None).await;
         let first = supervisor
             .running
             .lock()
@@ -144,7 +147,7 @@ mod tests {
         assert!(first.is_some(), "起動している");
 
         // 同じ設定なら張り直さない。
-        supervisor.apply(&settings).await;
+        supervisor.apply(&settings, None).await;
         assert_eq!(
             supervisor
                 .running
@@ -156,12 +159,7 @@ mod tests {
         );
 
         // トークンが変わったら再起動する。
-        supervisor
-            .apply(&CoreSettings {
-                mcp_token: Some("s3cret".to_owned()),
-                ..settings.clone()
-            })
-            .await;
+        supervisor.apply(&settings, Some("s3cret".to_owned())).await;
         assert_ne!(
             supervisor
                 .running
@@ -175,10 +173,13 @@ mod tests {
 
         // 無効化したら停止する。
         supervisor
-            .apply(&CoreSettings {
-                mcp_enabled: false,
-                ..settings
-            })
+            .apply(
+                &CoreSettings {
+                    mcp_enabled: false,
+                    ..settings
+                },
+                None,
+            )
             .await;
         assert!(supervisor.running.lock().await.is_none());
 
@@ -191,28 +192,20 @@ mod tests {
         let supervisor = supervisor();
         assert_eq!(supervisor.endpoint().await, None);
 
-        supervisor
-            .apply(&CoreSettings {
-                mcp_enabled: true,
-                mcp_port: 0,
-                // 空白のみのトークンは「未設定」と同じ扱い(サーバー側と揃える)。
-                mcp_token: Some("  ".to_owned()),
-                ..CoreSettings::default()
-            })
-            .await;
+        let settings = CoreSettings {
+            mcp_enabled: true,
+            mcp_port: 0,
+            ..CoreSettings::default()
+        };
+
+        // 空白のみのトークンは「未設定」と同じ扱い(サーバー側と揃える)。
+        supervisor.apply(&settings, Some("  ".to_owned())).await;
         let endpoint = supervisor.endpoint().await.expect("起動している");
         assert!(endpoint.url.starts_with("http://127.0.0.1:"));
         assert!(endpoint.url.ends_with("/mcp"));
         assert_eq!(endpoint.token, None);
 
-        supervisor
-            .apply(&CoreSettings {
-                mcp_enabled: true,
-                mcp_port: 0,
-                mcp_token: Some("s3cret".to_owned()),
-                ..CoreSettings::default()
-            })
-            .await;
+        supervisor.apply(&settings, Some("s3cret".to_owned())).await;
         assert_eq!(
             supervisor.endpoint().await.and_then(|end| end.token),
             Some("s3cret".to_owned())
@@ -234,11 +227,14 @@ mod tests {
 
         let supervisor = supervisor();
         supervisor
-            .apply(&CoreSettings {
-                mcp_enabled: true,
-                mcp_port: blocker.addr().port(),
-                ..CoreSettings::default()
-            })
+            .apply(
+                &CoreSettings {
+                    mcp_enabled: true,
+                    mcp_port: blocker.addr().port(),
+                    ..CoreSettings::default()
+                },
+                None,
+            )
             .await;
         assert!(supervisor.running.lock().await.is_none());
 

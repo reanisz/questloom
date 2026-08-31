@@ -113,6 +113,21 @@ export const setSettings = (settings: CoreSettings) => call<void>("set_settings"
 export const getRuntimeStatus = () => call<RuntimeStatus>("get_runtime_status");
 
 /**
+ * 内蔵 MCP サーバーの Bearer トークンが設定されているかを取得する。
+ *
+ * 値そのものは取得できない(実体は OS の資格情報ストアにあり、書いたら読めない)。
+ */
+export const getMcpTokenStatus = () => call<boolean>("get_mcp_token_status");
+
+/**
+ * 内蔵 MCP サーバーの Bearer トークンを設定・解除する。
+ *
+ * `null`(または空白のみ)で解除。保存先は OS の資格情報ストアで、書けなかった
+ * 場合はエラーになる(平文には落ちない)。戻り値は設定後の状態。
+ */
+export const setMcpToken = (token: string | null) => call<boolean>("set_mcp_token", { token });
+
+/**
  * メインウィンドウを前面に出す。`taskId` を渡すとそのタスクの詳細も開く
  * (メインウィンドウへ `questloom://open-task` が送られる)。
  */

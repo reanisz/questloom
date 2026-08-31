@@ -1,25 +1,37 @@
-//! 環境変数によるデータディレクトリ・MCP ポートの上書き。
+//! 環境変数によるデータディレクトリ・MCP ポート・資格情報 service 名の上書き。
 //!
 //! テスト(バックエンド e2e)が実アプリを起動するとき、本物の
-//! `%APPDATA%\dev.reanisz.questloom` を汚さず、本物の 39150 番ポートとも衝突しないための逃げ道。
-//! どちらの環境変数も未設定(または空白のみ)なら従来どおりの解決に落ちる。
+//! `%APPDATA%\dev.reanisz.questloom` を汚さず、本物の 39150 番ポートとも衝突せず、
+//! 本物の資格情報エントリも触らないための逃げ道。
+//! いずれの環境変数も未設定(または空白のみ)なら従来どおりの解決に落ちる。
 //!
 //! | 環境変数 | 効果 |
 //! |---|---|
 //! | [`DATA_DIR_ENV`] | `app_data_dir()` の代わりにこのパスを使う |
 //! | [`MCP_PORT_ENV`] | コア設定の `mcpPort` を無視してこのポートで待ち受ける |
+//! | [`KEYRING_SERVICE_ENV`] | シークレットの service 名(既定 `questloom`)を差し替える |
 //!
 //! 解決規則そのものは環境変数を読まない純関数([`resolve_data_dir`] /
-//! [`resolve_mcp_port`])に切り出してあり、テストはそちらを固定する
-//! (`std::env::set_var` はプロセス全体を触るので、並行するテストから使わない)。
+//! [`resolve_mcp_port`] / [`resolve_keyring_service`])に切り出してあり、テストは
+//! そちらを固定する(`std::env::set_var` はプロセス全体を触るので、並行する
+//! テストから使わない)。
 
 use std::path::PathBuf;
+
+use crate::secrets::DEFAULT_SERVICE;
 
 /// データディレクトリを上書きする環境変数名。
 pub const DATA_DIR_ENV: &str = "QUESTLOOM_DATA_DIR";
 
 /// MCP サーバーの待受ポートを上書きする環境変数名(コア設定より優先)。
 pub const MCP_PORT_ENV: &str = "QUESTLOOM_MCP_PORT";
+
+/// 資格情報ストアの service 名を上書きする環境変数名。
+///
+/// 資格情報マネージャーのエントリはデータディレクトリと違ってユーザー単位で
+/// グローバルなので、`QUESTLOOM_DATA_DIR` だけでは本物のエントリと分離できない。
+/// テスト・検証ではこれも一緒に渡すこと。
+pub const KEYRING_SERVICE_ENV: &str = "QUESTLOOM_KEYRING_SERVICE";
 
 /// 環境変数で指定されたデータディレクトリ。未設定なら `None`(= 既定の解決を使う)。
 #[must_use]
@@ -66,6 +78,21 @@ pub fn resolve_mcp_port(raw: Option<&str>, configured: u16) -> u16 {
     }
 }
 
+/// 資格情報ストアの service 名。未設定なら [`DEFAULT_SERVICE`]。
+#[must_use]
+pub fn keyring_service() -> String {
+    resolve_keyring_service(std::env::var(KEYRING_SERVICE_ENV).ok().as_deref())
+}
+
+/// [`keyring_service`] の解決規則。空白のみは「未設定」として扱う。
+#[must_use]
+pub fn resolve_keyring_service(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_SERVICE)
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +130,25 @@ mod tests {
         assert_eq!(resolve_mcp_port(Some(" 45123\n"), 39150), 45123);
         // 0 は「OS に任せる」の意味を持つのでそのまま通す。
         assert_eq!(resolve_mcp_port(Some("0"), 39150), 0);
+    }
+
+    #[test]
+    fn the_keyring_service_falls_back_to_the_default() {
+        assert_eq!(resolve_keyring_service(None), DEFAULT_SERVICE);
+        assert_eq!(resolve_keyring_service(Some("")), DEFAULT_SERVICE);
+        assert_eq!(resolve_keyring_service(Some("  \t")), DEFAULT_SERVICE);
+    }
+
+    #[test]
+    fn a_keyring_service_override_replaces_the_default() {
+        assert_eq!(
+            resolve_keyring_service(Some("questloom-e2e-123")),
+            "questloom-e2e-123"
+        );
+        assert_eq!(
+            resolve_keyring_service(Some("  questloom-test  ")),
+            "questloom-test"
+        );
     }
 
     #[test]

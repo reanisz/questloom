@@ -43,6 +43,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "set_settings",
     "get_runtime_status",
     "show_main_window",
+    // MCP トークン(値は返さない。main ウィンドウ専用)
+    "get_mcp_token_status",
+    "set_mcp_token",
     // AI
     "ai_create_tasks",
     "ai_split_task",
@@ -61,6 +64,11 @@ pub const APP_COMMANDS: &[&str] = &[
     "plugin_fetch_allowed",
     "plugin_publish_loaded",
     "plugin_list_loaded",
+    // プラグインのシークレット。読み出しは plugin-host のみ、
+    // 書き込みと状態確認は設定画面(main)のみに配る。
+    "plugin_secret_get",
+    "plugin_secret_set",
+    "plugin_secret_status",
 ];
 
 /// command 名から、`build.rs` が生成する許可 permission の識別子を作る。

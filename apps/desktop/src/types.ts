@@ -228,8 +228,11 @@ export interface CoreSettings {
   mcpEnabled: boolean;
   /** MCP サーバーの待受ポート(バインドは 127.0.0.1 のみ)。 */
   mcpPort: number;
-  /** MCP サーバーの Bearer トークン(null なら認証なし)。 */
-  mcpToken: string | null;
+  /*
+   * MCP サーバーの Bearer トークンはここには**無い**。実体は OS の資格情報ストア
+   * (Windows の資格情報マネージャー)にあり、`get_mcp_token_status` /
+   * `set_mcp_token` で扱う。値の読み出し経路はフロントには存在しない。
+   */
   /** AI CLI プロバイダの一覧。 */
   aiProviders: AiProvider[];
   /** 既定で使うプロバイダの id。 */

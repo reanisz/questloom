@@ -5,8 +5,9 @@
 //! 設定反映・実ファイルの DB)は通らない。ここではビルド済みの実行ファイルをそのまま
 //! 起動し、外から HTTP を叩いて、最後に一時ディレクトリの DB を読んで確かめる。
 //!
-//! 本物の `%APPDATA%\dev.reanisz.questloom` とポート 39150 を避けるため、
-//! `QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT`(`questloom_desktop_lib::env_override`)を使う。
+//! 本物の `%APPDATA%\dev.reanisz.questloom` とポート 39150、そして本物の資格情報
+//! エントリを避けるため、`QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` /
+//! `QUESTLOOM_KEYRING_SERVICE`(`questloom_desktop_lib::env_override`)を使う。
 //!
 //! **ビルド済みの exe が前提**なので `#[ignore]` を付けてある。実行方法:
 //!
@@ -20,9 +21,14 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
-use questloom_desktop_lib::env_override::{DATA_DIR_ENV, MCP_PORT_ENV};
+use questloom_core::settings::CORE_NAMESPACE;
+use questloom_desktop_lib::env_override::{DATA_DIR_ENV, KEYRING_SERVICE_ENV, MCP_PORT_ENV};
+use questloom_desktop_lib::secrets::{
+    KeyringSecretStore, MemorySecretStore, SecretKey, SecretStore,
+};
 use questloom_desktop_lib::state::AppState;
 use serde_json::{json, Value};
 
@@ -44,10 +50,15 @@ struct SpawnedApp {
 
 impl SpawnedApp {
     /// 実行ファイルを一時データディレクトリ + 指定ポートで起動する。
+    ///
+    /// 資格情報ストアの service 名も実行ごとに分ける。エントリはデータディレクトリと
+    /// 違ってユーザー単位でグローバルなので、本物の `questloom` を触らせないため
+    /// (このテスト自体はシークレットを書かないが、起動経路は読みに行く)。
     fn spawn(exe: &Path, data_dir: &Path, port: u16) -> Self {
         let child = Command::new(exe)
             .env(DATA_DIR_ENV, data_dir)
             .env(MCP_PORT_ENV, port.to_string())
+            .env(KEYRING_SERVICE_ENV, keyring_service(port))
             // 失敗したときに原因が見えるよう、アプリのログはそのまま流す。
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
@@ -92,6 +103,8 @@ struct McpClient {
     url: String,
     /// `initialize` の応答で受け取るセッション id。以降のリクエストに付ける。
     session: Option<String>,
+    /// `Authorization: Bearer` に載せるトークン。認証なしのサーバーでは `None`。
+    token: Option<String>,
 }
 
 impl McpClient {
@@ -100,6 +113,15 @@ impl McpClient {
             client: reqwest::Client::new(),
             url,
             session: None,
+            token: None,
+        }
+    }
+
+    /// Bearer トークン付きのクライアント。
+    fn with_token(url: String, token: &str) -> Self {
+        Self {
+            token: Some(token.to_owned()),
+            ..Self::new(url)
         }
     }
 
@@ -116,6 +138,9 @@ impl McpClient {
             .body(body.to_string());
         if let Some(session) = &self.session {
             request = request.header("mcp-session-id", session.clone());
+        }
+        if let Some(token) = &self.token {
+            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
         }
         request.send().await
     }
@@ -241,6 +266,23 @@ fn desktop_exe() -> PathBuf {
     exe
 }
 
+/// 起動する実アプリに渡す、実行ごとの資格情報 service 名。
+///
+/// 本物の `questloom` を汚さないために分ける。ポート番号は実行ごとに違うので、
+/// 同時に走らせても衝突しない。
+fn keyring_service(port: u16) -> String {
+    format!("questloom-backend-e2e-{port}")
+}
+
+/// 一時プロファイルの DB を開き直すためのアプリ状態。
+///
+/// 資格情報ストアはインメモリにする。ここで見たいのは DB の中身だけで、
+/// 実バックエンドを触る理由がない。
+fn reopen(data_dir: &Path) -> AppState {
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+    AppState::initialize_with_secrets(data_dir, secrets).expect("DB を開き直せる")
+}
+
 /// 空いている TCP ポートを 1 つ借りる。
 ///
 /// 借りたそばから手放すので厳密には競合しうるが、本物の 39150 を奪うよりはよい。
@@ -341,7 +383,7 @@ async fn the_real_app_serves_tasks_over_mcp() {
 
     {
         // 本物の起動経路と同じ手順で開き直して中身を読む。
-        let state = AppState::initialize(dir.path()).expect("DB を開き直せる");
+        let state = reopen(dir.path());
         let board = state.service.board().expect("ボードを取れる");
         let card = board
             .columns
@@ -430,7 +472,7 @@ async fn a_watching_task_wakes_up_over_mcp() {
 
     {
         // 起床した状態が実 DB に残っていること。
-        let state = AppState::initialize(dir.path()).expect("DB を開き直せる");
+        let state = reopen(dir.path());
         let board = state.service.board().expect("ボードを取れる");
         assert!(board.columns.watching.is_empty());
         let card = board
@@ -441,6 +483,87 @@ async fn a_watching_task_wakes_up_over_mcp() {
             .expect("New に残っている");
         assert_eq!(card.task.title, WATCHED);
     }
+
+    dir.close().expect("一時ディレクトリを片付けられる");
+}
+
+/// 既存ユーザーの移行パスを実プロセス・実バックエンドで通す。
+///
+/// 「設定 JSON に平文の `mcpToken` を仕込む → 実アプリを起動 → 資格情報マネージャーへ
+/// 移送され、JSON からは消え、MCP サーバーは Bearer を要求する」まで。
+///
+/// **資格情報エントリはユーザー単位でグローバル**なので、service 名を
+/// [`keyring_service`] でこのテスト専用にし、成否によらず最後に必ず消す。
+#[tokio::test]
+#[ignore = "ビルド済みの exe と OS の資格情報マネージャーを要する (--ignored で実行)"]
+async fn a_plaintext_token_is_migrated_to_the_credential_manager_by_the_real_app() {
+    const TOKEN: &str = "backend-e2e-token";
+
+    let exe = desktop_exe();
+    let dir = tempfile::tempdir().expect("一時ディレクトリ");
+    let port = free_port();
+    let service = keyring_service(port);
+    let keyring = KeyringSecretStore::new(&service);
+    let key = SecretKey::mcp_token();
+
+    // 旧バージョンが保存した状態を作る(コア設定の JSON に平文のトークン)。
+    {
+        let seed = reopen(dir.path());
+        seed.store
+            .set_settings(
+                CORE_NAMESPACE,
+                &json!({ "mcpPort": port, "mcpToken": TOKEN }),
+            )
+            .expect("平文の設定を書ける");
+    }
+
+    // 以降は片付けを必ず通すため、結果を溜めてから最後にまとめて assert する。
+    let outcome = {
+        let mut app = SpawnedApp::spawn(&exe, dir.path(), port);
+        let url = format!("http://127.0.0.1:{port}/mcp");
+
+        // トークン付きなら通る(= 起動時に移送された値でサーバーが立っている)。
+        let mut authorized = McpClient::with_token(url.clone(), TOKEN);
+        authorized.initialize(&mut app).await;
+
+        // トークン無しは 401。
+        let anonymous = McpClient::new(url);
+        let status = anonymous
+            .post(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
+            .await
+            .expect("応答は返る")
+            .status();
+
+        app.stop();
+
+        let migrated = keyring.get(&key);
+        let raw = reopen(dir.path())
+            .store
+            .get_settings_json(CORE_NAMESPACE)
+            .expect("設定を読める")
+            .unwrap_or_default();
+        (status, migrated, raw)
+    };
+
+    // 後始末: このテストが作ったエントリを必ず消す。
+    let cleaned = keyring.delete(&key);
+
+    let (status, migrated, raw) = outcome;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "トークン無しは 401 になる"
+    );
+    assert_eq!(
+        migrated.expect("資格情報マネージャーを読める").as_deref(),
+        Some(TOKEN),
+        "資格情報マネージャーへ移送されている"
+    );
+    assert!(
+        !raw.contains(TOKEN),
+        "設定 JSON から平文が消えている: {raw}"
+    );
+    cleaned.expect("テスト用のエントリを消せる");
 
     dir.close().expect("一時ディレクトリを片付けられる");
 }

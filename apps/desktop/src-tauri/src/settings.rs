@@ -48,19 +48,22 @@ pub fn validate(settings: &CoreSettings) -> Result<(), String> {
 }
 
 /// 設定値をデスクトップ側(ショートカット・自動起動・MCP サーバー)へ反映する。
-pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings) {
+///
+/// MCP の Bearer トークンはコア設定に含まれない(実体は OS の資格情報ストア)ので、
+/// [`AppState::mcp_token`] が持つ写しを別引数で受け取る。
+pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings, mcp_token: Option<String>) {
     shortcut::apply(app, &settings.global_shortcut);
     autostart::apply(app, settings.autostart);
-    mcp::apply(app, settings);
+    mcp::apply(app, settings, mcp_token);
 }
 
-/// 現在保持しているコア設定をデスクトップ側へ反映する。
+/// 現在保持しているコア設定とトークンをデスクトップ側へ反映する。
 fn apply_current<R: Runtime>(app: &AppHandle<R>) {
     let Some(state) = app.try_state::<AppState>() else {
         tracing::warn!("アプリ状態が未登録のため設定を反映できません");
         return;
     };
-    apply(app, &state.settings());
+    apply(app, &state.settings(), state.mcp_token());
 }
 
 /// 設定変更イベントを購読し、反映するタスクを開始する。

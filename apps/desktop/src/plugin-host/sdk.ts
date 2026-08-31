@@ -52,7 +52,14 @@ import type {
 
 /* ------------------------------------------------------------------ manifest */
 
-/** 設定項目の入力種別。`secret` は文字列だが設定画面で伏せ字になる。 */
+/**
+ * 設定項目の入力種別。
+ *
+ * `secret` は文字列だが扱いが違う。値は `settings` テーブルではなく **OS の資格情報
+ * ストア**(Windows の資格情報マネージャー)に入り、設定画面には「設定済み / 未設定」
+ * しか出ない(一度書いた値は画面から読み出せない)。プラグインから見た形は
+ * 他の項目と同じで、`ctx.settings.get()` が値を混ぜて返す。
+ */
 export type PluginSettingType = "string" | "number" | "boolean" | "secret";
 
 /**
@@ -147,7 +154,11 @@ export interface PluginTaskResource {
 
 /** 設定へのアクセス。 */
 export interface PluginSettingsApi {
-  /** `settingsSchema` の `default` をマージ済みの現在値を返す。 */
+  /**
+   * `settingsSchema` の `default` をマージ済みの現在値を返す。
+   *
+   * `type: "secret"` の項目は OS の資格情報ストアから読んで混ぜてある。
+   */
   get(): Promise<PluginSettings>;
   /** 設定画面から保存されたときに呼ばれる。戻り値で購読を解除できる。 */
   onChange(handler: (settings: PluginSettings) => void): () => void;

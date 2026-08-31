@@ -185,10 +185,18 @@ pub struct CoreSettings {
     pub mcp_enabled: bool,
     /// MCP サーバーの待受ポート(バインドは 127.0.0.1 のみ)。
     pub mcp_port: u16,
-    /// MCP サーバーの Bearer トークン。`None` なら認証なし。
+    /// **旧バージョンが平文で持っていた** MCP サーバーの Bearer トークン。
     ///
-    /// 当面は設定ファイル内に平文で保持する。keyring への移設は将来の課題。
-    pub mcp_token: Option<String>,
+    /// トークンの実体は OS の資格情報ストアへ移した(シェル側の
+    /// `crate::secrets` / `crate::state::AppState`)。このフィールドは
+    ///
+    /// - 既存の設定 JSON を読めるようにするため deserialize だけ受け付け、
+    /// - `skip_serializing` により**二度と書き戻さない**
+    ///
+    /// という移行専用の受け皿。起動時に値があればシェルが資格情報ストアへ移送し、
+    /// 設定 JSON からは消える。新しいコードがここを読むのは移送処理だけ。
+    #[serde(rename = "mcpToken", skip_serializing)]
+    pub legacy_mcp_token: Option<String>,
     /// AI CLI プロバイダの一覧。
     pub ai_providers: Vec<AiProvider>,
     /// 既定で使うプロバイダの `id`。
@@ -207,7 +215,7 @@ impl Default for CoreSettings {
             autostart: false,
             mcp_enabled: true,
             mcp_port: DEFAULT_MCP_PORT,
-            mcp_token: None,
+            legacy_mcp_token: None,
             ai_providers: default_ai_providers(),
             ai_default_provider_id: DEFAULT_AI_PROVIDER_ID.to_owned(),
             ai_timeout_secs: DEFAULT_AI_TIMEOUT_SECS,
@@ -341,7 +349,7 @@ mod tests {
         assert!(!settings.autostart);
         assert!(settings.mcp_enabled);
         assert_eq!(settings.mcp_port, DEFAULT_MCP_PORT);
-        assert_eq!(settings.mcp_token, None);
+        assert_eq!(settings.legacy_mcp_token, None);
         assert_eq!(settings.ai_default_provider_id, "claude");
         assert_eq!(settings.ai_timeout_secs, 300);
     }
@@ -419,7 +427,29 @@ mod tests {
         assert_eq!(json["autostart"], false);
         assert_eq!(json["mcpEnabled"], true);
         assert_eq!(json["mcpPort"], 39150);
-        assert!(json["mcpToken"].is_null());
+    }
+
+    /// MCP トークンは **設定 JSON に書き戻さない**(実体は OS の資格情報ストア)。
+    ///
+    /// 読む方は旧バージョンの JSON のために残してあるので、
+    /// 「読める・けれど書かない」を両方固定する。
+    #[test]
+    fn the_legacy_mcp_token_is_read_but_never_written_back() {
+        let parsed: CoreSettings =
+            serde_json::from_str(r#"{"mcpToken":"s3cret"}"#).expect("旧 JSON を読める");
+        assert_eq!(parsed.legacy_mcp_token.as_deref(), Some("s3cret"));
+
+        // 読み込んだ値をそのまま serialize しても、トークンは出て行かない。
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert!(
+            json.get("mcpToken").is_none(),
+            "設定 JSON にトークンを書き戻してはいけない: {json}"
+        );
+        assert!(!json.to_string().contains("s3cret"), "{json}");
+
+        // 既定値でもキー自体が現れない。
+        let json = serde_json::to_value(CoreSettings::default()).unwrap();
+        assert!(json.get("mcpToken").is_none(), "{json}");
     }
 
     #[test]
