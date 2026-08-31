@@ -13,13 +13,15 @@ use crate::SqliteStore;
 
 const INSERT_TASK: &str =
     "INSERT INTO tasks (id, title, description, status, scheduled_kind, scheduled_value,
-         deadline, is_instant, origin, parent_id, sort_order, created_at, updated_at, done_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+         deadline, is_instant, origin, parent_id, sort_order, created_at, updated_at, done_at,
+         deleted_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 
+/// 削除・復元も「`deleted_at` を含めた行の書き戻し」なので、この 1 本で足りる。
 const UPDATE_TASK: &str =
     "UPDATE tasks SET title = ?2, description = ?3, status = ?4, scheduled_kind = ?5,
          scheduled_value = ?6, deadline = ?7, is_instant = ?8, origin = ?9, parent_id = ?10,
-         sort_order = ?11, created_at = ?12, updated_at = ?13, done_at = ?14
+         sort_order = ?11, created_at = ?12, updated_at = ?13, done_at = ?14, deleted_at = ?15
      WHERE id = ?1";
 
 const INSERT_RESOURCE: &str =
@@ -28,6 +30,11 @@ const INSERT_RESOURCE: &str =
 
 const INSERT_UPDATE: &str = "INSERT INTO task_updates (id, task_id, body, origin, created_at)
      VALUES (?1, ?2, ?3, ?4, ?5)";
+
+/// 生存しているタスクだけを対象にする条件(ソフトデリートの除外)。
+///
+/// `find_task` は復元のために削除済みも返す。除外するのはそれ以外の通常クエリ。
+const ALIVE: &str = "deleted_at IS NULL";
 
 /// 指定タスクの主リソースをすべて解除する。
 const CLEAR_PRIMARY: &str =
@@ -107,7 +114,9 @@ impl TaskRepository for SqliteStore {
     fn list_tasks(&self) -> RepoResult<Vec<Task>> {
         repo(|| {
             let conn = self.conn();
-            let sql = format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY sort_order, created_at");
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE {ALIVE} ORDER BY sort_order, created_at"
+            );
             query_all(&conn, &sql, [], task_from_row)
         })
     }
@@ -116,7 +125,8 @@ impl TaskRepository for SqliteStore {
         repo(|| {
             let conn = self.conn();
             let sql = format!(
-                "SELECT {TASK_COLUMNS} FROM tasks WHERE status = ?1 ORDER BY sort_order, created_at"
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE status = ?1 AND {ALIVE}
+                 ORDER BY sort_order, created_at"
             );
             query_all(&conn, &sql, [status.as_str()], task_from_row)
         })
@@ -126,9 +136,22 @@ impl TaskRepository for SqliteStore {
         repo(|| {
             let conn = self.conn();
             let sql = format!(
-                "SELECT {TASK_COLUMNS} FROM tasks WHERE parent_id = ?1 ORDER BY sort_order, created_at"
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE parent_id = ?1 AND {ALIVE}
+                 ORDER BY sort_order, created_at"
             );
             query_all(&conn, &sql, [parent_id.to_string()], task_from_row)
+        })
+    }
+
+    fn list_deleted_tasks(&self) -> RepoResult<Vec<Task>> {
+        repo(|| {
+            let conn = self.conn();
+            // deleted_at は RFC3339(UTC・ミリ秒)なので、文字列の降順が時刻の降順になる。
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE deleted_at IS NOT NULL
+                 ORDER BY deleted_at DESC, id DESC"
+            );
+            query_all(&conn, &sql, [], task_from_row)
         })
     }
 
@@ -167,8 +190,11 @@ impl TaskRepository for SqliteStore {
     fn list_all_resources(&self) -> RepoResult<Vec<TaskResource>> {
         repo(|| {
             let conn = self.conn();
+            // ボードの集計に使うので、削除済みタスクのリソースは混ぜない。
             let sql = format!(
-                "SELECT {RESOURCE_COLUMNS} FROM task_resources ORDER BY task_id, sort_order, created_at"
+                "SELECT {RESOURCE_COLUMNS} FROM task_resources r
+                 WHERE EXISTS (SELECT 1 FROM tasks t WHERE t.id = r.task_id AND t.{ALIVE})
+                 ORDER BY task_id, sort_order, created_at"
             );
             query_all(&conn, &sql, [], resource_from_row)
         })
@@ -216,6 +242,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             done_at: None,
+            deleted_at: None,
         }
     }
 
@@ -247,6 +274,85 @@ mod tests {
         // タスクごと巻き戻り、中途半端な行は残らない。
         assert_eq!(store.find_task(task.id).unwrap(), None);
         assert!(store.list_all_resources().unwrap().is_empty());
+    }
+
+    /// 通常クエリからの削除済み除外はリポジトリの責務。
+    #[test]
+    fn soft_deleted_tasks_are_excluded_from_the_normal_queries() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let parent = task();
+        let mut child = task();
+        child.parent_id = Some(parent.id);
+        store.insert_task_with_resources(&parent, &[]).unwrap();
+        store
+            .insert_task_with_resources(&child, &[resource(child.id, "https://example.com", true)])
+            .unwrap();
+
+        let mut deleted = child.clone();
+        deleted.deleted_at = Some(chrono::Utc::now());
+        assert!(store.update_task(&deleted).unwrap());
+
+        assert_eq!(store.list_tasks().unwrap().len(), 1);
+        assert_eq!(
+            store.list_tasks_by_status(TaskStatus::New).unwrap().len(),
+            1
+        );
+        assert!(store.list_children(parent.id).unwrap().is_empty());
+        assert!(store.list_all_resources().unwrap().is_empty());
+
+        // find_task は復元のために削除済みも返す。個別のリソース取得も残る。
+        let found = store
+            .find_task(child.id)
+            .unwrap()
+            .expect("行は消えていない");
+        assert!(found.is_deleted());
+        assert_eq!(store.list_resources(child.id).unwrap().len(), 1);
+
+        // 削除済み一覧に出る。
+        let listed = store.list_deleted_tasks().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, child.id);
+
+        // 復元すれば元に戻る。
+        assert!(store.update_task(&child).unwrap());
+        assert_eq!(store.list_tasks().unwrap().len(), 2);
+        assert_eq!(store.list_children(parent.id).unwrap().len(), 1);
+        assert_eq!(store.list_all_resources().unwrap().len(), 1);
+        assert!(store.list_deleted_tasks().unwrap().is_empty());
+    }
+
+    /// 削除済み一覧は「新しく消したものが先」。
+    #[test]
+    fn deleted_tasks_are_listed_newest_first() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let older = task();
+        let newer = task();
+        store.insert_task_with_resources(&older, &[]).unwrap();
+        store.insert_task_with_resources(&newer, &[]).unwrap();
+
+        let at = |raw: &str| {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(raw)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            )
+        };
+        store
+            .update_task(&Task {
+                deleted_at: at("2026-09-01T00:00:00Z"),
+                ..older.clone()
+            })
+            .unwrap();
+        store
+            .update_task(&Task {
+                deleted_at: at("2026-09-05T00:00:00Z"),
+                ..newer.clone()
+            })
+            .unwrap();
+
+        let listed = store.list_deleted_tasks().unwrap();
+        let ids: Vec<TaskId> = listed.iter().map(|t| t.id).collect();
+        assert_eq!(ids, [newer.id, older.id]);
     }
 
     #[test]

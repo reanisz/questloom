@@ -95,6 +95,8 @@ fn place<R: Runtime>(window: &WebviewWindow<R>) {
 ///
 /// 判定材料は「New タスクが 1 件以上あるか」と「オーバーレイが有効か」だけなので、
 /// New 件数を動かしうるタスク系イベントと `SettingsChanged` に絞る。
+/// 削除・復元 (`TaskDeleted` / `TaskRestored`) も New 件数を動かすので含める
+/// (New タスクを消したらオーバーレイも消えるように)。
 /// `DayChanged` も含めるのは、日付をまたいだ直後の取りこぼしを避けるための保険。
 ///
 /// タイトルやリソースの変更(`TaskUpdated` など)は表示 / 非表示を変えないので無視する。
@@ -107,6 +109,8 @@ const fn affects_visibility(event: &DomainEvent) -> bool {
             | DomainEvent::TaskMoved { .. }
             | DomainEvent::TaskCompleted { .. }
             | DomainEvent::TaskPromoted { .. }
+            | DomainEvent::TaskDeleted { .. }
+            | DomainEvent::TaskRestored { .. }
             | DomainEvent::DayChanged { .. }
             | DomainEvent::SettingsChanged
     )
@@ -158,6 +162,8 @@ mod tests {
             DomainEvent::TaskCreated { task_id: id },
             DomainEvent::TaskCompleted { task_id: id },
             DomainEvent::TaskPromoted { task_id: id },
+            DomainEvent::TaskDeleted { task_id: id },
+            DomainEvent::TaskRestored { task_id: id },
             DomainEvent::TaskMoved {
                 task_id: id,
                 status: TaskStatus::Todo,
@@ -182,6 +188,25 @@ mod tests {
         ] {
             assert!(!affects_visibility(&event), "{event:?} で再評価は要らない");
         }
+    }
+
+    /// New タスクを削除したらオーバーレイは消え、復元したら戻る。
+    #[test]
+    fn deleting_the_last_new_task_hides_the_overlay() {
+        let service = test_support::service(BoardSettings::default());
+        let task = service
+            .create_task(NewTask {
+                title: "新着".to_owned(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        assert!(should_show(&service, true));
+
+        service.delete_task(task.id).unwrap();
+        assert!(!should_show(&service, true));
+
+        service.restore_task(task.id).unwrap();
+        assert!(should_show(&service, true));
     }
 
     #[test]

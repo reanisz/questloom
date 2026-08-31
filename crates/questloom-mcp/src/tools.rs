@@ -416,6 +416,40 @@ impl QuestloomTools {
         )
     }
 
+    #[tool(
+        description = "Delete a task (soft delete: it disappears from the board but can be restored \
+                       with restore_task). Child tasks are not deleted. Idempotent."
+    )]
+    pub fn delete_task(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        respond(self.service.delete_task(id).map(|task| {
+            json!({
+                "id": task.id,
+                "title": task.title,
+                "deleted": true,
+                "deletedAt": task.deleted_at,
+            })
+        }))
+    }
+
+    #[tool(
+        description = "Restore a deleted task. It returns to the end of its previous column. Idempotent."
+    )]
+    pub fn restore_task(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        respond(
+            self.service
+                .restore_task(id)
+                .map(|task| self.task_summary(&task)),
+        )
+    }
+
     #[tool(description = "Append a progress note to a task's update history.")]
     pub fn add_task_update(
         &self,

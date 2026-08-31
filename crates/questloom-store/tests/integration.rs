@@ -145,6 +145,60 @@ fn board_and_schedules_persist_across_reopen() {
     assert_eq!(board.columns.next_week[0].bucket, Some(Bucket::NextWeek));
 }
 
+/// ソフトデリートと復元が、再オープンをまたいで残ること。
+#[test]
+fn soft_delete_and_restore_persist_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kept, dropped) = {
+        let service = make_service(open(&dir));
+        let kept = service
+            .create_task(NewTask {
+                title: "残す".to_owned(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        let dropped = service
+            .create_task(NewTask {
+                title: "消す".to_owned(),
+                resources: vec![NewResource {
+                    kind: ResourceKind::Url,
+                    value: "https://example.com".to_owned(),
+                    label: String::new(),
+                    is_primary: true,
+                }],
+                ..NewTask::default()
+            })
+            .unwrap();
+        service
+            .move_task(dropped.id, MoveRequest::to_column(BoardColumn::Today))
+            .unwrap();
+        service.delete_task(dropped.id).unwrap();
+        (kept.id, dropped.id)
+    };
+
+    // 再オープンしてもボードから消えたまま、削除済み一覧には残る。
+    let service = make_service(open(&dir));
+    let board = service.board().unwrap();
+    assert!(board.columns.today.is_empty());
+    assert_eq!(board.columns.new.len(), 1);
+    assert_eq!(board.columns.new[0].task.id, kept);
+
+    let deleted = service.list_deleted().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].task.id, dropped);
+    // 削除時のステータス・予定は残っているので「元どこにいたか」が分かる。
+    assert_eq!(deleted[0].task.status, TaskStatus::Todo);
+    assert_eq!(deleted[0].bucket, Some(Bucket::Today));
+
+    // 復元すると元の列へ戻り、リソースも生きている。
+    service.restore_task(dropped).unwrap();
+    let detail = service.task_detail(dropped).unwrap();
+    assert!(!detail.card.task.is_deleted());
+    assert_eq!(detail.resources.len(), 1);
+    assert_eq!(service.board().unwrap().columns.today.len(), 1);
+    assert!(service.list_deleted().unwrap().is_empty());
+}
+
 #[test]
 fn resources_updates_and_parent_links_persist() {
     let dir = tempfile::tempdir().unwrap();

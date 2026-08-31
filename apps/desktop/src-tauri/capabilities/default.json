@@ -24,6 +24,10 @@
     "allow-remove-resource",
     "allow-set-parent",
 
+    "allow-delete-task",
+    "allow-restore-task",
+    "allow-list-deleted-tasks",
+
     "allow-get-settings",
     "allow-get-default-settings",
     "allow-set-settings",

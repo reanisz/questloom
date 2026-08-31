@@ -466,6 +466,17 @@ h3 {
   color: var(--accent);
 }
 
+/* 破壊的な操作(削除)。確認ダイアログの確定ボタンとドロワーの削除ボタン。 */
+.btn-danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
 input,
 textarea,
 select {
@@ -618,8 +629,14 @@ textarea {
 
 .drawer-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 8px 0 4px;
+}
+
+/* 削除は他のアクションから離して右端へ寄せる(誤爆を避ける)。 */
+.drawer-delete {
+  margin-left: auto;
 }
 
 .drawer-facts {
@@ -869,6 +886,54 @@ textarea {
   gap: 10px;
   padding: 10px 14px;
   border-top: 1px solid var(--border);
+}
+
+/* ---- 削除の確認 / 削除済み一覧 ---- */
+
+/* 確認ダイアログで「どれを消すのか」を見せる行。 */
+.confirm-target {
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.deleted-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+}
+
+.deleted-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.deleted-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.deleted-title {
+  overflow-wrap: anywhere;
+}
+
+.deleted-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
 }
 
 /* ---- AI ダイアログの中身 ---- */

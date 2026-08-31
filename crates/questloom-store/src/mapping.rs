@@ -15,7 +15,8 @@ use rusqlite::{Error as SqlError, Row};
 
 /// 全カラムを固定順で読み出すための SELECT 句(`tasks`)。
 pub const TASK_COLUMNS: &str = "id, title, description, status, scheduled_kind, scheduled_value, \
-     deadline, is_instant, origin, parent_id, sort_order, created_at, updated_at, done_at";
+     deadline, is_instant, origin, parent_id, sort_order, created_at, updated_at, done_at, \
+     deleted_at";
 
 /// 全カラムを固定順で読み出すための SELECT 句(`task_resources`)。
 pub const RESOURCE_COLUMNS: &str =
@@ -41,9 +42,9 @@ fn nullable_text(value: Option<impl Into<String>>) -> Value {
 /// [`TASK_COLUMNS`] と同じ順で `tasks` のバインド値を並べる。
 ///
 /// INSERT と UPDATE で同じ並びを使う(UPDATE は `?1` を `WHERE id` に使い、
-/// 残りを SET に並べる)ため、14 カラムの列挙はこの 1 箇所だけにする。
+/// 残りを SET に並べる)ため、15 カラムの列挙はこの 1 箇所だけにする。
 #[must_use]
-pub fn task_params(task: &Task) -> [Value; 14] {
+pub fn task_params(task: &Task) -> [Value; 15] {
     let (kind, value) = task.scheduled.to_columns();
     [
         text(task.id.to_string()),
@@ -60,6 +61,7 @@ pub fn task_params(task: &Task) -> [Value; 14] {
         text(time_to_sql(task.created_at)),
         text(time_to_sql(task.updated_at)),
         nullable_text(task.done_at.map(time_to_sql)),
+        nullable_text(task.deleted_at.map(time_to_sql)),
     ]
 }
 
@@ -122,6 +124,7 @@ pub fn task_from_row(row: &Row<'_>) -> Result<Task, SqlError> {
     let deadline: Option<String> = row.get(6)?;
     let parent_id: Option<String> = row.get(9)?;
     let done_at: Option<String> = row.get(13)?;
+    let deleted_at: Option<String> = row.get(14)?;
 
     Ok(Task {
         id: parse_at(0, &row.get::<_, String>(0)?)?,
@@ -145,6 +148,10 @@ pub fn task_from_row(row: &Row<'_>) -> Result<Task, SqlError> {
         done_at: done_at
             .as_deref()
             .map(|raw| time_from_sql(13, raw))
+            .transpose()?,
+        deleted_at: deleted_at
+            .as_deref()
+            .map(|raw| time_from_sql(14, raw))
             .transpose()?,
     })
 }
@@ -192,11 +199,11 @@ mod tests {
             "CREATE TABLE tasks (id TEXT, title TEXT, description TEXT, status TEXT,
                  scheduled_kind TEXT, scheduled_value TEXT, deadline TEXT, is_instant INTEGER,
                  origin TEXT, parent_id TEXT, sort_order TEXT, created_at TEXT,
-                 updated_at TEXT, done_at TEXT);",
+                 updated_at TEXT, done_at TEXT, deleted_at TEXT);",
         )
         .expect("テーブルを作れる");
         conn.execute(
-            "INSERT INTO tasks VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO tasks VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params_from_iter(task_params(task)),
         )
         .expect("挿入できる");
@@ -228,6 +235,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             done_at: None,
+            deleted_at: None,
         }
     }
 
@@ -236,6 +244,22 @@ mod tests {
         let task = sample();
         let conn = store_task(&task);
         assert_eq!(read_task(&conn).expect("読み戻せる"), task);
+    }
+
+    /// ソフトデリート時刻も往復すること。
+    #[test]
+    fn deleted_at_roundtrips() {
+        let deleted_at = DateTime::parse_from_rfc3339("2026-09-05T08:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let task = Task {
+            deleted_at: Some(deleted_at),
+            ..sample()
+        };
+        let conn = store_task(&task);
+        let read = read_task(&conn).expect("読み戻せる");
+        assert_eq!(read.deleted_at, Some(deleted_at));
+        assert!(read.is_deleted());
     }
 
     #[test]

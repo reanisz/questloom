@@ -233,6 +233,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 done_at: None,
+                deleted_at: None,
             },
             bucket: None,
             child_count: 0,

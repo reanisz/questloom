@@ -48,6 +48,18 @@ pub enum DomainEvent {
         /// 対象タスク。
         task_id: TaskId,
     },
+    /// タスクが削除された(ソフトデリート)。
+    #[serde(rename_all = "camelCase")]
+    TaskDeleted {
+        /// 対象タスク。
+        task_id: TaskId,
+    },
+    /// 削除済みタスクが復元された。
+    #[serde(rename_all = "camelCase")]
+    TaskRestored {
+        /// 対象タスク。
+        task_id: TaskId,
+    },
     /// アップデート履歴が追記された。
     #[serde(rename_all = "camelCase")]
     TaskUpdateAdded {
@@ -88,6 +100,8 @@ impl DomainEvent {
             | Self::TaskMoved { task_id, .. }
             | Self::TaskCompleted { task_id }
             | Self::TaskPromoted { task_id }
+            | Self::TaskDeleted { task_id }
+            | Self::TaskRestored { task_id }
             | Self::TaskUpdateAdded { task_id }
             | Self::TaskResourcesChanged { task_id }
             | Self::TaskParentChanged { task_id, .. } => Some(*task_id),
@@ -116,6 +130,14 @@ mod tests {
         assert_eq!(json["type"], "taskMoved");
         assert_eq!(json["status"], "todo");
         assert_eq!(json["bucket"], "thisWeek");
+
+        let json = serde_json::to_value(DomainEvent::TaskDeleted { task_id: id }).unwrap();
+        assert_eq!(json["type"], "taskDeleted");
+        assert_eq!(json["taskId"], id.to_string());
+
+        let json = serde_json::to_value(DomainEvent::TaskRestored { task_id: id }).unwrap();
+        assert_eq!(json["type"], "taskRestored");
+        assert_eq!(json["taskId"], id.to_string());
     }
 
     #[test]

@@ -65,6 +65,8 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   doneAt: string | null;
+  /** ソフトデリート時刻 (RFC3339 / UTC)。null なら生存している。 */
+  deletedAt: string | null;
 }
 
 /** タスクの関連リソース。 */

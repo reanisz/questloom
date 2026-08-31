@@ -279,6 +279,86 @@ fn parent_child_links_are_supported() {
     assert_eq!(detail["children"].as_array().unwrap().len(), 1);
 }
 
+/// delete → 一覧から消える → restore → 戻る、の一連。
+#[test]
+fn delete_hides_a_task_until_it_is_restored() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::Today),
+            ..new_task("消して戻す")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+    let keep = create(&tools, new_task("残す"));
+    assert_eq!(list(&tools, ListTasksArgs::default())["count"], 2);
+
+    let deleted = json(
+        &tools
+            .delete_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("delete_task"),
+    );
+    assert_eq!(deleted["deleted"], true);
+    assert!(!deleted["deletedAt"].is_null());
+
+    // 一覧からは消え、詳細も引けなくなる。
+    let listed = list(&tools, ListTasksArgs::default());
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["tasks"][0]["id"], keep["id"]);
+    let gone = tools
+        .get_task(Parameters(TaskIdArgs {
+            task_id: task_id.clone(),
+        }))
+        .expect("Err にはならない");
+    assert_eq!(gone.is_error, Some(true));
+
+    // 削除済みへの通常操作もツールレベルのエラー。
+    let rejected = tools
+        .complete_task(Parameters(TaskIdArgs {
+            task_id: task_id.clone(),
+        }))
+        .expect("Err にはならない");
+    assert_eq!(rejected.is_error, Some(true));
+
+    // 2 回目の削除は冪等に成功し、削除済みが増えたりはしない。
+    let again = json(
+        &tools
+            .delete_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("delete_task"),
+    );
+    assert_eq!(again["deleted"], true);
+    let deleted_cards = tools.service().list_deleted().expect("list_deleted");
+    assert_eq!(deleted_cards.len(), 1);
+    assert_eq!(deleted_cards[0].task.title, "消して戻す");
+
+    // 復元すると元の列へ戻る。
+    let restored = json(
+        &tools
+            .restore_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("restore_task"),
+    );
+    assert_eq!(restored["column"], "today");
+    assert_eq!(restored["status"], "todo");
+
+    let listed = list(&tools, ListTasksArgs::default());
+    assert_eq!(listed["count"], 2);
+    assert_eq!(
+        json(
+            &tools
+                .get_task(Parameters(TaskIdArgs { task_id }))
+                .expect("get_task")
+        )["title"],
+        "消して戻す"
+    );
+}
+
 #[test]
 fn invalid_arguments_are_reported() {
     let tools = tools();

@@ -23,6 +23,7 @@ import type {
   ResourceId,
   RuntimeStatus,
   Task,
+  TaskCard,
   TaskDetail,
   TaskId,
   TaskPatch,
@@ -84,6 +85,20 @@ export const removeResource = (taskId: TaskId, resourceId: ResourceId) =>
 /** 親タスクを設定・解除する(循環は禁止)。 */
 export const setParent = (taskId: TaskId, parentId: TaskId | null) =>
   call<Task>("set_parent", { taskId, parentId });
+
+/**
+ * タスクを削除する(ソフトデリート。冪等)。
+ *
+ * ボード・詳細から消えるだけで行は残り、[`restoreTask`] で戻せる。
+ * 子タスクへはカスケードしない。
+ */
+export const deleteTask = (taskId: TaskId) => call<Task>("delete_task", { taskId });
+
+/** 削除済みタスクを復元する(現ステータス列の末尾へ。冪等)。 */
+export const restoreTask = (taskId: TaskId) => call<Task>("restore_task", { taskId });
+
+/** 削除済みタスクの一覧。新しく消したものが先頭。 */
+export const listDeletedTasks = () => call<TaskCard[]>("list_deleted_tasks");
 
 /** コア設定を取得する。 */
 export const getSettings = () => call<CoreSettings>("get_settings");

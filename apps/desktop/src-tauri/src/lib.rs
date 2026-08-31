@@ -133,6 +133,9 @@ pub fn run() {
             commands::add_resource,
             commands::remove_resource,
             commands::set_parent,
+            commands::delete_task,
+            commands::restore_task,
+            commands::list_deleted_tasks,
             commands::get_settings,
             commands::get_default_settings,
             commands::set_settings,
@@ -323,9 +326,16 @@ mod tests {
     }
 
     /// 管理系の command は plugin-host / overlay から絶対に見えないこと。
+    ///
+    /// タスクの削除・復元(`delete_task` / `restore_task` / `list_deleted_tasks`)も
+    /// **main だけ**にする。オーバーレイは完了させるだけ、プラグインには
+    /// 他人のタスクを消す手段を与えない。
     #[test]
     fn management_commands_are_never_exposed_to_untrusted_windows() {
         let forbidden = allowed(&[
+            "delete_task",
+            "restore_task",
+            "list_deleted_tasks",
             "get_settings",
             "get_default_settings",
             "set_settings",

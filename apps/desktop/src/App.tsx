@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { listenOpenTask, listenTasksChanged } from "./api";
 import { AiDialog } from "./components/AiDialog";
 import { BoardView } from "./components/BoardView";
+import { DeletedTasksDialog } from "./components/DeletedTasksDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { TitleBar } from "./components/TitleBar";
@@ -24,6 +25,7 @@ function App() {
   const openTask = useBoardStore((state) => state.openTask);
   const [expanded, setExpanded] = useExpandedView();
   const [aiOpen, setAiOpen] = useState(false);
+  const [deletedOpen, setDeletedOpen] = useState(false);
   const [page, setPage] = useState<Page>("board");
 
   useEffect(() => {
@@ -68,6 +70,14 @@ function App() {
               <button
                 type="button"
                 className="btn btn-sm btn-ghost"
+                title="削除したタスクを見る / 復元する"
+                onClick={() => setDeletedOpen(true)}
+              >
+                🗑 削除済み
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
                 aria-pressed={expanded}
                 title={
                   expanded
@@ -98,6 +108,7 @@ function App() {
 
           <TaskDrawer />
           <AiDialog open={aiOpen} onClose={() => setAiOpen(false)} />
+          {deletedOpen && <DeletedTasksDialog onClose={() => setDeletedOpen(false)} />}
         </>
       )}
     </div>

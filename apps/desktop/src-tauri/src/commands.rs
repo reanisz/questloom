@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use questloom_core::bucket::BoardColumn;
 use questloom_core::model::{Origin, ResourceId, Task, TaskId, TaskResource, TaskUpdateEntry};
-use questloom_core::service::{Board, MoveRequest, NewResource, NewTask, TaskDetail, TaskPatch};
+use questloom_core::service::{
+    Board, MoveRequest, NewResource, NewTask, TaskCard, TaskDetail, TaskPatch,
+};
 use questloom_core::settings::CoreSettings;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -117,6 +119,24 @@ pub fn remove_resource(
         .service
         .remove_resource(task_id, resource_id)
         .map_err(fail)
+}
+
+/// タスクを削除する(ソフトデリート。冪等)。
+#[tauri::command]
+pub fn delete_task(state: State<'_, AppState>, task_id: TaskId) -> CommandResult<Task> {
+    state.service.delete_task(task_id).map_err(fail)
+}
+
+/// 削除済みタスクを復元する(現ステータス列の末尾へ。冪等)。
+#[tauri::command]
+pub fn restore_task(state: State<'_, AppState>, task_id: TaskId) -> CommandResult<Task> {
+    state.service.restore_task(task_id).map_err(fail)
+}
+
+/// 削除済みタスクの一覧を、新しく消したものから順に返す。
+#[tauri::command]
+pub fn list_deleted_tasks(state: State<'_, AppState>) -> CommandResult<Vec<TaskCard>> {
+    state.service.list_deleted().map_err(fail)
 }
 
 /// 親タスクを設定・解除する(循環は禁止)。

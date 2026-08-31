@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{StoreError, StoreResult};
 
 /// このバイナリが対応するスキーマバージョン。
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 /// 1 段階のマイグレーション。
 struct Migration {
@@ -73,10 +73,23 @@ CREATE TABLE plugin_kv (
 );
 ";
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: V1,
-}];
+/// v2: タスクのソフトデリート (`tasks.deleted_at`)。NULL = 生存。
+///
+/// 既存行はすべて NULL(= 生存)になるので、データの書き換えは不要。
+const V2: &str = r"
+ALTER TABLE tasks ADD COLUMN deleted_at TEXT;
+";
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: V1,
+    },
+    Migration {
+        version: 2,
+        sql: V2,
+    },
+];
 
 /// 現在のスキーマバージョンを返す。未初期化なら 0。
 ///
@@ -151,6 +164,40 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    /// v1 のまま置かれていた DB を開いても、行を失わずに v2 へ上がること。
+    #[test]
+    fn a_v1_database_is_upgraded_to_v2_without_losing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // v1 だけを適用した状態を作る。
+        conn.execute_batch(V1).unwrap();
+        conn.execute_batch("CREATE TABLE schema_version (version INTEGER NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, sort_order, created_at, updated_at)
+             VALUES ('t1', '既存タスク', 'new', 'a0', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&mut conn).unwrap(), 2);
+
+        // 既存行は残り、deleted_at は NULL(= 生存)になる。
+        let (title, deleted_at) = conn
+            .query_row(
+                "SELECT title, deleted_at FROM tasks WHERE id = 't1'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "既存タスク");
+        assert_eq!(deleted_at, None);
+
+        // 上げ直しても壊れない。
+        assert_eq!(migrate(&mut conn).unwrap(), CURRENT_SCHEMA_VERSION);
     }
 
     #[test]

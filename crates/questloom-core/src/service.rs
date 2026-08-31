@@ -350,8 +350,13 @@ impl TaskService {
         let resources = self.repo.list_resources(id)?;
         let updates = self.repo.list_updates(id)?;
         let children = self.repo.list_children(id)?;
+        // 親子リンクは削除しても保持するので、削除済みの親はここで落とすだけにする
+        // (復元すればリンクが自然に戻る)。子は list_children が既に除外している。
         let parent = match task.parent_id {
-            Some(parent_id) => self.repo.find_task(parent_id)?,
+            Some(parent_id) => self
+                .repo
+                .find_task(parent_id)?
+                .filter(|parent| !parent.is_deleted()),
             None => None,
         };
 
@@ -381,20 +386,43 @@ impl TaskService {
         })
     }
 
-    /// タスクを 1 件取得する。
+    /// タスクを 1 件取得する。削除済みのタスクは `None` として扱う。
+    ///
+    /// 削除済みも含めて見たい場合は [`list_deleted`](Self::list_deleted) を使う。
     ///
     /// # Errors
     /// 永続化層のエラー。
     pub fn find_task(&self, id: TaskId) -> CoreResult<Option<Task>> {
-        Ok(self.repo.find_task(id)?)
+        Ok(self.repo.find_task(id)?.filter(|task| !task.is_deleted()))
     }
 
-    /// 指定ステータスのタスクを返す。
+    /// 指定ステータスの(削除済みでない)タスクを返す。
     ///
     /// # Errors
     /// 永続化層のエラー。
     pub fn list_by_status(&self, status: TaskStatus) -> CoreResult<Vec<Task>> {
         Ok(self.repo.list_tasks_by_status(status)?)
+    }
+
+    /// 削除済みタスクを、新しく消したものから順に返す。
+    ///
+    /// 復元 UI 用の一覧なので、子タスク数・リソース数は集計しない(いずれも 0)。
+    /// 削除時のステータスと予定はそのまま残っているため、`status` と `bucket` から
+    /// 「元どこにいたか」を示せる。
+    ///
+    /// # Errors
+    /// 永続化層のエラー。
+    pub fn list_deleted(&self) -> CoreResult<Vec<TaskCard>> {
+        let today = self.clock.today();
+        let week_start = self.week_start();
+        let empty_counts = HashMap::new();
+        let empty_resources = HashMap::new();
+        Ok(self
+            .repo
+            .list_deleted_tasks()?
+            .into_iter()
+            .map(|task| build_card(task, today, week_start, &empty_counts, &empty_resources))
+            .collect())
     }
 
     // ---- 更新系 ----
@@ -430,6 +458,7 @@ impl TaskService {
             } else {
                 None
             },
+            deleted_at: None,
         };
         // 主リソースはちょうど 1 つ。明示指定が無ければ先頭を主リソースにする。
         let primary_index = input
@@ -673,6 +702,54 @@ impl TaskService {
         Ok(())
     }
 
+    /// タスクを削除する(ソフトデリート)。
+    ///
+    /// `deleted_at` を立てるだけで行は消さない。ボード・一覧・子タスクからは
+    /// 消えるが、親子リンクとリソース・履歴はそのまま残る。**子タスクへは
+    /// カスケードしない**(子は親を失って見えるだけで、親を復元すれば戻る)。
+    /// すでに削除済みなら何もせず成功する(冪等)。
+    ///
+    /// # Errors
+    /// タスクが存在しない、または永続化層のエラー。
+    pub fn delete_task(&self, id: TaskId) -> CoreResult<Task> {
+        let _guard = self.lock_writes();
+        let mut task = self.find_any(id)?;
+        if task.is_deleted() {
+            return Ok(task);
+        }
+        task.updated_at = self.clock.now();
+        task.deleted_at = Some(task.updated_at);
+
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskDeleted { task_id: id });
+        Ok(task)
+    }
+
+    /// 削除済みタスクを復元する。
+    ///
+    /// `deleted_at` を `None` に戻し、**現在のステータス列の末尾へ並び直す**。
+    /// 削除中に同じ `sort_order` を持つタスクが増えている可能性があるため、
+    /// 古いキーをそのまま戻すことはしない。
+    /// 生存中のタスクに対しては何もせず成功する(冪等)。
+    ///
+    /// # Errors
+    /// タスクが存在しない、並び順キーの生成に失敗、または永続化層のエラー。
+    pub fn restore_task(&self, id: TaskId) -> CoreResult<Task> {
+        let _guard = self.lock_writes();
+        let mut task = self.find_any(id)?;
+        if !task.is_deleted() {
+            return Ok(task);
+        }
+        // end_key は削除済みを数えないので、deleted_at を落とす前に計算してよい。
+        task.sort_order = self.end_key(task.status)?;
+        task.updated_at = self.clock.now();
+        task.deleted_at = None;
+
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskRestored { task_id: id });
+        Ok(task)
+    }
+
     /// 親タスクを設定・解除する。循環は禁止。
     ///
     /// # Errors
@@ -729,7 +806,21 @@ impl TaskService {
         let _ = self.events.send(event);
     }
 
+    /// 通常操作の対象となるタスクを取り出す。
+    ///
+    /// **削除済みのタスクはここで [`CoreError::TaskDeleted`] として弾く。**
+    /// 削除済みへの更新・移動・完了などを取りこぼしなく拒否するため、
+    /// 通常のユースケースは必ずこれを通す(復元だけが [`find_any`](Self::find_any) を使う)。
     fn require_task(&self, id: TaskId) -> CoreResult<Task> {
+        let task = self.find_any(id)?;
+        if task.is_deleted() {
+            return Err(CoreError::TaskDeleted(id));
+        }
+        Ok(task)
+    }
+
+    /// 削除済みも含めてタスクを取り出す。削除・復元だけが使う。
+    fn find_any(&self, id: TaskId) -> CoreResult<Task> {
         self.repo
             .find_task(id)?
             .ok_or_else(|| CoreError::TaskNotFound(id))
@@ -855,8 +946,14 @@ mod tests {
             Ok(Self::lock(&self.tasks).iter().find(|t| t.id == id).cloned())
         }
 
+        // 通常クエリからの削除済み除外はリポジトリ実装の責務
+        // (SQLite 実装の `WHERE deleted_at IS NULL` に対応する)。
         fn list_tasks(&self) -> RepoResult<Vec<Task>> {
-            let mut tasks = Self::lock(&self.tasks).clone();
+            let mut tasks: Vec<Task> = Self::lock(&self.tasks)
+                .iter()
+                .filter(|t| !t.is_deleted())
+                .cloned()
+                .collect();
             tasks.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
             Ok(tasks)
         }
@@ -864,7 +961,7 @@ mod tests {
         fn list_tasks_by_status(&self, status: TaskStatus) -> RepoResult<Vec<Task>> {
             let mut tasks: Vec<Task> = Self::lock(&self.tasks)
                 .iter()
-                .filter(|t| t.status == status)
+                .filter(|t| t.status == status && !t.is_deleted())
                 .cloned()
                 .collect();
             tasks.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
@@ -874,10 +971,25 @@ mod tests {
         fn list_children(&self, parent_id: TaskId) -> RepoResult<Vec<Task>> {
             let mut tasks: Vec<Task> = Self::lock(&self.tasks)
                 .iter()
-                .filter(|t| t.parent_id == Some(parent_id))
+                .filter(|t| t.parent_id == Some(parent_id) && !t.is_deleted())
                 .cloned()
                 .collect();
             tasks.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
+            Ok(tasks)
+        }
+
+        fn list_deleted_tasks(&self) -> RepoResult<Vec<Task>> {
+            let mut tasks: Vec<Task> = Self::lock(&self.tasks)
+                .iter()
+                .filter(|t| t.is_deleted())
+                .cloned()
+                .collect();
+            // 新しく消したものが先。同時刻なら id で安定させる。
+            tasks.sort_by(|a, b| {
+                b.deleted_at
+                    .cmp(&a.deleted_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
             Ok(tasks)
         }
 
@@ -913,7 +1025,16 @@ mod tests {
         }
 
         fn list_all_resources(&self) -> RepoResult<Vec<TaskResource>> {
-            let mut resources = Self::lock(&self.resources).clone();
+            let alive: HashSet<TaskId> = Self::lock(&self.tasks)
+                .iter()
+                .filter(|t| !t.is_deleted())
+                .map(|t| t.id)
+                .collect();
+            let mut resources: Vec<TaskResource> = Self::lock(&self.resources)
+                .iter()
+                .filter(|r| alive.contains(&r.task_id))
+                .cloned()
+                .collect();
             resources.sort_by(|a, b| (a.task_id, &a.sort_order).cmp(&(b.task_id, &b.sort_order)));
             Ok(resources)
         }
@@ -1109,6 +1230,8 @@ mod tests {
         assert_eq!(card["resourceCount"], 1);
         assert_eq!(card["primaryResource"]["kind"], "url");
         assert!(card["parentId"].is_null());
+        // ソフトデリート (v2)。生存しているタスクは null。
+        assert!(card["deletedAt"].is_null());
 
         let detail = serde_json::to_value(service.task_detail(task.id).unwrap()).unwrap();
         assert_eq!(detail["id"], task.id.to_string());
@@ -1483,6 +1606,232 @@ mod tests {
         });
         service.notify_settings_changed();
         assert_eq!(rx.recv().await.unwrap(), DomainEvent::SettingsChanged);
+    }
+
+    // ---- ソフトデリート ----
+
+    #[test]
+    fn delete_task_hides_it_from_the_board_and_lists_it_as_deleted() {
+        let service = service();
+        let keep = service.create_task(new_task("残す")).unwrap();
+        let drop = service.create_task(new_task("消す")).unwrap();
+
+        let deleted = service.delete_task(drop.id).unwrap();
+        assert!(deleted.is_deleted());
+        assert_eq!(deleted.deleted_at, Some(service.clock.now()));
+
+        let board = service.board().unwrap();
+        let ids: Vec<TaskId> = board.columns.new.iter().map(|c| c.task.id).collect();
+        assert_eq!(ids, [keep.id]);
+
+        // 通常の参照系からも消える。
+        assert!(service.find_task(drop.id).unwrap().is_none());
+        assert_eq!(service.list_by_status(TaskStatus::New).unwrap().len(), 1);
+
+        // 削除済み一覧には出る。元のステータス・予定は残っている。
+        let deleted_cards = service.list_deleted().unwrap();
+        assert_eq!(deleted_cards.len(), 1);
+        assert_eq!(deleted_cards[0].task.id, drop.id);
+        assert_eq!(deleted_cards[0].task.status, TaskStatus::New);
+        assert!(deleted_cards[0].task.deleted_at.is_some());
+    }
+
+    #[test]
+    fn deleted_tasks_drop_out_of_parent_and_child_views() {
+        let service = service();
+        let parent = service.create_task(new_task("親")).unwrap();
+        let child = service.create_task(new_task("子")).unwrap();
+        service.set_parent(child.id, Some(parent.id)).unwrap();
+
+        // 親を消すと、子から親が見えなくなる(リンク自体は残る)。
+        service.delete_task(parent.id).unwrap();
+        let detail = service.task_detail(child.id).unwrap();
+        assert!(detail.parent.is_none());
+        assert_eq!(detail.card.task.parent_id, Some(parent.id));
+        // ボードの子タスク数にも数えない。
+        let board = service.board().unwrap();
+        assert_eq!(board.columns.new.len(), 1);
+
+        // 親を戻すとリンクも戻る。
+        service.restore_task(parent.id).unwrap();
+        assert_eq!(
+            service
+                .task_detail(child.id)
+                .unwrap()
+                .parent
+                .map(|p| p.task.id),
+            Some(parent.id)
+        );
+
+        // 子を消すと、親の子タスク一覧から消える(カスケードはしない)。
+        service.delete_task(child.id).unwrap();
+        let detail = service.task_detail(parent.id).unwrap();
+        assert!(detail.children.is_empty());
+        assert_eq!(detail.card.child_count, 0);
+        assert!(service.task_detail(child.id).is_err());
+    }
+
+    #[test]
+    fn restore_puts_the_task_back_at_the_end_of_its_column() {
+        let service = service();
+        let first = service.create_task(new_task("1")).unwrap();
+        let second = service.create_task(new_task("2")).unwrap();
+
+        service.delete_task(first.id).unwrap();
+        // 削除中に増えたタスクが、消したタスクの古いキーを追い越しうる。
+        let third = service.create_task(new_task("3")).unwrap();
+
+        let restored = service.restore_task(first.id).unwrap();
+        assert!(!restored.is_deleted());
+        assert!(restored.sort_order > third.sort_order);
+
+        let board = service.board().unwrap();
+        let ids: Vec<TaskId> = board.columns.new.iter().map(|c| c.task.id).collect();
+        assert_eq!(ids, [second.id, third.id, first.id]);
+        assert!(service.list_deleted().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleted_tasks_reject_normal_operations() {
+        let service = service();
+        let task = service.create_task(new_task("消す")).unwrap();
+        service.delete_task(task.id).unwrap();
+
+        fn deleted<T>(result: CoreResult<T>) -> bool {
+            matches!(result, Err(CoreError::TaskDeleted(_)))
+        }
+
+        assert!(deleted(service.task_detail(task.id)));
+        assert!(deleted(service.update_task(
+            task.id,
+            TaskPatch {
+                title: Some("新しい".to_owned()),
+                ..TaskPatch::default()
+            }
+        )));
+        assert!(deleted(
+            service.move_task(task.id, MoveRequest::to_column(BoardColumn::Today))
+        ));
+        assert!(deleted(service.complete_task(task.id)));
+        assert!(deleted(service.promote_task(task.id, None)));
+        assert!(deleted(service.add_task_update(
+            task.id,
+            "メモ",
+            Origin::User
+        )));
+        assert!(deleted(service.add_resource(
+            task.id,
+            NewResource {
+                kind: ResourceKind::Url,
+                value: "https://example.com".to_owned(),
+                label: String::new(),
+                is_primary: false,
+            }
+        )));
+        assert!(deleted(service.set_parent(task.id, None)));
+
+        // 削除済みタスクを親にすることもできない。
+        let other = service.create_task(new_task("別")).unwrap();
+        assert!(deleted(service.set_parent(other.id, Some(task.id))));
+    }
+
+    #[test]
+    fn delete_and_restore_are_idempotent() {
+        let service = service();
+        let task = service.create_task(new_task("冪等")).unwrap();
+
+        // 生存中の復元は何もしない。
+        let untouched = service.restore_task(task.id).unwrap();
+        assert_eq!(untouched.sort_order, task.sort_order);
+        assert!(!untouched.is_deleted());
+
+        let first = service.delete_task(task.id).unwrap();
+        let second = service.delete_task(task.id).unwrap();
+        assert_eq!(first.deleted_at, second.deleted_at);
+
+        service.restore_task(task.id).unwrap();
+        let again = service.restore_task(task.id).unwrap();
+        assert!(!again.is_deleted());
+
+        // 存在しないタスクは削除も復元もできない。
+        let missing = TaskId::new();
+        assert!(matches!(
+            service.delete_task(missing),
+            Err(CoreError::TaskNotFound(_))
+        ));
+        assert!(matches!(
+            service.restore_task(missing),
+            Err(CoreError::TaskNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn deleted_tasks_are_listed_newest_first() {
+        let service = service();
+        let a = service.create_task(new_task("a")).unwrap();
+        let b = service.create_task(new_task("b")).unwrap();
+        service.delete_task(a.id).unwrap();
+        service.delete_task(b.id).unwrap();
+
+        let deleted = service.list_deleted().unwrap();
+        assert_eq!(deleted.len(), 2);
+        // FixedClock なので削除時刻は同値。順序が壊れないことだけを見る。
+        let ids: HashSet<TaskId> = deleted.iter().map(|c| c.task.id).collect();
+        assert_eq!(ids, HashSet::from([a.id, b.id]));
+        assert!(deleted.iter().all(|card| card.task.deleted_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn delete_and_restore_are_broadcast() {
+        let service = service();
+        let mut rx = service.subscribe();
+        let task = service.create_task(new_task("通知")).unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskCreated { task_id: task.id }
+        );
+
+        service.delete_task(task.id).unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskDeleted { task_id: task.id }
+        );
+
+        service.restore_task(task.id).unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskRestored { task_id: task.id }
+        );
+
+        // 冪等な呼び出しではイベントを出さない。
+        service.restore_task(task.id).unwrap();
+        service.notify_settings_changed();
+        assert_eq!(rx.recv().await.unwrap(), DomainEvent::SettingsChanged);
+    }
+
+    #[test]
+    fn board_counts_ignore_resources_of_deleted_tasks() {
+        let service = service();
+        let task = service
+            .create_task(NewTask {
+                title: "資料".to_owned(),
+                resources: vec![NewResource {
+                    kind: ResourceKind::Url,
+                    value: "https://example.com".to_owned(),
+                    label: String::new(),
+                    is_primary: true,
+                }],
+                ..NewTask::default()
+            })
+            .unwrap();
+        service.delete_task(task.id).unwrap();
+
+        let board = service.board().unwrap();
+        assert!(board.columns.new.is_empty());
+        // 削除済み一覧では集計しない。
+        let deleted = service.list_deleted().unwrap();
+        assert_eq!(deleted[0].resource_count, 0);
+        assert!(deleted[0].primary_resource.is_none());
     }
 
     #[test]

@@ -33,6 +33,10 @@ pub const APP_COMMANDS: &[&str] = &[
     "add_resource",
     "remove_resource",
     "set_parent",
+    // ソフトデリート(main ウィンドウ専用)
+    "delete_task",
+    "restore_task",
+    "list_deleted_tasks",
     // 設定・稼働状態・ウィンドウ
     "get_settings",
     "get_default_settings",

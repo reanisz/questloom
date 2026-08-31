@@ -59,6 +59,15 @@ impl StdError for RepositoryError {
 /// 同期 API。実装側は内部で必要な排他制御(接続の Mutex など)を行うこと。
 /// 書き込み系メソッドはそれぞれ**ひとつのトランザクション**で実行される
 /// (途中で失敗しても中間状態を残さない)。
+///
+/// # ソフトデリート
+///
+/// タスクの削除は `deleted_at` を立てるだけのソフトデリートで、行は残る。
+/// **削除済みタスクを通常のクエリから除外するのは実装側の責務**とする
+/// ([`list_tasks`](Self::list_tasks) / [`list_tasks_by_status`](Self::list_tasks_by_status) /
+/// [`list_children`](Self::list_children) / [`list_all_resources`](Self::list_all_resources))。
+/// 例外は [`find_task`](Self::find_task)(復元に必要なので削除済みも返す)と
+/// [`list_deleted_tasks`](Self::list_deleted_tasks)。
 pub trait TaskRepository: Send + Sync + 'static {
     /// タスクと、その関連リソースをまとめて挿入する。
     ///
@@ -76,29 +85,40 @@ pub trait TaskRepository: Send + Sync + 'static {
     /// 永続化に失敗した場合。
     fn update_task(&self, task: &Task) -> RepoResult<bool>;
 
-    /// タスクを 1 件取得する。
+    /// タスクを 1 件取得する。**削除済みのタスクも返す**(復元に必要なため)。
+    ///
+    /// 「削除済みなら操作を拒む」の判断はサービス層が行う。
     ///
     /// # Errors
     /// 永続化に失敗した場合。
     fn find_task(&self, id: TaskId) -> RepoResult<Option<Task>>;
 
-    /// 全タスクを `sort_order` 昇順で返す。
+    /// 削除済みでない全タスクを `sort_order` 昇順で返す。
     ///
     /// # Errors
     /// 永続化に失敗した場合。
     fn list_tasks(&self) -> RepoResult<Vec<Task>>;
 
-    /// 指定ステータスのタスクを `sort_order` 昇順で返す。
+    /// 指定ステータスの削除済みでないタスクを `sort_order` 昇順で返す。
     ///
     /// # Errors
     /// 永続化に失敗した場合。
     fn list_tasks_by_status(&self, status: TaskStatus) -> RepoResult<Vec<Task>>;
 
-    /// 子タスクを `sort_order` 昇順で返す。
+    /// 削除済みでない子タスクを `sort_order` 昇順で返す。
+    ///
+    /// 親子リンク (`parent_id`) は削除時も保持されるため、削除済みの子は
+    /// ここで落ちるだけで、復元すれば自然に戻る。
     ///
     /// # Errors
     /// 永続化に失敗した場合。
     fn list_children(&self, parent_id: TaskId) -> RepoResult<Vec<Task>>;
+
+    /// 削除済みタスクを `deleted_at` 降順(新しく消したものが先)で返す。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn list_deleted_tasks(&self) -> RepoResult<Vec<Task>>;
 
     /// リソースを 1 件挿入する。主リソースはタスクにつき 1 つに保つ。
     ///
@@ -121,7 +141,7 @@ pub trait TaskRepository: Send + Sync + 'static {
     /// 永続化に失敗した場合。
     fn list_resources(&self, task_id: TaskId) -> RepoResult<Vec<TaskResource>>;
 
-    /// 全リソースを `(task_id, sort_order)` 昇順で返す(ボード表示用)。
+    /// 削除済みでないタスクのリソースを `(task_id, sort_order)` 昇順で返す(ボード表示用)。
     ///
     /// # Errors
     /// 永続化に失敗した場合。

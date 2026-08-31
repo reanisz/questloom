@@ -386,6 +386,20 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     /// 完了時刻 (UTC)。
     pub done_at: Option<DateTime<Utc>>,
+    /// ソフトデリート時刻 (UTC)。`None` なら生存している。
+    ///
+    /// 削除済みタスクは通常のクエリ(ボード・一覧・子タスク)から除外され、
+    /// 復元 ([`TaskService::restore_task`](crate::service::TaskService::restore_task))
+    /// で `None` に戻る。物理削除は行わない。
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+impl Task {
+    /// 削除済み(ソフトデリート済み)か。
+    #[must_use]
+    pub const fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
 }
 
 /// タスクの関連リソース。

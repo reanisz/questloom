@@ -14,6 +14,13 @@ pub enum CoreError {
     #[error("タスクが見つかりません: {0}")]
     TaskNotFound(TaskId),
 
+    /// 削除済み(ソフトデリート済み)のタスクを操作しようとした。
+    ///
+    /// 復元 ([`TaskService::restore_task`](crate::service::TaskService::restore_task))
+    /// 以外の操作は受け付けない。
+    #[error("タスクは削除済みです: {0}")]
+    TaskDeleted(TaskId),
+
     /// 指定 ID のリソースが存在しない。
     #[error("リソースが見つかりません: {0}")]
     ResourceNotFound(ResourceId),

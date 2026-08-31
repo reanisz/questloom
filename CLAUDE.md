@@ -124,6 +124,8 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 | `update_task` | `task_id`, `title?`, `description?`, `deadline?`, `clear_deadline?` | タイトル・詳細・締切の更新 |
 | `move_task` | `task_id`, `column` | 指定列の末尾へ移動(時間バケット列は予定も設定される) |
 | `complete_task` | `task_id` | 完了にする(冪等) |
+| `delete_task` | `task_id` | 削除する(ソフトデリート。ボードから消えるだけで復元可能。子タスクへはカスケードしない。冪等) |
+| `restore_task` | `task_id` | 削除済みタスクを復元する(現ステータス列の末尾へ。冪等) |
 | `promote_task` | `task_id`, `column?` | インスタントタスクを通常タスクへ昇格(既定 `today`) |
 | `add_task_update` | `task_id`, `body` | アップデート履歴を追記 |
 | `add_resource` | `task_id`, `kind`, `value`, `label?`, `is_primary?` | 関連リソース(`url` / `file`)を追加 |
@@ -376,12 +378,12 @@ Rust 側は定義をそのまま `from_config` に渡すだけで、capability �
 
 | ウィンドウ | 許可 |
 |---|---|
-| `main` | 全 command(ボード・ドロワー・設定画面・AI・プラグイン設定) |
+| `main` | 全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
 | `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings` と設定画面専用の `plugin_directory` / `plugin_list_loaded` を除く)+ `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
 
 plugin-host では第三者のプラグインコードが動くので、`get_settings` / `set_settings` /
-`get_runtime_status`(MCP トークンが載る)/ `ai_*` は**渡さない**。許可されていない
+`get_runtime_status`(MCP トークンが載る)/ `ai_*` / タスクの削除・復元は**渡さない**。許可されていない
 command を invoke すると Tauri が拒否する。command を足したら `APP_COMMANDS` と
 `capabilities/default.json` の両方に足すこと(食い違いは `src-tauri/src/lib.rs` の
 テストが検出する)。

@@ -20,6 +20,7 @@ import { useBoardStore } from "../store";
 import { toMessage } from "../tauri";
 import type { BoardColumnKey, ResourceKind, TaskCard, TaskDetail, TaskId } from "../types";
 import { AiSplitDialog } from "./AiSplitDialog";
+import { ModalShell } from "./ModalShell";
 import { PromoteMenu } from "./PromoteMenu";
 
 /** リソースを既定のアプリで開く。file はエクスプローラで場所を表示する。 */
@@ -42,8 +43,64 @@ function TaskLink({ card, onOpen }: { card: TaskCard; onOpen: () => void }) {
   );
 }
 
+/**
+ * 削除の確認ダイアログ。
+ *
+ * 削除はソフトデリートなので取り返しはつくが、ボードから消える操作なので
+ * 一度だけ止めて確認する(復元はヘッダの「削除済み」から)。
+ */
+function DeleteConfirmDialog({
+  title,
+  busy,
+  onConfirm,
+  onClose,
+}: {
+  title: string;
+  busy: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <ModalShell
+      title="タスクを削除"
+      className="modal-sm"
+      busy={busy}
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>
+            キャンセル
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={busy}
+            data-autofocus
+            onClick={onConfirm}
+          >
+            削除
+          </button>
+        </>
+      }
+    >
+      <p className="confirm-target">{title}</p>
+      <p className="muted">
+        ボードから消えますが、ヘッダの「削除済み」からいつでも復元できます。子タスクは削除されません。
+      </p>
+    </ModalShell>
+  );
+}
+
 /** ドロワーの中身。タスクが切り替わったら `key` で作り直して編集中の値をリセットする。 */
-function DrawerBody({ detail, onSplit }: { detail: TaskDetail; onSplit: () => void }) {
+function DrawerBody({
+  detail,
+  onSplit,
+  onDelete,
+}: {
+  detail: TaskDetail;
+  onSplit: () => void;
+  onDelete: () => void;
+}) {
   const mutate = useBoardStore((state) => state.mutate);
   const openTask = useBoardStore((state) => state.openTask);
 
@@ -141,6 +198,14 @@ function DrawerBody({ detail, onSplit }: { detail: TaskDetail; onSplit: () => vo
             onClick={onSplit}
           >
             ✨ AI で分割/詳細化
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm btn-danger drawer-delete"
+            title="このタスクを削除する (あとで復元できます)"
+            onClick={onDelete}
+          >
+            🗑 削除
           </button>
         </div>
         <dl className="drawer-facts">
@@ -337,8 +402,12 @@ export function TaskDrawer() {
   const selectedId = useBoardStore((state) => state.selectedId);
   const detail = useBoardStore((state) => state.detail);
   const closeTask = useBoardStore((state) => state.closeTask);
+  const mutate = useBoardStore((state) => state.mutate);
   // ダイアログはドロワーの外に置く(スクロール領域の中だと重なりが崩れるため)。
   const [splitFor, setSplitFor] = useState<TaskId | null>(null);
+  /** 削除確認の対象。表示中のタスクのタイトルを添えて確認する。 */
+  const [confirmDelete, setConfirmDelete] = useState<{ id: TaskId; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
   /** 開く前にフォーカスしていた要素。閉じたら戻す。 */
   const restoreTo = useRef<HTMLElement | null>(null);
   /** 直前に開いていたか。開閉の瞬間だけフォーカスを動かすための記憶。 */
@@ -365,6 +434,15 @@ export function TaskDrawer() {
 
   if (!selectedId) return null;
 
+  /** 削除を確定する。ボードの更新は tasks-changed 任せ、ドロワーは閉じる。 */
+  const runDelete = async (taskId: TaskId) => {
+    setDeleting(true);
+    const ok = await mutate(() => api.deleteTask(taskId));
+    setDeleting(false);
+    setConfirmDelete(null);
+    if (ok) closeTask();
+  };
+
   return (
     <>
       <div className="drawer-scrim" onClick={closeTask} />
@@ -377,13 +455,26 @@ export function TaskDrawer() {
         </header>
         <div className="drawer-content">
           {detail ? (
-            <DrawerBody key={detail.id} detail={detail} onSplit={() => setSplitFor(detail.id)} />
+            <DrawerBody
+              key={detail.id}
+              detail={detail}
+              onSplit={() => setSplitFor(detail.id)}
+              onDelete={() => setConfirmDelete({ id: detail.id, title: detail.title })}
+            />
           ) : (
             <p className="muted">読み込み中…</p>
           )}
         </div>
       </aside>
       {splitFor && <AiSplitDialog taskId={splitFor} onClose={() => setSplitFor(null)} />}
+      {confirmDelete && (
+        <DeleteConfirmDialog
+          title={confirmDelete.title}
+          busy={deleting}
+          onConfirm={() => void runDelete(confirmDelete.id)}
+          onClose={() => setConfirmDelete(null)}
+        />
+      )}
     </>
   );
 }
