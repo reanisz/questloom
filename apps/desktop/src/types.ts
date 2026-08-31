@@ -225,6 +225,18 @@ export interface CoreSettings {
   aiTimeoutSecs: number;
 }
 
+/** デスクトップ側の稼働状態 (`get_runtime_status`)。設定画面での確認用。 */
+export interface RuntimeStatus {
+  /** 内蔵 MCP サーバーが起動しているか。 */
+  mcpRunning: boolean;
+  /** 起動中の MCP エンドポイント URL(停止中は null)。 */
+  mcpUrl: string | null;
+  /** 起動中の MCP サーバーが Bearer トークンを要求するか。 */
+  mcpTokenRequired: boolean;
+  /** 設定中のグローバルショートカットを実際に登録できているか。 */
+  shortcutRegistered: boolean;
+}
+
 /** 昇格先として選べる列(New / Doing / Done は選ばせない)。 */
 export const PROMOTE_COLUMNS = [
   "today",

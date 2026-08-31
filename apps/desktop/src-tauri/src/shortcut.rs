@@ -49,3 +49,15 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, spec: &str) {
         ),
     }
 }
+
+/// 指定のショートカットが実際に登録できているか。
+///
+/// 空文字列(ショートカットなし)や解釈できない文字列は「登録されていない」とみなす。
+/// 設定画面の稼働状態表示に使う。
+pub fn is_registered<R: Runtime>(app: &AppHandle<R>, spec: &str) -> bool {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    Shortcut::from_str(spec).is_ok_and(|shortcut| app.global_shortcut().is_registered(shortcut))
+}

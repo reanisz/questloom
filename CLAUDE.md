@@ -183,6 +183,15 @@ Tauri command として配線する。ヘッダの「✨ AI」ボタンと、タ
 - `CREATE_NO_WINDOW` を付けてコンソールウィンドウを出さない。
 - PowerShell 専用シム(`.ps1` のみ)の CLI は未対応。
 
+## 設定画面
+
+ヘッダ右端の歯車ボタンから、ボードを置き換えるページとして開く(`apps/desktop/src/components/SettingsPage.tsx`。
+Esc / 閉じるでボードへ戻る)。節は 一般 / ショートカットとオーバーレイ / MCP サーバー / AI の 4 つ。
+自動保存はせず「保存」ボタンで `set_settings` を一括呼び出しする(未保存のまま閉じるときは確認)。
+検証はフロント (`apps/desktop/src/settings.ts`) とバックエンド
+(`apps/desktop/src-tauri/src/settings.rs::validate`、ショートカット文字列のパースを含む)の両方で行い、
+不正なら保存しない。稼働状態(MCP の URL・ショートカットの登録可否)は `get_runtime_status` で取得する。
+
 ## 注意事項
 
 - **Tauri v2 を使用する。** v1 の API・設定ファイル形式・ネット上の記事を参照しないこと。

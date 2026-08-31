@@ -20,6 +20,7 @@ import type {
   NewTask,
   Origin,
   ResourceId,
+  RuntimeStatus,
   Task,
   TaskDetail,
   TaskId,
@@ -95,8 +96,14 @@ export const setParent = (taskId: TaskId, parentId: TaskId | null) =>
 /** コア設定を取得する。 */
 export const getSettings = () => call<CoreSettings>("get_settings");
 
-/** コア設定を保存する。 */
+/** 出荷時のコア設定を取得する(保存はされない)。 */
+export const getDefaultSettings = () => call<CoreSettings>("get_default_settings");
+
+/** コア設定を保存する。値が不正な場合は保存されずエラーになる。 */
 export const setSettings = (settings: CoreSettings) => call<void>("set_settings", { settings });
+
+/** MCP サーバー・グローバルショートカットの現在の稼働状態を取得する。 */
+export const getRuntimeStatus = () => call<RuntimeStatus>("get_runtime_status");
 
 /**
  * メインウィンドウを前面に出す。`taskId` を渡すとそのタスクの詳細も開く

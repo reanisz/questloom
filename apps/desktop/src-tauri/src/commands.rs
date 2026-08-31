@@ -2,14 +2,18 @@
 //!
 //! JS 側の引数は camelCase で渡す(Tauri v2 が snake_case へ変換する)。
 
+use std::sync::Arc;
+
 use questloom_core::bucket::BoardColumn;
 use questloom_core::model::{Origin, ResourceId, Task, TaskId, TaskResource, TaskUpdateEntry};
 use questloom_core::service::{Board, MoveRequest, NewResource, NewTask, TaskDetail, TaskPatch};
 use questloom_core::settings::CoreSettings;
-use tauri::{AppHandle, State};
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
 
+use crate::mcp::McpSupervisor;
 use crate::state::AppState;
-use crate::window;
+use crate::{settings, shortcut, window};
 
 /// command の戻り値。エラーはフロントで扱いやすいよう文字列にする。
 pub type CommandResult<T> = Result<T, String>;
@@ -127,13 +131,66 @@ pub fn get_settings(state: State<'_, AppState>) -> CommandResult<CoreSettings> {
     Ok(state.service.settings())
 }
 
-/// コア設定を保存し、即座に反映する。
+/// 出荷時のコア設定を返す。設定画面の「既定値に戻す」で使う。
 ///
+/// 返すだけで保存はしない(フォームに読み込ませ、保存操作は利用者に委ねる)。
+#[tauri::command]
+pub fn get_default_settings() -> CommandResult<CoreSettings> {
+    Ok(CoreSettings::default())
+}
+
+/// コア設定を検証して保存し、即座に反映する。
+///
+/// 不正な値(解釈できないショートカット文字列など)は保存せずエラーを返す。
 /// ショートカット・自動起動・オーバーレイ表示は、保存時に発行される
 /// `SettingsChanged` イベントを購読している watcher が反映する。
 #[tauri::command]
 pub fn set_settings(state: State<'_, AppState>, settings: CoreSettings) -> CommandResult<()> {
+    settings::validate(&settings).map_err(fail)?;
     state.save_settings(settings).map_err(fail)
+}
+
+/// デスクトップ側の稼働状態。設定画面での確認用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus {
+    /// 内蔵 MCP サーバーが起動しているか。
+    pub mcp_running: bool,
+    /// 起動中の MCP エンドポイント URL。停止中は `None`。
+    pub mcp_url: Option<String>,
+    /// 起動中の MCP サーバーが Bearer トークンを要求するか。
+    pub mcp_token_required: bool,
+    /// 設定中のグローバルショートカットを実際に登録できているか。
+    pub shortcut_registered: bool,
+}
+
+/// MCP サーバーとグローバルショートカットの現在の稼働状態を返す。
+///
+/// 設定値ではなく「いま動いているもの」を映す。保存に失敗しうる要素
+/// (ポート衝突・ショートカットの奪い合い)を利用者が確認できるようにするため。
+#[tauri::command]
+pub async fn get_runtime_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<RuntimeStatus> {
+    let shortcut_spec = state.service.settings().global_shortcut;
+    // State の借用を await をまたいで持ち越さないよう、Arc を取り出しておく。
+    let supervisor = app
+        .try_state::<Arc<McpSupervisor>>()
+        .map(|state| Arc::clone(state.inner()));
+    let endpoint = match supervisor {
+        Some(supervisor) => supervisor.endpoint().await,
+        None => None,
+    };
+
+    Ok(RuntimeStatus {
+        mcp_running: endpoint.is_some(),
+        mcp_token_required: endpoint
+            .as_ref()
+            .is_some_and(|endpoint| endpoint.token.is_some()),
+        mcp_url: endpoint.map(|endpoint| endpoint.url),
+        shortcut_registered: shortcut::is_registered(&app, &shortcut_spec),
+    })
 }
 
 /// メインウィンドウを表示・フォーカスし、指定があればそのタスクの詳細を開かせる。

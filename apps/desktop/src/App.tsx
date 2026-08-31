@@ -5,10 +5,14 @@ import { useEffect, useState } from "react";
 import { listenOpenTask, listenTasksChanged } from "./api";
 import { AiDialog } from "./components/AiDialog";
 import { BoardView } from "./components/BoardView";
+import { SettingsPage } from "./components/SettingsPage";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { TitleBar } from "./components/TitleBar";
 import { useBoardStore } from "./store";
 import { useExpandedView } from "./viewMode";
+
+/** 表示中のページ。設定はモーダルではなくボードを置き換えるページとして出す。 */
+type Page = "board" | "settings";
 
 function App() {
   const board = useBoardStore((state) => state.board);
@@ -19,6 +23,7 @@ function App() {
   const openTask = useBoardStore((state) => state.openTask);
   const [expanded, setExpanded] = useExpandedView();
   const [aiOpen, setAiOpen] = useState(false);
+  const [page, setPage] = useState<Page>("board");
 
   useEffect(() => {
     void refresh();
@@ -41,33 +46,6 @@ function App() {
     <div className="app">
       <TitleBar />
 
-      <header className="app-header">
-        {board && <span className="muted">{board.today}</span>}
-        <div className="app-header-actions">
-          <button
-            type="button"
-            className="btn btn-sm"
-            title="AI に依頼する (タスク作成 / 自由指示)"
-            onClick={() => setAiOpen(true)}
-          >
-            ✨ AI
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm btn-ghost"
-            aria-pressed={expanded}
-            title={
-              expanded
-                ? "New / Today / Doing / Done + 先送りレールの表示に戻す"
-                : "先送りバケットも列として展開する"
-            }
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? "▤ 通常表示" : "▦ 全列を展開"}
-          </button>
-        </div>
-      </header>
-
       {error && (
         <div className="banner" role="alert">
           <span>{error}</span>
@@ -77,14 +55,56 @@ function App() {
         </div>
       )}
 
-      {board ? (
-        <BoardView board={board} expanded={expanded} onExpand={() => setExpanded(true)} />
+      {page === "settings" ? (
+        <SettingsPage onClose={() => setPage("board")} />
       ) : (
-        <p className="placeholder">{ready ? "ボードを読み込めませんでした。" : "読み込み中…"}</p>
-      )}
+        <>
+          <header className="app-header">
+            {board && <span className="muted">{board.today}</span>}
+            <div className="app-header-actions">
+              <button
+                type="button"
+                className="btn btn-sm"
+                title="AI に依頼する (タスク作成 / 自由指示)"
+                onClick={() => setAiOpen(true)}
+              >
+                ✨ AI
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                aria-pressed={expanded}
+                title={
+                  expanded
+                    ? "New / Today / Doing / Done + 先送りレールの表示に戻す"
+                    : "先送りバケットも列として展開する"
+                }
+                onClick={() => setExpanded(!expanded)}
+              >
+                {expanded ? "▤ 通常表示" : "▦ 全列を展開"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost btn-icon"
+                title="設定"
+                aria-label="設定"
+                onClick={() => setPage("settings")}
+              >
+                ⚙
+              </button>
+            </div>
+          </header>
 
-      <TaskDrawer />
-      <AiDialog open={aiOpen} onClose={() => setAiOpen(false)} />
+          {board ? (
+            <BoardView board={board} expanded={expanded} onExpand={() => setExpanded(true)} />
+          ) : (
+            <p className="placeholder">{ready ? "ボードを読み込めませんでした。" : "読み込み中…"}</p>
+          )}
+
+          <TaskDrawer />
+          <AiDialog open={aiOpen} onClose={() => setAiOpen(false)} />
+        </>
+      )}
     </div>
   );
 }
