@@ -7,31 +7,26 @@
  */
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+
+import { useTauriEvent } from "../useTauriEvent";
+
+/** ウィンドウのリサイズ購読(`useTauriEvent` に渡すため参照を固定する)。 */
+const subscribeResized = (handler: () => void) => getCurrentWindow().onResized(handler);
 
 /** 最大化状態を購読し、最大化 / 元に戻すアイコンを切り替えるためのフック。 */
 function useMaximized(): boolean {
   const [maximized, setMaximized] = useState(false);
 
-  useEffect(() => {
-    let disposed = false;
-    const appWindow = getCurrentWindow();
-    const sync = () => {
-      void appWindow
-        .isMaximized()
-        .then((value) => {
-          if (!disposed) setMaximized(value);
-        })
-        .catch(() => undefined);
-    };
-
-    sync();
-    const unlisten = appWindow.onResized(sync);
-    return () => {
-      disposed = true;
-      void unlisten.then((off) => off()).catch(() => undefined);
-    };
+  const sync = useCallback(() => {
+    void getCurrentWindow()
+      .isMaximized()
+      .then(setMaximized)
+      .catch(() => undefined);
   }, []);
+
+  useEffect(sync, [sync]);
+  useTauriEvent(subscribeResized, sync);
 
   return maximized;
 }

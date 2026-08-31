@@ -1,15 +1,21 @@
 /**
  * フロントの状態管理 (zustand)。
  *
- * 真実の情報源はバックエンド。書き込み系はすべて invoke → 再フェッチで反映する
- * (加えて `questloom://tasks-changed` でも再フェッチされる)。
+ * 真実の情報源はバックエンド。**書き込みの結果は自前で再フェッチせず、
+ * バックエンドが出す `questloom://tasks-changed` を受けて反映する**
+ * (購読は App.tsx / OverlayApp.tsx)。書き込みごとに再フェッチも回すと
+ * 1 回の変更で `get_board` が 2 回走るため、イベント駆動に一本化してある。
+ * 取りこぼし (`missed > 0`) の場合もイベント自体は届くので再フェッチされる。
+ *
+ * 失敗時だけは、楽観的更新を巻き戻すためにその場で再フェッチする。
  * ドラッグ&ドロップのみ、体感を保つために移動先へカードを先に動かす楽観的更新を行い、
- * 直後の再フェッチで正しい状態に上書きされる。
+ * イベントで届く正しい状態に上書きされる。
  */
 
 import { create } from "zustand";
 
 import * as api from "./api";
+import { toMessage } from "./tauri";
 import type { Board, BoardColumnKey, TaskCard, TaskDetail, TaskId } from "./types";
 
 /** 再フェッチの世代番号。古い応答で新しい状態を上書きしないためのガード。 */
@@ -29,7 +35,10 @@ interface BoardState {
   openTask: (taskId: TaskId) => void;
   closeTask: () => void;
   setError: (error: string | null) => void;
-  /** 書き込み系の共通ラッパー。失敗時はエラーを表示し false を返す。 */
+  /**
+   * 書き込み系の共通ラッパー。成功時の反映は tasks-changed イベントに任せる。
+   * 失敗時はエラーを表示し、状態を読み直して false を返す。
+   */
   mutate: (action: () => Promise<unknown>) => Promise<boolean>;
   /** ドロップ直後にカードをローカルで移動する(再フェッチで上書きされる)。 */
   applyLocalMove: (
@@ -76,7 +85,7 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
       }));
     } catch (error) {
       if (token !== generation) return;
-      set({ error: api.toMessage(error), ready: true });
+      set({ error: toMessage(error), ready: true });
     }
   },
 
@@ -96,10 +105,11 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
   async mutate(action) {
     try {
       await action();
-      await get().refresh();
+      // 成功時はここで再フェッチしない。バックエンドの tasks-changed が引き金になる。
       return true;
     } catch (error) {
-      set({ error: api.toMessage(error) });
+      set({ error: toMessage(error) });
+      // 失敗時はイベントが来ないので、楽観的更新を巻き戻すために読み直す。
       await get().refresh();
       return false;
     }

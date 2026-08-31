@@ -8,7 +8,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import * as api from "./api";
+import { toMessage } from "./tauri";
 import type { AiProvider, AiStatus } from "./types";
+import { useTauriEvent } from "./useTauriEvent";
 
 /** 有効なプロバイダと既定 ID。ダイアログを開いたときに読み込む。 */
 export function useAiProviders(enabled: boolean) {
@@ -28,7 +30,7 @@ export function useAiProviders(enabled: boolean) {
         setError(null);
       })
       .catch((cause) => {
-        if (alive) setError(api.toMessage(cause));
+        if (alive) setError(toMessage(cause));
       });
     return () => {
       alive = false;
@@ -46,12 +48,7 @@ export function useAiProviders(enabled: boolean) {
 export function useAiStatus(): AiStatus | null {
   const [status, setStatus] = useState<AiStatus | null>(null);
 
-  useEffect(() => {
-    const unlisten = api.listenAiStatus(setStatus);
-    return () => {
-      void unlisten.then((off) => off()).catch(() => undefined);
-    };
-  }, []);
+  useTauriEvent(api.listenAiStatus, setStatus);
 
   return status;
 }
@@ -69,14 +66,14 @@ export function useAiRun<T>() {
     try {
       setResult(await action());
     } catch (cause) {
-      setError(api.toMessage(cause));
+      setError(toMessage(cause));
     } finally {
       setBusy(false);
     }
   }, []);
 
   const cancel = useCallback(() => {
-    api.aiCancel().catch((cause) => setError(api.toMessage(cause)));
+    api.aiCancel().catch((cause) => setError(toMessage(cause)));
   }, []);
 
   const reset = useCallback(() => {

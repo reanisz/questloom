@@ -1389,9 +1389,14 @@ textarea {
 
 /* ---- オーバーレイ通知ウィンドウ ---- */
 
-/* 透過ウィンドウなので body の地色を消す(メインウィンドウ側は従来どおり)。 */
+/* 透過ウィンドウなので body の地色を消す。 */
 body.overlay-body {
   background: transparent;
+}
+
+/* オーバーレイ以外(メインウィンドウ・plugin-host)。地色を明示して overlay-body と対にする。 */
+body.main-body {
+  background: var(--bg);
 }
 
 .overlay {

@@ -5,9 +5,9 @@
  * plugin-host ウィンドウとメインウィンドウ(設定画面)の両方から使う。
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { call } from "../tauri";
 import type { LoadedPlugin, PluginSourceFile } from "../types";
 import type { PluginSettings, PluginTaskResource } from "./sdk";
 
@@ -19,14 +19,6 @@ export const PLUGINS_RELOAD = "questloom://plugins-reload";
 
 /** プラグイン設定が保存されたときのイベント名。 */
 export const PLUGIN_SETTINGS_CHANGED = "questloom://plugin-settings-changed";
-
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args);
-  } catch (error) {
-    throw new Error(typeof error === "string" ? error : String(error));
-  }
-}
 
 /** プラグインディレクトリの絶対パス(無ければ作成される)。 */
 export const pluginDirectory = () => call<string>("plugin_directory");

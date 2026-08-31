@@ -13,6 +13,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 
 import { completeTask, getBoard, listenTasksChanged, showMainWindow } from "../api";
 import type { TaskCard } from "../types";
+import { useTauriEvent } from "../useTauriEvent";
 
 /** ウィンドウ幅(論理ピクセル)。tauri.conf.json の overlay と揃えること。 */
 const OVERLAY_WIDTH = 360;
@@ -50,11 +51,9 @@ function useNewTasks(): TaskCard[] {
 
   useEffect(() => {
     refresh();
-    const unlisten = listenTasksChanged(refresh);
-    return () => {
-      void unlisten.then((off) => off()).catch(() => undefined);
-    };
   }, [refresh]);
+
+  useTauriEvent(listenTasksChanged, refresh);
 
   return tasks;
 }

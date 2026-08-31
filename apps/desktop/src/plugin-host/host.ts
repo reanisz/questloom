@@ -22,10 +22,8 @@
  * 波及しないようにするため。
  */
 
-import { invoke } from "@tauri-apps/api/core";
-
-import { listenTasksChanged } from "../api";
-import type { Board, LoadedPlugin, PluginSourceFile, TaskCard } from "../types";
+import * as api from "../api";
+import type { LoadedPlugin, PluginSourceFile, TaskCard } from "../types";
 import * as papi from "./api";
 import {
   defineQuestloomPlugin,
@@ -116,15 +114,6 @@ function hostLog(level: PluginLogLevel, message: string): void {
   forwardLog(HOST_ID, level, message);
 }
 
-/** command を叩く(reject 値を Error に正規化する)。 */
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args);
-  } catch (error) {
-    throw new Error(typeof error === "string" ? error : String(error));
-  }
-}
-
 /* ------------------------------------------------------------------ context */
 
 /** プラグイン用のロガーを作る。 */
@@ -149,18 +138,19 @@ function createContext(entry: ActivePlugin): PluginContext {
   return {
     manifest: entry.manifest,
 
+    // 本体と同じ型付きラッパー (src/api.ts) を使う。origin だけ引数で固定する。
     tasks: {
-      createTask: (input) => call("create_task", { input: { ...input, origin } }),
-      getTask: (taskId) => call("get_task", { taskId }),
+      createTask: (input) => api.createTask({ ...input, origin }),
+      getTask: (taskId) => api.getTask(taskId),
       listTasks: async () => {
-        const board = await call<Board>("get_board");
+        const board = await api.getBoard();
         return Object.values(board.columns).flat() as TaskCard[];
       },
-      completeTask: (taskId) => call("complete_task", { taskId }),
-      addTaskUpdate: (taskId, body) => call("add_task_update", { taskId, body, origin }),
-      addResource: (taskId, resource) => call("add_resource", { taskId, resource }),
+      completeTask: (taskId) => api.completeTask(taskId),
+      addTaskUpdate: (taskId, body) => api.addTaskUpdate(taskId, body, origin),
+      addResource: (taskId, resource) => api.addResource(taskId, resource),
       listAllResources: () => papi.pluginListTaskResources(),
-      moveTask: (taskId, column) => call("move_task", { taskId, request: { column } }),
+      moveTask: (taskId, column) => api.moveTask(taskId, { column }),
     },
 
     settings: {
@@ -223,13 +213,14 @@ function createContext(entry: ActivePlugin): PluginContext {
     onTaskEvent: (handler) => {
       let off: (() => void) | null = null;
       let stopped = false;
-      void listenTasksChanged(() => {
-        try {
-          handler();
-        } catch (error) {
-          log.error(`onTaskEvent が失敗しました: ${describeError(error)}`);
-        }
-      })
+      void api
+        .listenTasksChanged(() => {
+          try {
+            handler();
+          } catch (error) {
+            log.error(`onTaskEvent が失敗しました: ${describeError(error)}`);
+          }
+        })
         .then((unlisten) => {
           // 購読が張られる前に dispose された場合はすぐ解除する。
           if (stopped) unlisten();

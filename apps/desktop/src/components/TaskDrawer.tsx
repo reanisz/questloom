@@ -4,7 +4,7 @@
  */
 
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import * as api from "../api";
 import {
@@ -15,7 +15,9 @@ import {
   isOverdue,
   toDateTimeLocal,
 } from "../format";
+import { ESC_LAYER, onCtrlEnter, useEscapeKey } from "../keyboard";
 import { useBoardStore } from "../store";
+import { toMessage } from "../tauri";
 import type { BoardColumnKey, ResourceKind, TaskCard, TaskDetail, TaskId } from "../types";
 import { AiSplitDialog } from "./AiSplitDialog";
 import { PromoteMenu } from "./PromoteMenu";
@@ -208,8 +210,8 @@ function DrawerBody({ detail, onSplit }: { detail: TaskDetail; onSplit: () => vo
                 className="resource-open"
                 title={resource.value}
                 onClick={() => {
-                  openResource(resource.kind, resource.value).catch((error) =>
-                    useBoardStore.getState().setError(api.toMessage(error)),
+                  openResource(resource.kind, resource.value).catch((error: unknown) =>
+                    useBoardStore.getState().setError(toMessage(error)),
                   );
                 }}
               >
@@ -320,12 +322,7 @@ function DrawerBody({ detail, onSplit }: { detail: TaskDetail; onSplit: () => vo
             placeholder="進捗メモを追記"
             aria-label="アップデートの本文"
             onChange={(event) => setNote(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                event.preventDefault();
-                addNote();
-              }
-            }}
+            onKeyDown={onCtrlEnter(addNote)}
           />
           <button type="submit" className="btn btn-primary btn-sm" disabled={!note.trim()}>
             追記
@@ -342,19 +339,29 @@ export function TaskDrawer() {
   const closeTask = useBoardStore((state) => state.closeTask);
   // ダイアログはドロワーの外に置く(スクロール領域の中だと重なりが崩れるため)。
   const [splitFor, setSplitFor] = useState<TaskId | null>(null);
+  /** 開く前にフォーカスしていた要素。閉じたら戻す。 */
+  const restoreTo = useRef<HTMLElement | null>(null);
+  /** 直前に開いていたか。開閉の瞬間だけフォーカスを動かすための記憶。 */
+  const wasOpen = useRef(false);
 
+  // ダイアログやメニューを開いている間の Esc は、最前面のそれだけを閉じる。
+  useEscapeKey(closeTask, { enabled: selectedId != null, priority: ESC_LAYER.drawer });
+
+  // ドロワーはフォーカストラップまではしないが、閉じたら呼び出し元へフォーカスを返す
+  // (カードから開いたなら、そのカードへキーボード操作が戻る)。
+  // 中のリンクでタスクを切り替えたときは動かさない(開きっぱなしのため)。
   useEffect(() => {
-    // ダイアログを開いている間の Escape は、そちらだけを閉じる。
-    if (!selectedId || splitFor) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const typing =
-        target != null && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName ?? "");
-      if (event.key === "Escape" && !typing) closeTask();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [selectedId, splitFor, closeTask]);
+    const open = selectedId != null;
+    if (open && !wasOpen.current) {
+      const opener = document.activeElement;
+      restoreTo.current = opener instanceof HTMLElement ? opener : null;
+    } else if (!open && wasOpen.current) {
+      const element = restoreTo.current;
+      restoreTo.current = null;
+      if (element?.isConnected) element.focus();
+    }
+    wasOpen.current = open;
+  }, [selectedId]);
 
   if (!selectedId) return null;
 

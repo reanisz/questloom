@@ -1,12 +1,13 @@
 /**
- * Tauri command の薄いラッパー。
+ * タスク・設定・AI の Tauri command ラッパー。
  *
- * 引数は camelCase で渡す(Tauri v2 が snake_case へ変換する)。
- * エラーは日本語文字列で reject されるため、そのまま Error に包み直す。
+ * invoke の呼び出しとエラー正規化は [`src/tauri.ts`] に集約してある。
+ * ここは「どの command にどんな引数を渡すか」の型付けだけを持つ。
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+import { call } from "./tauri";
 
 import type {
   AiCreateResult,
@@ -37,21 +38,6 @@ export const OPEN_TASK = "questloom://open-task";
 
 /** AI 実行の進捗イベント名。 */
 export const AI_STATUS = "questloom://ai-status";
-
-/** reject 値(多くは日本語文字列)を Error へ正規化する。 */
-export function toMessage(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  try {
-    return await invoke<T>(command, args);
-  } catch (error) {
-    throw new Error(toMessage(error));
-  }
-}
 
 /** ボード全体を、バケット導出済みの構造で取得する。 */
 export const getBoard = () => call<Board>("get_board");

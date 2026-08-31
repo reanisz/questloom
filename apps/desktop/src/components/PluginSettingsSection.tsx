@@ -18,7 +18,9 @@ import {
   type PluginSettingField,
   type PluginSettings,
 } from "../plugin-host/sdk";
+import { toMessage } from "../tauri";
 import type { LoadedPlugin } from "../types";
+import { useTauriEvent } from "../useTauriEvent";
 
 /** 編集中の値。数値も編集途中の文字列で持つ(打ち直しできるようにするため)。 */
 type Draft = Record<string, string | boolean>;
@@ -71,7 +73,7 @@ function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
         if (alive) setDraft(toDraft(schema, mergeSettings(schema, stored)));
       })
       .catch((cause: unknown) => {
-        if (alive) setError(cause instanceof Error ? cause.message : String(cause));
+        if (alive) setError(toMessage(cause));
       });
     return () => {
       alive = false;
@@ -92,7 +94,7 @@ function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
         setDraft(toDraft(schema, mergeSettings(schema, stored)));
         setNotice("保存しました。");
       })
-      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .catch((cause: unknown) => setError(toMessage(cause)))
       .finally(() => setSaving(false));
   }, [pluginId, draft, saving, schema]);
 
@@ -222,22 +224,20 @@ export function PluginSettingsSection() {
       .pluginListLoaded()
       .then(setPlugins)
       .catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : String(cause)),
+        setError(toMessage(cause)),
       );
   }, []);
 
   useEffect(() => {
     refresh();
     papi.pluginDirectory().then(setDirectory).catch(() => setDirectory(null));
-    // ホストが読み直したら一覧を差し替える。
-    const unlisten = papi.listenPluginsLoaded((loaded) => {
-      setPlugins(loaded);
-      setReloading(false);
-    });
-    return () => {
-      void unlisten.then((off) => off()).catch(() => undefined);
-    };
   }, [refresh]);
+
+  // ホストが読み直したら一覧を差し替える。
+  useTauriEvent(papi.listenPluginsLoaded, (loaded) => {
+    setPlugins(loaded);
+    setReloading(false);
+  });
 
   const reload = () => {
     setReloading(true);
@@ -246,7 +246,7 @@ export function PluginSettingsSection() {
       .requestPluginReload()
       .catch((cause: unknown) => {
         setReloading(false);
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toMessage(cause));
       });
     // ホストが応答しない場合に「再読み込み中」で固まらないよう保険をかける。
     window.setTimeout(() => setReloading(false), 8000);

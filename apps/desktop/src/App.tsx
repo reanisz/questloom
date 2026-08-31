@@ -9,6 +9,7 @@ import { SettingsPage } from "./components/SettingsPage";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { TitleBar } from "./components/TitleBar";
 import { useBoardStore } from "./store";
+import { useTauriEvent } from "./useTauriEvent";
 import { useExpandedView } from "./viewMode";
 
 /** 表示中のページ。設定はモーダルではなくボードを置き換えるページとして出す。 */
@@ -27,20 +28,14 @@ function App() {
 
   useEffect(() => {
     void refresh();
-    // イベントのペイロードは見ず、再フェッチのトリガとしてのみ使う。
-    const unlisten = listenTasksChanged(() => void refresh());
-    return () => {
-      void unlisten.then((off) => off()).catch(() => undefined);
-    };
   }, [refresh]);
 
-  useEffect(() => {
-    // オーバーレイのクリックから「このタスクを開く」と言われたら詳細を開く。
-    const unlisten = listenOpenTask((taskId) => openTask(taskId));
-    return () => {
-      void unlisten.then((off) => off()).catch(() => undefined);
-    };
-  }, [openTask]);
+  // 書き込みの結果はすべてこのイベント経由で反映する(store.mutate は再フェッチしない)。
+  // ペイロードは見ず、再フェッチのトリガとしてのみ使う。
+  useTauriEvent(listenTasksChanged, () => void refresh());
+
+  // オーバーレイのクリックから「このタスクを開く」と言われたら詳細を開く。
+  useTauriEvent(listenOpenTask, openTask);
 
   return (
     <div className="app">

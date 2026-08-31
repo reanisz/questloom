@@ -40,6 +40,7 @@ import type {
   BoardColumnKey,
   NewResource,
   NewTask,
+  ResourceKind,
   Task,
   TaskCard,
   TaskDetail,
@@ -129,7 +130,7 @@ export interface PluginTaskApi {
 /** `listAllResources` が返す 1 件。 */
 export interface PluginTaskResource {
   taskId: TaskId;
-  kind: "url" | "file";
+  kind: ResourceKind;
   value: string;
   label: string;
   isPrimary: boolean;

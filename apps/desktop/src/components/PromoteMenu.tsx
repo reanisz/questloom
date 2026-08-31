@@ -1,7 +1,8 @@
 /** インスタントタスクの「昇格」用の小さな列選択メニュー。 */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ESC_LAYER, useEscapeKey } from "../keyboard";
 import { columnLabel, PROMOTE_COLUMNS, type BoardColumnKey } from "../types";
 
 interface Props {
@@ -15,20 +16,19 @@ export function PromoteMenu({ onSelect, className }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  const close = useCallback(() => setOpen(false), []);
+
+  // メニューは常に呼び出し元より前面。開いている間の Esc はここで止め、
+  // 後ろのドロワーやカードまで一緒に閉じないようにする。
+  useEscapeKey(close, { enabled: open, priority: ESC_LAYER.popup });
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
     document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
+    return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
 
   return (
