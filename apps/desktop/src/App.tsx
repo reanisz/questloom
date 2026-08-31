@@ -70,6 +70,7 @@ function App() {
               <button
                 type="button"
                 className="btn btn-sm btn-ghost"
+                data-testid="open-deleted"
                 title="削除したタスクを見る / 復元する"
                 onClick={() => setDeletedOpen(true)}
               >

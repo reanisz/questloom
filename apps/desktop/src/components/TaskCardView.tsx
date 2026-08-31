@@ -83,6 +83,7 @@ export function TaskCardView({ card }: { card: TaskCard }) {
   return (
     <div
       ref={setNodeRef}
+      data-testid="task-card"
       className={`card${card.isInstant ? " card-instant" : ""}${isDragging ? " card-dragging" : ""}`}
       style={{ transform: CSS.Translate.toString(transform), transition }}
       {...attributes}

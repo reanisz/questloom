@@ -2,6 +2,16 @@
 
 2026-08-31 のテスト充実度調査に基づく。現状の棚卸し・e2e 方式の比較・推奨構成を記す。
 
+**実装状況(2026-08-31)**: 下記の推奨構成 1〜3 と CI はすべて実装済み。
+- フロントユニット: vitest + jsdom、106 テスト(`cd apps/desktop; npm test`)
+- バックエンド e2e: `apps/desktop/src-tauri/tests/backend_e2e.rs`(`#[ignore]`。実 exe +
+  一時プロファイルで MCP 往復。実行方法は CLAUDE.md 参照)
+- GUI e2e スモーク: @wdio/tauri-service + tauri-driver(`apps/desktop/e2e/smoke.spec.ts`、
+  起動→作成→削除→復元の 4 テスト。`npm run e2e`)
+- CI: `.github/workflows/ci.yml`(rust: windows / frontend: ubuntu は push・PR、
+  GUI e2e は手動 + 週次)
+- テスト分離: `QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` 環境変数で実プロファイルと分離
+
 ## 現状(調査時点)
 
 Rust テスト 212 個 + プラグイン純関数テスト(`node --test examples/plugins/github.test.mjs`)26 個。

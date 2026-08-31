@@ -48,6 +48,7 @@ export function Column({ columnKey, label, cards, focused }: Props) {
   return (
     <section
       id={columnDomId(columnKey)}
+      data-testid={`column-${columnKey}`}
       className={`column${isOver ? " column-over" : ""}${focused ? " column-focused" : ""}`}
     >
       <header className="column-header">
@@ -74,6 +75,7 @@ export function Column({ columnKey, label, cards, focused }: Props) {
         <input
           type="text"
           value={draft}
+          data-testid={`quick-add-${columnKey}`}
           placeholder="+ タスクを追加"
           aria-label={`${label} にタスクを追加`}
           onChange={(event) => setDraft(event.target.value)}

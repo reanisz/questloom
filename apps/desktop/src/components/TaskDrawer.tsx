@@ -74,6 +74,7 @@ function DeleteConfirmDialog({
           <button
             type="button"
             className="btn btn-danger"
+            data-testid="confirm-delete"
             disabled={busy}
             data-autofocus
             onClick={onConfirm}
@@ -202,6 +203,7 @@ function DrawerBody({
           <button
             type="button"
             className="btn btn-sm btn-danger drawer-delete"
+            data-testid="drawer-delete"
             title="このタスクを削除する (あとで復元できます)"
             onClick={onDelete}
           >
@@ -446,7 +448,7 @@ export function TaskDrawer() {
   return (
     <>
       <div className="drawer-scrim" onClick={closeTask} />
-      <aside className="drawer" aria-label="タスク詳細">
+      <aside className="drawer" data-testid="task-drawer" aria-label="タスク詳細">
         <header className="drawer-header">
           <span className="muted">タスク詳細</span>
           <button type="button" className="btn btn-ghost btn-sm" onClick={closeTask}>

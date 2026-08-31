@@ -71,6 +71,7 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 | フロント依存のインストール | `cd apps/desktop; npm install` |
 | フロントのみのビルド(型チェック込み) | `cd apps/desktop; npm run build` |
 | フロントのユニットテスト (vitest + jsdom) | `cd apps/desktop; npm test` |
+| GUI e2e スモーク (WebdriverIO) | `cd apps/desktop; npm run tauri build -- --debug --no-bundle; npm run e2e` |
 | プラグイン(TS)の純関数テスト | `node --test examples/plugins/github.test.mjs` |
 | アプリの開発起動(ウィンドウが立ち上がる) | `cd apps/desktop; npm run tauri dev` |
 | リリースバンドル作成 | `cd apps/desktop; npm run tauri build` |
@@ -87,7 +88,9 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 
 三段構えの方針と現状の棚卸しは `docs/testing.md`。CI は `.github/workflows/ci.yml`
 (rust ジョブ = windows-latest で `cargo test --workspace` + clippy、frontend ジョブ =
-ubuntu-latest で `npm run build` → `npm test` → プラグインの `node --test`)。
+ubuntu-latest で `npm run build` → `npm test` → プラグインの `node --test`、
+e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週次 schedule のときだけ**
+走り、push / PR では動かない)。
 
 - **フロントのユニットテスト**は vitest + jsdom。`apps/desktop/src/**/*.test.ts(x)` に置き、
   `npm test` (= `vitest run`) で走る。テストは `npm run build` の tsc でも型検査される。
@@ -99,6 +102,35 @@ ubuntu-latest で `npm run build` → `npm test` → プラグインの `node --
   cargo build -p questloom-desktop
   cargo test -p questloom-desktop --test backend_e2e -- --ignored
   ```
+
+- **GUI e2e スモーク** (`apps/desktop/e2e/smoke.spec.ts`) は WebdriverIO +
+  [`@wdio/tauri-service`](https://webdriver.io/docs/wdio-tauri-service/) で実アプリを操作する。
+  「起動 → ボード描画 → New へタスク作成 → カードから詳細ドロワー → 削除 →
+  『削除済み』から復元」を main ウィンドウだけで 1 本通す。設定は `apps/desktop/wdio.conf.ts`。
+
+  **前提は「フロント同梱の debug ビルド」**。`npm run tauri dev` / `cargo run` が作る exe は
+  `devUrl`(Vite dev サーバー)を読みに行くので使えない。
+
+  ```powershell
+  cd apps/desktop
+  npm run tauri build -- --debug --no-bundle   # target/debug/questloom-desktop.exe を作る
+  npm run e2e                                  # = wdio run ./wdio.conf.ts
+  ```
+
+  - **フロントを変更したら exe を作り直すこと。** アセットは exe に焼き込まれているので、
+    ビルドし直さないと古い画面のままテストされる。
+  - driver は `driverProvider: "external"`(= `cargo install tauri-driver --locked` で入る
+    `tauri-driver`)。未導入なら `autoInstallTauriDriver` が自動で入れる(初回は数分)。
+    Windows の `msedgedriver` は WebView2 の版に合わせてサービスが自動 DL する。
+  - **本物のデータは触らない。** `wdio.conf.ts` が実行ごとに一時ディレクトリと空きポートを取り、
+    `QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` として渡す(下記参照)。
+    終了時に一時ディレクトリと、居残った `tauri-driver` / `msedgedriver` /
+    `questloom-desktop` を片付ける(**起動前から居たプロセスには手を出さない**)。
+  - セレクタは最小限の `data-testid`(`titlebar` / `column-<key>` / `quick-add-<key>` /
+    `task-card` / `task-drawer` / `drawer-delete` / `confirm-delete` / `open-deleted` /
+    `deleted-row` / `restore-task`)。ダイアログは `ModalShell` の `aria-label` で引く。
+  - overlay / plugin-host も同じバンドルを読むためウィンドウハンドルは複数返る。
+    spec の冒頭で `[data-testid="titlebar"]`(= `App` にしか無い)を持つものへ切り替える。
 
 ### テスト用の環境変数
 

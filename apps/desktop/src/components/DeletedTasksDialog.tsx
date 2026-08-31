@@ -66,7 +66,7 @@ export function DeletedTasksDialog({ onClose }: { onClose: () => void }) {
       {cards && cards.length > 0 && (
         <ul className="deleted-list">
           {cards.map((card) => (
-            <li key={card.id} className="deleted-row">
+            <li key={card.id} className="deleted-row" data-testid="deleted-row">
               <div className="deleted-main">
                 <span className="deleted-title">{card.title}</span>
                 <span className="deleted-meta muted">
@@ -77,6 +77,7 @@ export function DeletedTasksDialog({ onClose }: { onClose: () => void }) {
               <button
                 type="button"
                 className="btn btn-sm"
+                data-testid="restore-task"
                 disabled={restoring === card.id}
                 onClick={() => void restore(card)}
               >

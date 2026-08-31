@@ -76,7 +76,7 @@ export function TitleBar() {
   const maximized = useMaximized();
 
   return (
-    <div className="titlebar" data-tauri-drag-region>
+    <div className="titlebar" data-testid="titlebar" data-tauri-drag-region>
       <span className="titlebar-brand" data-tauri-drag-region>
         questloom
       </span>

@@ -1,12 +1,15 @@
-# questloom の CI。docs/testing.md の「CI(GitHub Actions)方針」に対応する。
+﻿# questloom の CI。docs/testing.md の「CI(GitHub Actions)方針」に対応する。
 #
 # - rust: windows-latest。src-tauri が MSVC リンク(WebView2 / tray-icon)を要するため、
 #   Linux ランナーでは workspace 全体をビルドできない。
 # - frontend: ubuntu-latest。tsc + vite build + vitest + プラグインの純関数テスト。
 #
-# GUI e2e (@wdio/tauri-service) と、ビルド済み exe を要するバックエンド e2e
-# (`cargo test -p questloom-desktop --test backend_e2e -- --ignored`)はここには入れない。
-# どちらも実アプリの起動を伴い、専用のジョブ設計が要るため T2 で検討する。
+# - e2e: windows-latest。GUI e2e (@wdio/tauri-service)。debug ビルド + 実アプリ起動を
+#   伴って重いので、**手動 (workflow_dispatch) と週次 schedule でしか走らせない**
+#   (push / PR では下の `if` で弾く)。
+#
+# ビルド済み exe を要するバックエンド e2e
+# (`cargo test -p questloom-desktop --test backend_e2e -- --ignored`)はまだ入れていない。
 
 name: CI
 
@@ -14,6 +17,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 以下の 2 つは e2e ジョブのためだけにある。
+  workflow_dispatch:
+  schedule:
+    # 毎週月曜 03:00 UTC(= JST 昼 12:00)。
+    - cron: "0 3 * * 1"
 
 # 同じブランチへ続けて push したら、古い実行は打ち切る。
 concurrency:
@@ -28,7 +36,7 @@ jobs:
     name: Rust (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Rust ツールチェーンを用意する
         uses: dtolnay/rust-toolchain@stable
@@ -56,10 +64,10 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Node を用意する
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -79,3 +87,54 @@ jobs:
       - name: プラグインのテスト
         run: node --test examples/plugins/github.test.mjs
         working-directory: .
+
+  e2e:
+    name: GUI e2e (windows)
+    # 手動と週次だけ。push / PR では走らせない(debug ビルド + 実アプリ起動でコストが高い)。
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust ツールチェーンを用意する
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo のキャッシュ
+        uses: Swatinem/rust-cache@v2
+
+      - name: Node を用意する
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: 依存をインストールする
+        run: npm ci
+        working-directory: apps/desktop
+
+      # wdio.conf.ts の autoInstallTauriDriver でも入るが、CI では明示的に
+      # --locked で入れて、失敗を driver 起動時ではなくこのステップで見せる。
+      - name: tauri-driver を用意する
+        run: cargo install tauri-driver --locked
+
+      # `--debug --no-bundle` で target/debug/questloom-desktop.exe を作る。
+      # dev の exe は devUrl を読みに行くので使えない(フロント同梱が要る)。
+      - name: アプリを debug ビルドする
+        run: npm run tauri build -- --debug --no-bundle
+        working-directory: apps/desktop
+
+      # msedgedriver はサービスが WebView2 の版に合わせて自動 DL する。
+      # データディレクトリと MCP ポートの分離は wdio.conf.ts が面倒を見る。
+      - name: GUI e2e
+        run: npm run e2e
+        working-directory: apps/desktop
+
+      # 失敗したときだけ、サービスが吐いた driver / アプリのログを持ち帰る。
+      - name: ログを回収する
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: apps/desktop/logs/
+          if-no-files-found: ignore
