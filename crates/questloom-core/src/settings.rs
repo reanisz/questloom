@@ -34,6 +34,9 @@ impl WeekStart {
 /// ここでの検証・パースは行わない(コアを UI・Tauri から独立させるため)。
 pub const DEFAULT_GLOBAL_SHORTCUT: &str = "Ctrl+Space";
 
+/// 内蔵 MCP サーバーの既定ポート。127.0.0.1 のみにバインドする。
+pub const DEFAULT_MCP_PORT: u16 = 39150;
+
 /// コア設定。未知フィールドは無視し、欠けたフィールドは既定値で補う(前方互換)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -48,6 +51,14 @@ pub struct CoreSettings {
     pub global_shortcut: String,
     /// OS へのログイン時に自動起動するか。
     pub autostart: bool,
+    /// 内蔵 MCP サーバーを起動するか。
+    pub mcp_enabled: bool,
+    /// MCP サーバーの待受ポート(バインドは 127.0.0.1 のみ)。
+    pub mcp_port: u16,
+    /// MCP サーバーの Bearer トークン。`None` なら認証なし。
+    ///
+    /// 当面は設定ファイル内に平文で保持する。keyring への移設は将来の課題。
+    pub mcp_token: Option<String>,
 }
 
 impl Default for CoreSettings {
@@ -58,6 +69,9 @@ impl Default for CoreSettings {
             overlay_enabled: true,
             global_shortcut: DEFAULT_GLOBAL_SHORTCUT.to_owned(),
             autostart: false,
+            mcp_enabled: true,
+            mcp_port: DEFAULT_MCP_PORT,
+            mcp_token: None,
         }
     }
 }
@@ -74,6 +88,9 @@ mod tests {
         assert!(settings.overlay_enabled);
         assert_eq!(settings.global_shortcut, "Ctrl+Space");
         assert!(!settings.autostart);
+        assert!(settings.mcp_enabled);
+        assert_eq!(settings.mcp_port, DEFAULT_MCP_PORT);
+        assert_eq!(settings.mcp_token, None);
     }
 
     #[test]
@@ -85,6 +102,8 @@ mod tests {
         // Phase 1 以前に保存された JSON でも、追加フィールドは既定値で補われる。
         assert!(parsed.overlay_enabled);
         assert_eq!(parsed.global_shortcut, DEFAULT_GLOBAL_SHORTCUT);
+        assert!(parsed.mcp_enabled);
+        assert_eq!(parsed.mcp_port, DEFAULT_MCP_PORT);
     }
 
     #[test]
@@ -93,6 +112,9 @@ mod tests {
         assert_eq!(json["overlayEnabled"], true);
         assert_eq!(json["globalShortcut"], "Ctrl+Space");
         assert_eq!(json["autostart"], false);
+        assert_eq!(json["mcpEnabled"], true);
+        assert_eq!(json["mcpPort"], 39150);
+        assert!(json["mcpToken"].is_null());
     }
 
     #[test]

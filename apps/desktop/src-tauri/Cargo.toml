@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 questloom-core.workspace = true
+questloom-mcp.workspace = true
 questloom-store.workspace = true
 
 # tray-icon: タスクトレイ常駐に必要。

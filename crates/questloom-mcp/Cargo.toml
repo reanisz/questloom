@@ -10,3 +10,17 @@ description = "questloom の内蔵 MCP サーバー(localhost の Streamable HTT
 
 [dependencies]
 questloom-core.workspace = true
+
+axum.workspace = true
+chrono.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+questloom-store.workspace = true
+reqwest.workspace = true

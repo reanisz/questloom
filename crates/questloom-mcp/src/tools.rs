@@ -1,0 +1,572 @@
+//! MCP のツールセット。[`TaskService`] のユースケースをそのまま公開する。
+//!
+//! ツール名は snake_case、引数のフィールド名も snake_case。
+//! 返り値の JSON は questloom-core の serde 表現(camelCase・週/日付は文字列)に従う。
+
+use std::str::FromStr;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use questloom_core::bucket::{derive_bucket, BoardColumn, Bucket};
+use questloom_core::error::CoreError;
+use questloom_core::model::{Origin, ResourceKind, Scheduled, Task, TaskId, TaskStatus};
+use questloom_core::service::{
+    MoveRequest, NewResource, NewTask, TaskCard, TaskPatch, TaskService,
+};
+use questloom_core::settings::WeekStart;
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, ContentBlock, ErrorData, Implementation, ServerCapabilities, ServerInfo,
+};
+use rmcp::schemars;
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+/// MCP クライアントへ提示する使い方の説明。
+const INSTRUCTIONS: &str = "questloom task board. Tasks live in one of the columns \
+new / today / tomorrow / thisWeek / nextWeek / future / doing / done. \
+Time buckets are derived from the schedule, so moving a task to a column sets its schedule. \
+Tasks created here default to instant tasks in the New column, which show up in the user's \
+overlay for one-click completion; pass `column` to create a regular task instead.";
+
+// ---- 引数に使う列挙型 ----
+//
+// questloom-core の型を schemars 依存で汚さないよう、MCP 側にミラーを持つ。
+
+/// `status` 引数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum StatusArg {
+    /// 受信箱。
+    New,
+    /// 着手予定。
+    Todo,
+    /// 着手中。
+    Doing,
+    /// 完了。
+    Done,
+}
+
+impl From<StatusArg> for TaskStatus {
+    fn from(value: StatusArg) -> Self {
+        match value {
+            StatusArg::New => Self::New,
+            StatusArg::Todo => Self::Todo,
+            StatusArg::Doing => Self::Doing,
+            StatusArg::Done => Self::Done,
+        }
+    }
+}
+
+/// `column` 引数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ColumnArg {
+    /// 受信箱。
+    New,
+    /// 今日やる。
+    Today,
+    /// 明日やる。
+    Tomorrow,
+    /// 今週やる。
+    ThisWeek,
+    /// 来週やる。
+    NextWeek,
+    /// いつかやる。
+    Future,
+    /// 着手中。
+    Doing,
+    /// 完了。
+    Done,
+}
+
+impl From<ColumnArg> for BoardColumn {
+    fn from(value: ColumnArg) -> Self {
+        match value {
+            ColumnArg::New => Self::New,
+            ColumnArg::Today => Self::Today,
+            ColumnArg::Tomorrow => Self::Tomorrow,
+            ColumnArg::ThisWeek => Self::ThisWeek,
+            ColumnArg::NextWeek => Self::NextWeek,
+            ColumnArg::Future => Self::Future,
+            ColumnArg::Doing => Self::Doing,
+            ColumnArg::Done => Self::Done,
+        }
+    }
+}
+
+/// `kind` 引数(関連リソースの種別)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourceKindArg {
+    /// URL。
+    Url,
+    /// ローカルファイルパス。
+    File,
+}
+
+impl From<ResourceKindArg> for ResourceKind {
+    fn from(value: ResourceKindArg) -> Self {
+        match value {
+            ResourceKindArg::Url => Self::Url,
+            ResourceKindArg::File => Self::File,
+        }
+    }
+}
+
+/// `create_task` に渡す関連リソース。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ResourceArg {
+    /// Resource kind: "url" or "file".
+    pub kind: ResourceKindArg,
+    /// The URL or the local file path.
+    pub value: String,
+    /// Display label. Defaults to empty.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Make this the primary resource (the one the overlay opens with one click).
+    #[serde(default)]
+    pub is_primary: Option<bool>,
+}
+
+impl From<ResourceArg> for NewResource {
+    fn from(value: ResourceArg) -> Self {
+        Self {
+            kind: value.kind.into(),
+            value: value.value,
+            label: value.label.unwrap_or_default(),
+            is_primary: value.is_primary.unwrap_or(false),
+        }
+    }
+}
+
+// ---- 各ツールの引数 ----
+
+/// `list_tasks` の引数。
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+pub struct ListTasksArgs {
+    /// Only return tasks in this status ("new", "todo", "doing", "done").
+    #[serde(default)]
+    pub status: Option<StatusArg>,
+    /// Only return tasks in this board column.
+    #[serde(default)]
+    pub column: Option<ColumnArg>,
+}
+
+/// タスク 1 件を指定するだけの引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TaskIdArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+}
+
+/// `create_task` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CreateTaskArgs {
+    /// Task title. Required, must not be blank.
+    pub title: String,
+    /// Task details in Markdown.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Board column to place the task in. When omitted the task goes to New as an instant task.
+    #[serde(default)]
+    pub column: Option<ColumnArg>,
+    /// Deadline as an RFC 3339 timestamp, e.g. "2026-09-30T09:00:00Z".
+    #[serde(default)]
+    pub deadline: Option<String>,
+    /// Instant task flag. Defaults to true unless `column` is given.
+    #[serde(default)]
+    pub is_instant: Option<bool>,
+    /// Parent task id (UUID) to attach this task to.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Related resources (URLs or file paths) to attach on creation.
+    #[serde(default)]
+    pub resources: Option<Vec<ResourceArg>>,
+}
+
+/// `update_task` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct UpdateTaskArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// New title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// New details in Markdown.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// New deadline as an RFC 3339 timestamp.
+    #[serde(default)]
+    pub deadline: Option<String>,
+    /// Remove the deadline. Takes precedence over `deadline`.
+    #[serde(default)]
+    pub clear_deadline: Option<bool>,
+}
+
+/// `move_task` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct MoveTaskArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// Destination column. The task is appended to the end of it.
+    pub column: ColumnArg,
+}
+
+/// `promote_task` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PromoteTaskArgs {
+    /// The task id (UUID). Must be an instant task.
+    pub task_id: String,
+    /// Destination column. Defaults to "today".
+    #[serde(default)]
+    pub column: Option<ColumnArg>,
+}
+
+/// `add_task_update` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct AddTaskUpdateArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// The progress note, in Markdown.
+    pub body: String,
+}
+
+/// `add_resource` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct AddResourceArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// Resource kind: "url" or "file".
+    pub kind: ResourceKindArg,
+    /// The URL or the local file path.
+    pub value: String,
+    /// Display label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Make this the primary resource. The first resource always becomes primary.
+    #[serde(default)]
+    pub is_primary: Option<bool>,
+}
+
+// ---- ツール本体 ----
+
+/// [`TaskService`] を MCP ツールとして公開するハンドラ。
+///
+/// [`StreamableHttpService`](rmcp::transport::streamable_http_server::StreamableHttpService)
+/// はセッションごとにハンドラを生成するため、`Clone` は `Arc` の複製で済む。
+#[derive(Clone)]
+pub struct QuestloomTools {
+    service: Arc<TaskService>,
+    tool_router: ToolRouter<Self>,
+}
+
+impl std::fmt::Debug for QuestloomTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestloomTools").finish_non_exhaustive()
+    }
+}
+
+#[tool_router]
+impl QuestloomTools {
+    /// サービスを包むハンドラを作る。
+    #[must_use]
+    pub fn new(service: Arc<TaskService>) -> Self {
+        Self {
+            service,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// 包んでいるサービスへの参照。
+    #[must_use]
+    pub fn service(&self) -> &Arc<TaskService> {
+        &self.service
+    }
+
+    #[tool(
+        description = "List tasks on the board. Optionally filter by status and/or board column."
+    )]
+    pub fn list_tasks(
+        &self,
+        Parameters(args): Parameters<ListTasksArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let board = match self.service.board() {
+            Ok(board) => board,
+            Err(error) => return Ok(core_error(&error)),
+        };
+        let wanted = args.status.map(TaskStatus::from);
+        let columns = [
+            (BoardColumn::New, &board.columns.new),
+            (BoardColumn::Today, &board.columns.today),
+            (BoardColumn::Tomorrow, &board.columns.tomorrow),
+            (BoardColumn::ThisWeek, &board.columns.this_week),
+            (BoardColumn::NextWeek, &board.columns.next_week),
+            (BoardColumn::Future, &board.columns.future),
+            (BoardColumn::Doing, &board.columns.doing),
+            (BoardColumn::Done, &board.columns.done),
+        ];
+        let requested = args.column.map(BoardColumn::from);
+
+        let mut tasks = Vec::new();
+        for (column, cards) in columns {
+            if requested.is_some_and(|wanted| wanted != column) {
+                continue;
+            }
+            for card in cards {
+                if wanted.is_some_and(|status| status != card.task.status) {
+                    continue;
+                }
+                tasks.push(card_summary(column, card));
+            }
+        }
+
+        Ok(json_result(&json!({
+            "today": board.today,
+            "weekStart": board.week_start,
+            "count": tasks.len(),
+            "tasks": tasks,
+        })))
+    }
+
+    #[tool(
+        description = "Get one task in full: details, related resources, update history, parent and children."
+    )]
+    pub fn get_task(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        match self.service.task_detail(id) {
+            Ok(detail) => Ok(json_result(&detail)),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(
+        description = "Create a task. By default it becomes an instant task in the New column \
+                       (shown in the user's overlay). Passing `column` creates a regular task there instead."
+    )]
+    pub fn create_task(
+        &self,
+        Parameters(args): Parameters<CreateTaskArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let parent_id = args.parent_id.as_deref().map(parse_task_id).transpose()?;
+        let deadline = args.deadline.as_deref().map(parse_deadline).transpose()?;
+        // 列を指定しない AI 起点のタスクはインスタントタスクとして New に入る。
+        let is_instant = args.is_instant.unwrap_or(args.column.is_none());
+        let (status, scheduled) = match args.column {
+            Some(column) => {
+                let (today, week_start) = self.today_and_week_start();
+                BoardColumn::from(column).resolve(Scheduled::None, today, week_start)
+            }
+            None => (TaskStatus::New, Scheduled::None),
+        };
+
+        let input = NewTask {
+            title: args.title,
+            description: args.description.unwrap_or_default(),
+            status: Some(status),
+            scheduled,
+            deadline,
+            is_instant,
+            origin: Origin::Mcp,
+            parent_id,
+            resources: args
+                .resources
+                .unwrap_or_default()
+                .into_iter()
+                .map(NewResource::from)
+                .collect(),
+        };
+        match self.service.create_task(input) {
+            Ok(task) => Ok(json_result(&self.task_summary(&task))),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(
+        description = "Update a task's title, details, or deadline. Omitted fields are left as-is."
+    )]
+    pub fn update_task(
+        &self,
+        Parameters(args): Parameters<UpdateTaskArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        let deadline = args.deadline.as_deref().map(parse_deadline).transpose()?;
+        let patch = TaskPatch {
+            title: args.title,
+            description: args.description,
+            deadline,
+            clear_deadline: args.clear_deadline.unwrap_or(false),
+            scheduled: None,
+            is_instant: None,
+        };
+        match self.service.update_task(id, patch) {
+            Ok(task) => Ok(json_result(&self.task_summary(&task))),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(
+        description = "Move a task to the end of a board column. Time-bucket columns also set the task's schedule."
+    )]
+    pub fn move_task(
+        &self,
+        Parameters(args): Parameters<MoveTaskArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        let request = MoveRequest::to_column(args.column.into());
+        match self.service.move_task(id, request) {
+            Ok(task) => Ok(json_result(&self.task_summary(&task))),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(description = "Mark a task as done. Idempotent.")]
+    pub fn complete_task(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        match self.service.complete_task(id) {
+            Ok(task) => Ok(json_result(&self.task_summary(&task))),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(
+        description = "Promote an instant task into a regular task placed in `column` (default \"today\")."
+    )]
+    pub fn promote_task(
+        &self,
+        Parameters(args): Parameters<PromoteTaskArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        match self.service.promote_task(id, args.column.map(Into::into)) {
+            Ok(task) => Ok(json_result(&self.task_summary(&task))),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(description = "Append a progress note to a task's update history.")]
+    pub fn add_task_update(
+        &self,
+        Parameters(args): Parameters<AddTaskUpdateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        match self.service.add_task_update(id, args.body, Origin::Mcp) {
+            Ok(entry) => Ok(json_result(&entry)),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    #[tool(description = "Attach a related resource (URL or local file path) to a task.")]
+    pub fn add_resource(
+        &self,
+        Parameters(args): Parameters<AddResourceArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        let input = NewResource {
+            kind: args.kind.into(),
+            value: args.value,
+            label: args.label.unwrap_or_default(),
+            is_primary: args.is_primary.unwrap_or(false),
+        };
+        match self.service.add_resource(id, input) {
+            Ok(resource) => Ok(json_result(&resource)),
+            Err(error) => Ok(core_error(&error)),
+        }
+    }
+
+    fn today_and_week_start(&self) -> (chrono::NaiveDate, WeekStart) {
+        (self.service.today(), self.service.settings().week_start)
+    }
+
+    /// 作成・更新直後の [`Task`] を一覧と同じ形の JSON にする。
+    fn task_summary(&self, task: &Task) -> Value {
+        let (today, week_start) = self.today_and_week_start();
+        let bucket = (task.status == TaskStatus::Todo)
+            .then(|| derive_bucket(&task.scheduled, today, week_start));
+        summary(column_of(task.status, bucket), task, bucket)
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for QuestloomTools {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            // 既定は rmcp 自身の名前になってしまうので、questloom として名乗る。
+            .with_server_info(
+                Implementation::new("questloom", env!("CARGO_PKG_VERSION")).with_title("questloom"),
+            )
+            .with_instructions(INSTRUCTIONS)
+    }
+}
+
+// ---- ヘルパ ----
+
+fn parse_task_id(raw: &str) -> Result<TaskId, ErrorData> {
+    TaskId::from_str(raw).map_err(|error| {
+        ErrorData::invalid_params(format!("invalid task_id {raw:?}: {error}"), None)
+    })
+}
+
+fn parse_deadline(raw: &str) -> Result<DateTime<Utc>, ErrorData> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            ErrorData::invalid_params(
+                format!("invalid deadline {raw:?} (expected RFC 3339): {error}"),
+                None,
+            )
+        })
+}
+
+/// ドメインエラーは「ツールは動いたが失敗した」なので、ツールレベルのエラーとして返す。
+fn core_error(error: &CoreError) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(error.to_string())])
+}
+
+fn json_result<T: serde::Serialize>(value: &T) -> CallToolResult {
+    let text = serde_json::to_string_pretty(value)
+        .unwrap_or_else(|error| format!("{{\"error\":\"failed to serialize: {error}\"}}"));
+    CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+fn card_summary(column: BoardColumn, card: &TaskCard) -> Value {
+    summary(column, &card.task, card.bucket)
+}
+
+fn summary(column: BoardColumn, task: &Task, bucket: Option<Bucket>) -> Value {
+    json!({
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "column": column,
+        "bucket": bucket,
+        "isInstant": task.is_instant,
+        "deadline": task.deadline,
+        "scheduled": task.scheduled,
+        "parentId": task.parent_id,
+        "origin": task.origin,
+    })
+}
+
+/// 状態と導出バケットから、ボード上の列を逆算する。
+const fn column_of(status: TaskStatus, bucket: Option<Bucket>) -> BoardColumn {
+    match status {
+        TaskStatus::New => BoardColumn::New,
+        TaskStatus::Doing => BoardColumn::Doing,
+        TaskStatus::Done => BoardColumn::Done,
+        TaskStatus::Todo => match bucket {
+            Some(Bucket::Today) => BoardColumn::Today,
+            Some(Bucket::Tomorrow) => BoardColumn::Tomorrow,
+            Some(Bucket::ThisWeek) => BoardColumn::ThisWeek,
+            Some(Bucket::NextWeek) => BoardColumn::NextWeek,
+            Some(Bucket::Future) | None => BoardColumn::Future,
+        },
+    }
+}

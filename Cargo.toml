@@ -29,13 +29,19 @@ questloom-plugin-github = { path = "crates/plugins/questloom-plugin-github" }
 
 # 共通の外部依存(バージョンはここで一元管理する)
 anyhow = "1"
+axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.13", default-features = false }
+# rmcp: MCP の公式 Rust SDK。既定 feature (base64 / macros / server) に加えて
+# Streamable HTTP サーバー transport と JSON Schema 生成を有効にする。
+rmcp = { version = "3.1", features = ["schemars", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40", features = ["bundled", "backup", "chrono"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7", "serde"] }

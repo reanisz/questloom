@@ -2,7 +2,7 @@
 //!
 //! 設定は `set_settings` で保存されると
 //! [`DomainEvent::SettingsChanged`] が飛ぶので、それを購読して
-//! ショートカットの再登録と自動起動の同期を行う。
+//! ショートカットの再登録・自動起動の同期・MCP サーバーの再起動を行う。
 //! オーバーレイの表示可否は [`crate::overlay`] の watcher 側で再評価される。
 
 use std::sync::Arc;
@@ -13,12 +13,13 @@ use questloom_core::settings::CoreSettings;
 use tauri::{AppHandle, Runtime};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::{autostart, shortcut};
+use crate::{autostart, mcp, shortcut};
 
-/// 設定値をデスクトップ側(ショートカット・自動起動)へ反映する。
+/// 設定値をデスクトップ側(ショートカット・自動起動・MCP サーバー)へ反映する。
 pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings) {
     shortcut::apply(app, &settings.global_shortcut);
     autostart::apply(app, settings.autostart);
+    mcp::apply(app, settings);
 }
 
 /// 設定変更イベントを購読し、反映するタスクを開始する。

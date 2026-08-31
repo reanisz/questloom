@@ -6,10 +6,13 @@
 //!
 //! ウィンドウは 2 つ。メインウィンドウ(ボード)は閉じるとトレイへ格納され、
 //! オーバーレイウィンドウは New タスクがある間だけ表示される。
+//!
+//! 設定で有効なら、内蔵 MCP サーバー([`mcp`])を `127.0.0.1` で起動する。
 
 pub mod autostart;
 pub mod commands;
 pub mod events;
+pub mod mcp;
 pub mod overlay;
 pub mod settings;
 pub mod shortcut;
@@ -57,6 +60,7 @@ pub fn run() {
             let service = Arc::clone(&state.service);
             let settings = service.settings();
             app.manage(state);
+            app.manage(Arc::new(mcp::McpSupervisor::new(Arc::clone(&service))));
 
             tray::setup(&handle)?;
 

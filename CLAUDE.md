@@ -39,7 +39,7 @@ questloom/
 - `questloom-core` は他の questloom crate に依存しない。UI・Tauri・HTTP にも依存させないこと。
 - `questloom-store` / `questloom-mcp` / `questloom-ai` / `questloom-plugin-api` → `questloom-core`
 - `questloom-plugin-github` → `questloom-plugin-api`, `questloom-core`
-- `questloom-desktop` (src-tauri) → `questloom-core`, `questloom-store`
+- `questloom-desktop` (src-tauri) → `questloom-core`, `questloom-store`, `questloom-mcp`
 - src-tauri は「配線」だけを担う薄いシェル。Tauri command はサービス層への委譲に留める。
 
 ## ビルド / 開発コマンド
@@ -86,6 +86,47 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 - `docs/data-model.md` — SQLite スキーマ、タスクの状態とバケット導出規則、データ保全方針
 - `docs/roadmap.md` — フェーズ分割(Phase 0 スキャフォールド 〜 Phase 6 プラグイン)。
   各フェーズは「動作確認できる状態」で完了とし、フェーズごとにコミットを分ける。
+
+## 内蔵 MCP サーバー
+
+`crates/questloom-mcp` が、公式 Rust SDK([rmcp](https://docs.rs/rmcp) 3.x)の
+**Streamable HTTP** transport を axum に載せた MCP サーバーを提供する。
+アプリ起動時、設定 `mcpEnabled` が真なら自動的に立ち上がる。
+
+- エンドポイント: **`http://127.0.0.1:39150/mcp`**(バインドは 127.0.0.1 のみ)
+- 関連設定(`CoreSettings`): `mcpEnabled`(既定 true)、`mcpPort`(既定 39150)、
+  `mcpToken`(既定 null。設定すると `Authorization: Bearer <token>` を要求し、
+  不一致は 401)。設定を変更すると `SettingsChanged` を受けてサーバーが張り直される。
+- ポート使用中などで起動に失敗した場合は error ログを出すだけで、アプリは動き続ける。
+
+Claude Code への登録:
+
+```powershell
+claude mcp add --transport http questloom http://127.0.0.1:39150/mcp
+# トークンを設定している場合
+claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "Authorization: Bearer <token>"
+```
+
+### ツール一覧
+
+引数名は snake_case、返り値の JSON は questloom-core の serde 表現(camelCase、
+日付・週・時刻は文字列)に従う。`column` は
+`new` / `today` / `tomorrow` / `thisWeek` / `nextWeek` / `future` / `doing` / `done`。
+
+| ツール | 引数 | 内容 |
+|---|---|---|
+| `list_tasks` | `status?`, `column?` | ボードのタスク一覧(id, title, status, column, bucket, isInstant, deadline, scheduled) |
+| `get_task` | `task_id` | 詳細(関連リソース・アップデート履歴・親子込み) |
+| `create_task` | `title`, `description?`, `column?`, `deadline?`, `is_instant?`, `parent_id?`, `resources?` | 作成。既定は **インスタントタスクを New へ**。`column` 指定時は通常タスクとしてその列へ |
+| `update_task` | `task_id`, `title?`, `description?`, `deadline?`, `clear_deadline?` | タイトル・詳細・締切の更新 |
+| `move_task` | `task_id`, `column` | 指定列の末尾へ移動(時間バケット列は予定も設定される) |
+| `complete_task` | `task_id` | 完了にする(冪等) |
+| `promote_task` | `task_id`, `column?` | インスタントタスクを通常タスクへ昇格(既定 `today`) |
+| `add_task_update` | `task_id`, `body` | アップデート履歴を追記 |
+| `add_resource` | `task_id`, `kind`, `value`, `label?`, `is_primary?` | 関連リソース(`url` / `file`)を追加 |
+
+MCP 経由で作られたタスク・履歴の `origin` は `mcp` になる。
+`deadline` は RFC 3339 文字列(例 `2026-09-30T09:00:00Z`)。
 
 ## 注意事項
 

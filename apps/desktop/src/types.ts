@@ -160,6 +160,12 @@ export interface CoreSettings {
   globalShortcut: string;
   /** OS ログイン時に自動起動するか。 */
   autostart: boolean;
+  /** 内蔵 MCP サーバーを起動するか。 */
+  mcpEnabled: boolean;
+  /** MCP サーバーの待受ポート(バインドは 127.0.0.1 のみ)。 */
+  mcpPort: number;
+  /** MCP サーバーの Bearer トークン(null なら認証なし)。 */
+  mcpToken: string | null;
 }
 
 /** 昇格先として選べる列(New / Doing / Done は選ばせない)。 */
