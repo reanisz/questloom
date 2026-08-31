@@ -93,6 +93,11 @@ describe("questloom GUI スモーク", () => {
   });
 
   it("New 列のクイック追加でタスクを作るとカードが現れる", async () => {
+    // クイック追加は常設の入力欄ではなくテキストボタン。押して入力欄に変える。
+    const open = $('[data-testid="quick-add-open-new"]');
+    await open.waitForDisplayed();
+    await open.click();
+
     const input = $('[data-testid="quick-add-new"]');
     await input.waitForDisplayed();
     await input.setValue(TITLE);

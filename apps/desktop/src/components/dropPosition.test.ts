@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Board, BoardColumnKey, TaskCard } from "../types";
 import { COLUMN_DROPPABLE_PREFIX } from "./Column";
-import { locate, resolveDropPosition, type DropRect } from "./dropPosition";
+import { columnOf, locate, resolveDropPosition, type DropRect } from "./dropPosition";
 
 /** id だけ意味のあるカード。計算は id と並び順しか見ない。 */
 const card = (id: string) => ({ id }) as TaskCard;
@@ -48,6 +48,23 @@ describe("locate", () => {
 
   it("どこにも無ければ null", () => {
     expect(locate(columns({ today: ["a"] }), "z")).toBeNull();
+  });
+});
+
+describe("columnOf", () => {
+  const board = columns({ today: ["a"], doing: ["b"] });
+
+  it("列の droppable id はその列", () => {
+    expect(columnOf(board, columnId("future"))).toBe("future");
+  });
+
+  it("カード id はそのカードのいる列(= ハイライトすべき列)", () => {
+    expect(columnOf(board, "b")).toBe("doing");
+  });
+
+  it("知らない列キー・知らないカードは null", () => {
+    expect(columnOf(board, `${COLUMN_DROPPABLE_PREFIX}archive`)).toBeNull();
+    expect(columnOf(board, "z")).toBeNull();
   });
 });
 

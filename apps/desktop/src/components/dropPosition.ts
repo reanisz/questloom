@@ -43,6 +43,19 @@ function columnFromDroppableId(overId: string): BoardColumnKey | null {
 }
 
 /**
+ * ドロップ先の id から、着地する列を求める。
+ *
+ * 列そのもの (`column:<key>`) でも、その列のカード id でも同じ列を返す。
+ * 「どの列に落ちるか」のハイライトはこれで決める(`useDroppable().isOver` は
+ * 列そのものに重なっているときしか真にならず、カードの上では消えてしまう)。
+ */
+export function columnOf(columns: Board["columns"], overId: string): BoardColumnKey | null {
+  return overId.startsWith(COLUMN_DROPPABLE_PREFIX)
+    ? columnFromDroppableId(overId)
+    : locate(columns, overId);
+}
+
+/**
  * ドロップ先の列と、その中での挿入位置(前後のカード id)を求める。
  *
  * 戻り値が `null` なら「移動しない」。次のいずれか。
@@ -66,7 +79,7 @@ export function resolveDropPosition(
   if (!from) return null;
 
   const onColumn = overId.startsWith(COLUMN_DROPPABLE_PREFIX);
-  const to = onColumn ? columnFromDroppableId(overId) : locate(columns, overId);
+  const to = columnOf(columns, overId);
   if (!to) return null;
 
   // 移動対象を除いた移動先の並び。ここへの挿入位置から前後 id を求める。

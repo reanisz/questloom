@@ -17,18 +17,20 @@ interface BoxProps {
   count: number;
   /** ドラッグ中はドロップ可能であることを示すハイライトを出す。 */
   dragging: boolean;
+  /** 掴んでいるカードがこのボックスに落ちる状態か(判定は BoardView が持つ)。 */
+  over: boolean;
   onOpen: (key: BoardColumnKey) => void;
 }
 
-function DeferBox({ columnKey, count, dragging, onOpen }: BoxProps) {
-  const { setNodeRef, isOver } = useDroppable({ id: `${COLUMN_DROPPABLE_PREFIX}${columnKey}` });
+function DeferBox({ columnKey, count, dragging, over, onOpen }: BoxProps) {
+  const { setNodeRef } = useDroppable({ id: `${COLUMN_DROPPABLE_PREFIX}${columnKey}` });
   const label = columnLabel(columnKey);
 
   return (
     <button
       type="button"
       ref={setNodeRef}
-      className={`defer-box${dragging ? " defer-box-armed" : ""}${isOver ? " defer-box-over" : ""}`}
+      className={`defer-box${dragging ? " defer-box-armed" : ""}${over ? " defer-box-over" : ""}`}
       title={`${label} を展開表示で開く(ドラッグして先送りもできます)`}
       onClick={() => onOpen(columnKey)}
     >
@@ -41,10 +43,12 @@ function DeferBox({ columnKey, count, dragging, onOpen }: BoxProps) {
 interface Props {
   columns: BoardColumns;
   dragging: boolean;
+  /** 現在の着地先の列。レールのボックスと一致するものだけを光らせる。 */
+  overColumn: BoardColumnKey | null;
   onOpen: (key: BoardColumnKey) => void;
 }
 
-export function DeferRail({ columns, dragging, onOpen }: Props) {
+export function DeferRail({ columns, dragging, overColumn, onOpen }: Props) {
   return (
     <aside className="defer-rail" aria-label="先送り">
       <div className="defer-rail-title">先送り</div>
@@ -54,6 +58,7 @@ export function DeferRail({ columns, dragging, onOpen }: Props) {
           columnKey={key}
           count={columns[key].length}
           dragging={dragging}
+          over={overColumn === key}
           onOpen={onOpen}
         />
       ))}

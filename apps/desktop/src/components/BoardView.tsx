@@ -5,16 +5,29 @@
  * 両方 null なら列末尾。並び順キーの生成はバックエンドが行う。
  * 着地点の計算そのものは、単体テストできるよう
  * [`resolveDropPosition`](./dropPosition.ts) に純関数として切り出してある。
+ *
+ * ## 衝突判定とハイライト
+ *
+ * 判定は**ポインタ優先** ([`boardCollisionDetection`](./collision.ts))。以前使っていた
+ * `closestCorners` は「掴んでいる矩形の四隅」と droppable の四隅の距離で決めるため、
+ * カード 1 枚分の幅を持つ矩形が列の境界をまたぐまで判定が切り替わらず、
+ * ハイライトがカーソルより遅れて付いてくる。
+ *
+ * ハイライトする列も、`useDroppable().isOver`(= 列そのものに重なっているときだけ真)
+ * ではなく `over` から求めた着地列 ([`columnOf`]) で決める。dnd-kit の sortable は
+ * **別のコンテナのカードに重なっている間はカードをずらさない**
+ * (`disableTransforms = overIndex !== -1 && activeIndex === -1`)ので、
+ * カードが詰まった領域では列のハイライトだけが唯一の手がかりになる。
  */
 
 import {
-  closestCorners,
   DndContext,
   DragOverlay,
   PointerSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragOverEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { useEffect, useState } from "react";
@@ -28,9 +41,10 @@ import {
   type BoardColumnKey,
   type TaskCard,
 } from "../types";
+import { boardCollisionDetection } from "./collision";
 import { Column, columnDomId } from "./Column";
 import { DeferRail } from "./DeferRail";
-import { locate, resolveDropPosition } from "./dropPosition";
+import { columnOf, locate, resolveDropPosition } from "./dropPosition";
 import { CardBody } from "./TaskCardView";
 
 /** レールから展開したバケットを強調しておく時間 (ms)。 */
@@ -48,6 +62,7 @@ export function BoardView({ board, expanded, onExpand }: Props) {
   const mutate = useBoardStore((state) => state.mutate);
   const applyLocalMove = useBoardStore((state) => state.applyLocalMove);
   const [activeCard, setActiveCard] = useState<TaskCard | null>(null);
+  const [overColumn, setOverColumn] = useState<BoardColumnKey | null>(null);
   const [focused, setFocused] = useState<BoardColumnKey | null>(null);
 
   const columns = expanded ? BOARD_COLUMNS : BOARD_COLUMNS.filter(({ key }) => isPrimaryColumn(key));
@@ -76,8 +91,18 @@ export function BoardView({ board, expanded, onExpand }: Props) {
     setActiveCard(column ? (board.columns[column].find((card) => card.id === id) ?? null) : null);
   };
 
-  const onDragEnd = ({ active, over }: DragEndEvent) => {
+  // 着地する列。カードに重なっていてもその親の列を光らせる。
+  const onDragOver = ({ over }: DragOverEvent) => {
+    setOverColumn(over ? columnOf(board.columns, String(over.id)) : null);
+  };
+
+  const stopDragging = () => {
     setActiveCard(null);
+    setOverColumn(null);
+  };
+
+  const onDragEnd = ({ active, over }: DragEndEvent) => {
+    stopDragging();
     if (!over) return;
 
     const activeId = String(active.id);
@@ -98,10 +123,11 @@ export function BoardView({ board, expanded, onExpand }: Props) {
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCorners}
+      collisionDetection={boardCollisionDetection}
       onDragStart={onDragStart}
+      onDragOver={onDragOver}
       onDragEnd={onDragEnd}
-      onDragCancel={() => setActiveCard(null)}
+      onDragCancel={stopDragging}
     >
       <div className={`board${expanded ? " board-expanded" : ""}`}>
         {columns.map(({ key, label }) => (
@@ -111,10 +137,16 @@ export function BoardView({ board, expanded, onExpand }: Props) {
             label={label}
             cards={board.columns[key]}
             focused={focused === key}
+            over={overColumn === key}
           />
         ))}
         {!expanded && (
-          <DeferRail columns={board.columns} dragging={activeCard != null} onOpen={openBucket} />
+          <DeferRail
+            columns={board.columns}
+            dragging={activeCard != null}
+            overColumn={overColumn}
+            onOpen={openBucket}
+          />
         )}
       </div>
       <DragOverlay dropAnimation={null}>

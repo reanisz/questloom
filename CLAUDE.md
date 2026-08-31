@@ -126,7 +126,8 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
     `QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` として渡す(下記参照)。
     終了時に一時ディレクトリと、居残った `tauri-driver` / `msedgedriver` /
     `questloom-desktop` を片付ける(**起動前から居たプロセスには手を出さない**)。
-  - セレクタは最小限の `data-testid`(`titlebar` / `column-<key>` / `quick-add-<key>` /
+  - セレクタは最小限の `data-testid`(`titlebar` / `column-<key>` /
+    `quick-add-open-<key>`(クイック追加を開くテキストボタン)/ `quick-add-<key>`(開いた後の入力欄)/
     `task-card` / `task-drawer` / `drawer-delete` / `confirm-delete` / `open-deleted` /
     `deleted-row` / `restore-task`)。ダイアログは `ModalShell` の `aria-label` で引く。
   - overlay / plugin-host も同じバンドルを読むためウィンドウハンドルは複数返る。

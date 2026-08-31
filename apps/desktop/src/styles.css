@@ -379,6 +379,10 @@ h3 {
   font-size: 12px;
 }
 
+/*
+ * クイック追加。通常は控えめなテキストボタンで、押すと入力欄に入れ替わる。
+ * 開閉で列の高さが動かないよう、ボタンと入力欄の padding は揃えておく。
+ */
 .quick-add {
   display: flex;
   gap: 6px;
@@ -389,6 +393,32 @@ h3 {
 .quick-add input {
   flex: 1;
   min-width: 0;
+}
+
+.quick-add-open {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.quick-add-open:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.quick-add-open:focus-visible {
+  outline: none;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--text);
 }
 
 /* ---- カード ---- */
