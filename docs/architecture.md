@@ -100,10 +100,16 @@ questloom/
   2. タスク詳細の「このタスクを分割/詳細化する」ボタン → 子タスク群を提案・作成。
 - 実行は非同期 spawn + タイムアウト。実行中は UI に進捗表示。
 
-### プラグインシステム (questloom-plugin-api)
+### プラグインシステム(2 層構成)
 
-第 1 段階は **コンパイル時に組み込む in-process Rust プラグイン**(trait ベース)。
-動的ロードや外部プロセスプラグインは将来の拡張とする。
+プラグインは 2 層に分ける。API の概念(タスク操作・イベント購読・設定・KV・ポーリング)は
+両層と MCP ツールで揃え、操作面が発散しないようにする。
+
+#### 第 1 層: Rust プラグイン (questloom-plugin-api)
+
+コンパイル時に組み込む in-process Rust プラグイン(trait ベース)。コア機能・重い統合・
+ネイティブ性能が必要なもの向け。DLL 等の動的ロードは行わない(Rust の ABI 不安定のため。
+必要になったら外部プロセス + MCP / WASM を検討する)。
 
 ```rust
 trait Plugin {
@@ -115,10 +121,25 @@ trait Plugin {
 
 - `PluginContext` が提供するもの: `TaskService` ハンドル、プラグイン専用の設定名前空間(型付き JSON)、
   プラグイン専用 KV ストレージ、ポーリング用スケジューラ登録。
-- 主機能のコアプラグイン化は当面行わない。まずサービス層の境界(イベント + PluginContext)を
-  プラグイン API として整えることに集中し、GitHub プラグインで実証してから再検討する。
+- 主機能のコアプラグイン化は当面行わない。
 
-#### GitHub プラグイン (questloom-plugin-github)
+#### 第 2 層: TypeScript プラグイン(軽量・気軽に書ける)
+
+`%APPDATA%\questloom\plugins\*.ts` にファイルを置くだけで読み込まれる軽量プラグイン。
+HTTP ポーリング系の統合・軽い自動化・実験向け。追加ランタイム不要
+(Tauri 同梱の webview で実行する)。
+
+- 実行場所: 専用の非表示「plugin-host」webview ウィンドウ。独自の capability セットで権限を絞る。
+- API: 型付き SDK(`defineQuestloomPlugin({...})`)。タスク操作 invoke、ドメインイベント購読、
+  設定名前空間、KV、`tauri-plugin-http` によるドメインスコープ付き fetch、ポーリング登録。
+- manifest(名前・必要権限・fetch 許可ドメイン・設定スキーマ)をプラグイン先頭で宣言する。
+  設定スキーマから設定画面の項目を自動生成する。
+- TS → JS はロード時に esbuild-wasm でトランスパイル。ファイル置き換えでホットリロード可。
+- セキュリティ初期方針: ローカルファイルアクセスなし、fetch 先は manifest 宣言ドメインのみ。
+
+#### GitHub プラグイン(TS プラグインのパイロット実装)
+
+TS プラグイン層の実証として GitHub 統合を TS で実装する。
 
 - 設定: PAT、ポーリング間隔(既定 5 分、変更可)。
 - 動作: 全タスクの関連リソースから GitHub PR URL を検出し、REST API(ETag 利用)でポーリング。

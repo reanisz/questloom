@@ -46,7 +46,13 @@
 
 ## Phase 6: プラグインシステム + GitHub 統合
 
-- [ ] questloom-plugin-api: Plugin trait、PluginContext、イベント購読、スケジューラ、KV
-- [ ] questloom-plugin-github: PR URL 検出、PAT(keyring 保存)、設定可能な間隔でポーリング、
+プラグインは 2 層構成(architecture.md 参照)。GitHub 統合は TS プラグインのパイロットとして実装する。
+
+- [ ] TS プラグインホスト: plugin-host webview ウィンドウ、`%APPDATA%\questloom\plugins\` の読み込み、
+      esbuild-wasm によるトランスパイル、型付き SDK(タスク操作・イベント・設定・KV・fetch・ポーリング)、
+      manifest(権限・fetch 許可ドメイン・設定スキーマ)
+- [ ] Rust 側: questloom-plugin-api の Plugin trait、PluginContext、イベント購読、スケジューラ、KV
+      (コア/重量級プラグイン用。当面は API 整備のみ)
+- [ ] GitHub 統合(TS): PR URL 検出、PAT、設定可能な間隔でポーリング、
       新規コメント/CI 失敗 →「PR を確認する」インスタント子タスクを New に作成
-- [ ] 設定画面にプラグイン設定セクションを追加
+- [ ] 設定画面にプラグイン設定セクション(manifest の設定スキーマから自動生成)を追加
