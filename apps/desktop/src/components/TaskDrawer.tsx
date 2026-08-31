@@ -16,7 +16,8 @@ import {
   toDateTimeLocal,
 } from "../format";
 import { useBoardStore } from "../store";
-import type { BoardColumnKey, ResourceKind, TaskCard, TaskDetail } from "../types";
+import type { BoardColumnKey, ResourceKind, TaskCard, TaskDetail, TaskId } from "../types";
+import { AiSplitDialog } from "./AiSplitDialog";
 import { PromoteMenu } from "./PromoteMenu";
 
 /** リソースを既定のアプリで開く。file はエクスプローラで場所を表示する。 */
@@ -40,7 +41,7 @@ function TaskLink({ card, onOpen }: { card: TaskCard; onOpen: () => void }) {
 }
 
 /** ドロワーの中身。タスクが切り替わったら `key` で作り直して編集中の値をリセットする。 */
-function DrawerBody({ detail }: { detail: TaskDetail }) {
+function DrawerBody({ detail, onSplit }: { detail: TaskDetail; onSplit: () => void }) {
   const mutate = useBoardStore((state) => state.mutate);
   const openTask = useBoardStore((state) => state.openTask);
 
@@ -131,6 +132,14 @@ function DrawerBody({ detail }: { detail: TaskDetail }) {
               }
             />
           )}
+          <button
+            type="button"
+            className="btn btn-sm"
+            title="AI にサブタスクへの分割・詳細化を依頼する"
+            onClick={onSplit}
+          >
+            ✨ AI で分割/詳細化
+          </button>
         </div>
         <dl className="drawer-facts">
           <div>
@@ -331,9 +340,12 @@ export function TaskDrawer() {
   const selectedId = useBoardStore((state) => state.selectedId);
   const detail = useBoardStore((state) => state.detail);
   const closeTask = useBoardStore((state) => state.closeTask);
+  // ダイアログはドロワーの外に置く(スクロール領域の中だと重なりが崩れるため)。
+  const [splitFor, setSplitFor] = useState<TaskId | null>(null);
 
   useEffect(() => {
-    if (!selectedId) return;
+    // ダイアログを開いている間の Escape は、そちらだけを閉じる。
+    if (!selectedId || splitFor) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing =
@@ -342,7 +354,7 @@ export function TaskDrawer() {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [selectedId, closeTask]);
+  }, [selectedId, splitFor, closeTask]);
 
   if (!selectedId) return null;
 
@@ -358,12 +370,13 @@ export function TaskDrawer() {
         </header>
         <div className="drawer-content">
           {detail ? (
-            <DrawerBody key={detail.id} detail={detail} />
+            <DrawerBody key={detail.id} detail={detail} onSplit={() => setSplitFor(detail.id)} />
           ) : (
             <p className="muted">読み込み中…</p>
           )}
         </div>
       </aside>
+      {splitFor && <AiSplitDialog taskId={splitFor} onClose={() => setSplitFor(null)} />}
     </>
   );
 }

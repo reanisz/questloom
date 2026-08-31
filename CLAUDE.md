@@ -128,6 +128,61 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 MCP 経由で作られたタスク・履歴の `origin` は `mcp` になる。
 `deadline` は RFC 3339 文字列(例 `2026-09-30T09:00:00Z`)。
 
+## AI 呼び出し(AI CLI 連携)
+
+`crates/questloom-ai` が外部 AI CLI を非同期に spawn し、`apps/desktop/src-tauri/src/ai.rs` が
+Tauri command として配線する。ヘッダの「✨ AI」ボタンと、タスク詳細の
+「✨ AI で分割/詳細化」ボタンから使う。
+
+### プロバイダ設定(`CoreSettings`)
+
+| 設定 | 既定 | 内容 |
+|---|---|---|
+| `aiProviders` | claude / codex / antigravity | プロバイダ定義の配列(下表) |
+| `aiDefaultProviderId` | `"claude"` | プロバイダ未指定時に使う `id` |
+| `aiTimeoutSecs` | `300` | これを超えたらプロセスを kill する |
+
+`AiProvider` は `{ id, label, command, args, enabled, mcpArgs, mcpSupportsToken }`。
+`command` は PATH から解決し、`args` の `{prompt}` にプロンプトが入る。
+`mcpArgs` は MCP 接続時に `args` の**前**へ挿入され、`{mcp_url}`(エンドポイント URL)と
+`{mcp_config}`(Claude Code の `--mcp-config` に渡す JSON。トークン設定時は
+`Authorization` ヘッダ込み)が置換される。`mcpArgs` が空なら MCP 非対応、
+`mcpSupportsToken` が偽のプロバイダは MCP トークン設定中は MCP 接続を省略する。
+
+既定のプロバイダ定義:
+
+| id | command | args | MCP | enabled |
+|---|---|---|---|---|
+| `claude` | `claude` | `-p {prompt}` | `--mcp-config {mcp_config} --allowedTools mcp__questloom__*` | true |
+| `codex` | `codex` | `exec {prompt}` | `-c features.experimental_use_rmcp_client=true -c mcp_servers.questloom.url="{mcp_url}"` | true |
+| `antigravity` | `antigravity` | `-p {prompt}` | なし | **false**(引数仕様が未確認のため) |
+
+### 機能と command
+
+| command | 内容 |
+|---|---|
+| `ai_create_tasks(text, providerId?)` | 文章からタスクを抽出(JSON 配列)し、New 列に通常タスクを作成 |
+| `ai_split_task(taskId, instruction?, providerId?)` | タスクを分割・詳細化し、子タスクを作成 |
+| `ai_free_instruction(text, providerId?)` | MCP 経由で AI 自身に操作させ、応答テキストを返す |
+| `ai_cancel()` | 実行中のプロセスを kill する |
+
+- AI が作るタスク・履歴の `origin` は `ai`。
+- **同時実行は 1 件のみ**。実行中の要求はキューに積まず拒否する。
+- 進捗は `questloom://ai-status` イベント(`{state: "running"|"done"|"error", feature, message}`)で通知。
+- 構造化出力は「最初にパースできた JSON 値」を採用するため、前後の説明文や
+  ```` ```json ```` のコードフェンスがあっても読み取れる。
+
+### Windows での実行時の注意
+
+- 実行ファイルは PATH + `PATHEXT` を自前で走査して解決する(`CreateProcessW` は `.exe` しか
+  探さないため、npm が作る `.cmd` シムを直接起動できない)。`.cmd` / `.bat` の場合は
+  `cmd.exe /D /S /C` 経由で起動し、引数は `"` 括り + `""` エスケープで
+  cmd とバッチの `%*` 再展開を通しても壊れないようにする。
+- ただし **改行を含む引数は cmd.exe を通せない**ため、シム経由のプロバイダでは
+  プロンプトを標準入力から渡す(`{prompt}` の引数は落とす)。
+- `CREATE_NO_WINDOW` を付けてコンソールウィンドウを出さない。
+- PowerShell 専用シム(`.ps1` のみ)の CLI は未対応。
+
 ## 注意事項
 
 - **Tauri v2 を使用する。** v1 の API・設定ファイル形式・ネット上の記事を参照しないこと。

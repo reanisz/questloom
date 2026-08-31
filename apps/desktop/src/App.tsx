@@ -1,8 +1,9 @@
 /** アプリのルート。初回フェッチとイベント購読を行い、ボードとドロワーを描画する。 */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { listenOpenTask, listenTasksChanged } from "./api";
+import { AiDialog } from "./components/AiDialog";
 import { BoardView } from "./components/BoardView";
 import { TaskDrawer } from "./components/TaskDrawer";
 import { TitleBar } from "./components/TitleBar";
@@ -17,6 +18,7 @@ function App() {
   const setError = useBoardStore((state) => state.setError);
   const openTask = useBoardStore((state) => state.openTask);
   const [expanded, setExpanded] = useExpandedView();
+  const [aiOpen, setAiOpen] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -42,6 +44,14 @@ function App() {
       <header className="app-header">
         {board && <span className="muted">{board.today}</span>}
         <div className="app-header-actions">
+          <button
+            type="button"
+            className="btn btn-sm"
+            title="AI に依頼する (タスク作成 / 自由指示)"
+            onClick={() => setAiOpen(true)}
+          >
+            ✨ AI
+          </button>
           <button
             type="button"
             className="btn btn-sm btn-ghost"
@@ -74,6 +84,7 @@ function App() {
       )}
 
       <TaskDrawer />
+      <AiDialog open={aiOpen} onClose={() => setAiOpen(false)} />
     </div>
   );
 }

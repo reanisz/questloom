@@ -150,6 +150,57 @@ export interface NewResource {
   isPrimary?: boolean;
 }
 
+/** AI CLI プロバイダの定義。 */
+export interface AiProvider {
+  /** 識別子(設定内で一意)。 */
+  id: string;
+  /** UI に出す表示名。 */
+  label: string;
+  /** 実行ファイル名(PATH から解決される)。 */
+  command: string;
+  /** 引数テンプレート。`{prompt}` が置換される。 */
+  args: string[];
+  enabled: boolean;
+  /** MCP 接続時に前置される引数。空なら MCP 非対応。 */
+  mcpArgs: string[];
+  /** MCP トークン(認証ヘッダ)を渡せるか。 */
+  mcpSupportsToken: boolean;
+}
+
+/** AI 機能の種別。 */
+export type AiFeature = "createTasks" | "splitTask" | "freeInstruction";
+
+/** AI 実行の状態。 */
+export type AiState = "running" | "done" | "error";
+
+/** `questloom://ai-status` のペイロード。 */
+export interface AiStatus {
+  state: AiState;
+  feature: AiFeature;
+  message: string | null;
+}
+
+/** AI が作成したタスク 1 件。 */
+export interface AiTaskSummary {
+  id: TaskId;
+  title: string;
+  description: string;
+}
+
+/** タスクを作る系 (`ai_create_tasks` / `ai_split_task`) の結果。 */
+export interface AiCreateResult {
+  providerId: string;
+  created: AiTaskSummary[];
+}
+
+/** 自由指示 (`ai_free_instruction`) の結果。 */
+export interface AiTextResult {
+  providerId: string;
+  text: string;
+  /** 内蔵 MCP サーバーへ接続させられたか。 */
+  mcpAttached: boolean;
+}
+
 /** コア設定。 */
 export interface CoreSettings {
   weekStart: WeekStart;
@@ -166,6 +217,12 @@ export interface CoreSettings {
   mcpPort: number;
   /** MCP サーバーの Bearer トークン(null なら認証なし)。 */
   mcpToken: string | null;
+  /** AI CLI プロバイダの一覧。 */
+  aiProviders: AiProvider[];
+  /** 既定で使うプロバイダの id。 */
+  aiDefaultProviderId: string;
+  /** AI CLI 実行のタイムアウト(秒)。 */
+  aiTimeoutSecs: number;
 }
 
 /** 昇格先として選べる列(New / Doing / Done は選ばせない)。 */

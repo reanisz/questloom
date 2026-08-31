@@ -8,7 +8,9 @@
 //! オーバーレイウィンドウは New タスクがある間だけ表示される。
 //!
 //! 設定で有効なら、内蔵 MCP サーバー([`mcp`])を `127.0.0.1` で起動する。
+//! AI CLI の呼び出し([`ai`])は、実行中の MCP サーバーがあればその URL を CLI に渡す。
 
+pub mod ai;
 pub mod autostart;
 pub mod commands;
 pub mod events;
@@ -61,6 +63,7 @@ pub fn run() {
             let settings = service.settings();
             app.manage(state);
             app.manage(Arc::new(mcp::McpSupervisor::new(Arc::clone(&service))));
+            app.manage(Arc::new(ai::AiRunner::new()));
 
             tray::setup(&handle)?;
 
@@ -98,6 +101,10 @@ pub fn run() {
             commands::get_settings,
             commands::set_settings,
             commands::show_main_window,
+            ai::ai_create_tasks,
+            ai::ai_split_task,
+            ai::ai_free_instruction,
+            ai::ai_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri アプリの起動に失敗しました");

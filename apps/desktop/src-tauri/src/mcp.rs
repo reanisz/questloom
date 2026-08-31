@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use questloom_ai::McpEndpoint;
 use questloom_core::service::TaskService;
 use questloom_core::settings::CoreSettings;
 use questloom_mcp::{McpServerConfig, McpServerHandle};
@@ -65,6 +66,21 @@ impl McpSupervisor {
             // 起動に失敗してもアプリは使えるべきなので、ログだけ出して続行する。
             Err(error) => tracing::error!(%error, "MCP サーバーの起動に失敗しました"),
         }
+    }
+
+    /// 起動中なら、AI CLI に渡すための接続情報を返す。
+    pub async fn endpoint(&self) -> Option<McpEndpoint> {
+        let running = self.running.lock().await;
+        running.as_ref().map(|current| McpEndpoint {
+            url: current.handle.url(),
+            token: current
+                .config
+                .token
+                .as_deref()
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(ToOwned::to_owned),
+        })
     }
 
     /// サーバーを停止する(アプリ終了時用)。
@@ -167,6 +183,40 @@ mod tests {
         assert!(supervisor.running.lock().await.is_none());
 
         // 停止済みでも stop は安全に呼べる。
+        supervisor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_reports_the_running_url_and_token() {
+        let supervisor = supervisor();
+        assert_eq!(supervisor.endpoint().await, None);
+
+        supervisor
+            .apply(&CoreSettings {
+                mcp_enabled: true,
+                mcp_port: 0,
+                // 空白のみのトークンは「未設定」と同じ扱い(サーバー側と揃える)。
+                mcp_token: Some("  ".to_owned()),
+                ..CoreSettings::default()
+            })
+            .await;
+        let endpoint = supervisor.endpoint().await.expect("起動している");
+        assert!(endpoint.url.starts_with("http://127.0.0.1:"));
+        assert!(endpoint.url.ends_with("/mcp"));
+        assert_eq!(endpoint.token, None);
+
+        supervisor
+            .apply(&CoreSettings {
+                mcp_enabled: true,
+                mcp_port: 0,
+                mcp_token: Some("s3cret".to_owned()),
+                ..CoreSettings::default()
+            })
+            .await;
+        assert_eq!(
+            supervisor.endpoint().await.and_then(|end| end.token),
+            Some("s3cret".to_owned())
+        );
         supervisor.stop().await;
     }
 

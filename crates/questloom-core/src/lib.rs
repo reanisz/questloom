@@ -34,4 +34,4 @@ pub use service::{
     Board, BoardColumns, MoveRequest, NewResource, NewTask, TaskCard, TaskDetail, TaskPatch,
     TaskService,
 };
-pub use settings::{CoreSettings, WeekStart};
+pub use settings::{AiProvider, CoreSettings, WeekStart};

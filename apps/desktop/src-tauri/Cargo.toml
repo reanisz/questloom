@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+questloom-ai.workspace = true
 questloom-core.workspace = true
 questloom-mcp.workspace = true
 questloom-store.workspace = true
@@ -32,6 +33,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

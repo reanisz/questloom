@@ -10,3 +10,15 @@ description = "questloom の AI CLI 呼び出し層(claude / codex / antigravity
 
 [dependencies]
 questloom-core.workspace = true
+
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# io-util: 子プロセスの stdout/stderr を非同期に読み切るために必要。
+tokio = { workspace = true, features = ["io-util"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

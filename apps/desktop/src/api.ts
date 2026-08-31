@@ -9,6 +9,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  AiCreateResult,
+  AiStatus,
+  AiTextResult,
   Board,
   BoardColumnKey,
   CoreSettings,
@@ -30,6 +33,9 @@ export const TASKS_CHANGED = "questloom://tasks-changed";
 
 /** メインウィンドウでタスク詳細を開かせるイベント名(オーバーレイからの遷移で使う)。 */
 export const OPEN_TASK = "questloom://open-task";
+
+/** AI 実行の進捗イベント名。 */
+export const AI_STATUS = "questloom://ai-status";
 
 /** reject 値(多くは日本語文字列)を Error へ正規化する。 */
 export function toMessage(error: unknown): string {
@@ -98,6 +104,34 @@ export const setSettings = (settings: CoreSettings) => call<void>("set_settings"
  */
 export const showMainWindow = (taskId?: TaskId) =>
   call<void>("show_main_window", { taskId: taskId ?? null });
+
+/**
+ * 文章からタスクを抽出して作成する。
+ *
+ * `providerId` 省略時は設定の既定プロバイダ。実行中に別の AI 実行を投げると拒否される。
+ */
+export const aiCreateTasks = (text: string, providerId?: string) =>
+  call<AiCreateResult>("ai_create_tasks", { text, providerId: providerId ?? null });
+
+/** タスクをサブタスクへ分割・詳細化し、子タスクとして作成する。 */
+export const aiSplitTask = (taskId: TaskId, instruction?: string, providerId?: string) =>
+  call<AiCreateResult>("ai_split_task", {
+    taskId,
+    instruction: instruction?.trim() ? instruction : null,
+    providerId: providerId ?? null,
+  });
+
+/** 自由指示。MCP サーバー稼働中ならその URL が CLI へ渡される。 */
+export const aiFreeInstruction = (text: string, providerId?: string) =>
+  call<AiTextResult>("ai_free_instruction", { text, providerId: providerId ?? null });
+
+/** 実行中の AI プロセスを kill する。実行中でなければ false。 */
+export const aiCancel = () => call<boolean>("ai_cancel");
+
+/** AI 実行の進捗イベントを購読する。 */
+export function listenAiStatus(handler: (status: AiStatus) => void): Promise<UnlistenFn> {
+  return listen<AiStatus>(AI_STATUS, (event) => handler(event.payload));
+}
 
 /** タスク変更イベントを購読する。ペイロードは使わず再フェッチのトリガとしてのみ扱う。 */
 export function listenTasksChanged(handler: () => void): Promise<UnlistenFn> {

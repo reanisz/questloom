@@ -2956,7 +2956,14 @@ dependencies = [
 name = "questloom-ai"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "questloom-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2976,6 +2983,7 @@ name = "questloom-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "questloom-ai",
  "questloom-core",
  "questloom-mcp",
  "questloom-store",
@@ -2989,6 +2997,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
