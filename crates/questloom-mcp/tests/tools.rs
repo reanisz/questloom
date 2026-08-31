@@ -1,30 +1,19 @@
 //! ツール層のロジックを、インメモリ SQLite に載せたサービスで検証する。
 
-use std::sync::Arc;
-
-use questloom_core::clock::SystemClock;
 use questloom_core::model::TaskStatus;
-use questloom_core::repository::TaskRepository;
-use questloom_core::service::TaskService;
-use questloom_core::settings::CoreSettings;
 use questloom_mcp::tools::{
     AddResourceArgs, AddTaskUpdateArgs, ColumnArg, CreateTaskArgs, ListTasksArgs, MoveTaskArgs,
     PromoteTaskArgs, ResourceArg, ResourceKindArg, StatusArg, TaskIdArgs, UpdateTaskArgs,
 };
 use questloom_mcp::QuestloomTools;
-use questloom_store::SqliteStore;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use serde_json::Value;
 
+mod common;
+
 fn tools() -> QuestloomTools {
-    let store = Arc::new(SqliteStore::open_in_memory().expect("インメモリ DB を開ける"));
-    let repository: Arc<dyn TaskRepository> = store as Arc<dyn TaskRepository>;
-    QuestloomTools::new(Arc::new(TaskService::new(
-        repository,
-        Arc::new(SystemClock),
-        CoreSettings::default(),
-    )))
+    QuestloomTools::new(common::service())
 }
 
 /// ツール結果のテキストを JSON として取り出す。エラー結果ならパニックする。

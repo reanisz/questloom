@@ -11,7 +11,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::bucket::{derive_bucket, BoardColumn, Bucket};
+use crate::bucket::{bucket_for, BoardColumn, Bucket};
 use crate::clock::Clock;
 use crate::error::{CoreError, CoreResult};
 use crate::events::DomainEvent;
@@ -20,7 +20,7 @@ use crate::model::{
     TaskUpdateEntry, UpdateId,
 };
 use crate::repository::TaskRepository;
-use crate::settings::{CoreSettings, WeekStart};
+use crate::settings::{BoardSettings, WeekStart};
 use crate::sort_order;
 
 /// ドメインイベントのブロードキャスト容量。
@@ -149,6 +149,37 @@ pub struct BoardColumns {
     pub done: Vec<TaskCard>,
 }
 
+impl BoardColumns {
+    /// 列と、その列のタスクを左から順に列挙する。
+    pub fn iter(&self) -> impl Iterator<Item = (BoardColumn, &[TaskCard])> {
+        [
+            (BoardColumn::New, self.new.as_slice()),
+            (BoardColumn::Today, self.today.as_slice()),
+            (BoardColumn::Tomorrow, self.tomorrow.as_slice()),
+            (BoardColumn::ThisWeek, self.this_week.as_slice()),
+            (BoardColumn::NextWeek, self.next_week.as_slice()),
+            (BoardColumn::Future, self.future.as_slice()),
+            (BoardColumn::Doing, self.doing.as_slice()),
+            (BoardColumn::Done, self.done.as_slice()),
+        ]
+        .into_iter()
+    }
+
+    /// 指定した列のリストを借りる。
+    fn column_mut(&mut self, column: BoardColumn) -> &mut Vec<TaskCard> {
+        match column {
+            BoardColumn::New => &mut self.new,
+            BoardColumn::Today => &mut self.today,
+            BoardColumn::Tomorrow => &mut self.tomorrow,
+            BoardColumn::ThisWeek => &mut self.this_week,
+            BoardColumn::NextWeek => &mut self.next_week,
+            BoardColumn::Future => &mut self.future,
+            BoardColumn::Doing => &mut self.doing,
+            BoardColumn::Done => &mut self.done,
+        }
+    }
+}
+
 /// ボード全体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,10 +210,15 @@ pub struct TaskDetail {
 }
 
 /// タスク関連のユースケース。
+///
+/// 設定はボード表示に必要な [`BoardSettings`] だけを持つ。設定全体
+/// ([`CoreSettings`](crate::settings::CoreSettings))の保持・永続化・配布は
+/// アプリ(シェル)側の責務で、サービスはその変更を
+/// [`notify_settings_changed`](Self::notify_settings_changed) で中継するだけ。
 pub struct TaskService {
     repo: Arc<dyn TaskRepository>,
     clock: Arc<dyn Clock>,
-    settings: RwLock<CoreSettings>,
+    board: RwLock<BoardSettings>,
     /// 「読んで書く」操作を直列化するためのロック。
     write_lock: Mutex<()>,
     events: broadcast::Sender<DomainEvent>,
@@ -191,7 +227,7 @@ pub struct TaskService {
 impl std::fmt::Debug for TaskService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskService")
-            .field("settings", &self.settings)
+            .field("board", &self.board_settings())
             .finish_non_exhaustive()
     }
 }
@@ -199,16 +235,12 @@ impl std::fmt::Debug for TaskService {
 impl TaskService {
     /// サービスを構築する。
     #[must_use]
-    pub fn new(
-        repo: Arc<dyn TaskRepository>,
-        clock: Arc<dyn Clock>,
-        settings: CoreSettings,
-    ) -> Self {
+    pub fn new(repo: Arc<dyn TaskRepository>, clock: Arc<dyn Clock>, board: BoardSettings) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             repo,
             clock,
-            settings: RwLock::new(settings),
+            board: RwLock::new(board),
             write_lock: Mutex::new(()),
             events,
         }
@@ -220,19 +252,35 @@ impl TaskService {
         self.events.subscribe()
     }
 
-    /// 現在のコア設定を返す。
+    /// 現在のボード設定を返す。
     #[must_use]
-    pub fn settings(&self) -> CoreSettings {
-        self.read_settings()
+    pub fn board_settings(&self) -> BoardSettings {
+        *self
+            .board
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// コア設定を差し替え、[`DomainEvent::SettingsChanged`] を発行する。
-    pub fn set_settings(&self, settings: CoreSettings) {
-        // 毒された場合も更新を続行する(read_settings / lock_writes と同じ方針)。
+    /// バケット導出に使う週開始曜日。
+    #[must_use]
+    pub fn week_start(&self) -> WeekStart {
+        self.board_settings().week_start
+    }
+
+    /// ボード設定を差し替える。イベントは発行しない。
+    ///
+    /// 設定全体の保存が終わったら [`notify_settings_changed`](Self::notify_settings_changed)
+    /// を呼んで購読者へ知らせること。
+    pub fn set_board_settings(&self, board: BoardSettings) {
+        // 毒された場合も更新を続行する(board_settings / lock_writes と同じ方針)。
         *self
-            .settings
+            .board
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = board;
+    }
+
+    /// 設定が変わったことを購読者へ知らせる([`DomainEvent::SettingsChanged`])。
+    pub fn notify_settings_changed(&self) {
         self.emit(DomainEvent::SettingsChanged);
     }
 
@@ -255,7 +303,7 @@ impl TaskService {
     /// 永続化層のエラー。
     pub fn board(&self) -> CoreResult<Board> {
         let today = self.clock.today();
-        let week_start = self.read_settings().week_start;
+        let week_start = self.week_start();
 
         let tasks = self.repo.list_tasks()?;
         let resources = self.repo.list_all_resources()?;
@@ -278,19 +326,9 @@ impl TaskService {
         let mut columns = BoardColumns::default();
         for task in tasks {
             let card = build_card(task, today, week_start, &child_counts, &resource_index);
-            let target = match card.task.status {
-                TaskStatus::New => &mut columns.new,
-                TaskStatus::Doing => &mut columns.doing,
-                TaskStatus::Done => &mut columns.done,
-                TaskStatus::Todo => match card.bucket.unwrap_or(Bucket::Future) {
-                    Bucket::Today => &mut columns.today,
-                    Bucket::Tomorrow => &mut columns.tomorrow,
-                    Bucket::ThisWeek => &mut columns.this_week,
-                    Bucket::NextWeek => &mut columns.next_week,
-                    Bucket::Future => &mut columns.future,
-                },
-            };
-            target.push(card);
+            columns
+                .column_mut(BoardColumn::of(card.task.status, card.bucket))
+                .push(card);
         }
 
         Ok(Board {
@@ -306,7 +344,7 @@ impl TaskService {
     /// タスクが存在しない場合、または永続化層のエラー。
     pub fn task_detail(&self, id: TaskId) -> CoreResult<TaskDetail> {
         let today = self.clock.today();
-        let week_start = self.read_settings().week_start;
+        let week_start = self.week_start();
         let task = self.require_task(id)?;
 
         let resources = self.repo.list_resources(id)?;
@@ -393,30 +431,31 @@ impl TaskService {
                 None
             },
         };
-        self.repo.insert_task(&task)?;
-
         // 主リソースはちょうど 1 つ。明示指定が無ければ先頭を主リソースにする。
         let primary_index = input
             .resources
             .iter()
             .position(|resource| resource.is_primary)
             .unwrap_or(0);
+        let mut resources = Vec::with_capacity(input.resources.len());
         let mut previous_key: Option<String> = None;
         for (index, resource) in input.resources.into_iter().enumerate() {
             let key = sort_order::generate_key_between(previous_key.as_deref(), None)?;
-            let is_primary = index == primary_index;
-            self.repo.insert_resource(&TaskResource {
+            resources.push(TaskResource {
                 id: ResourceId::new(),
                 task_id: task.id,
                 kind: resource.kind,
                 value: resource.value,
                 label: resource.label,
-                is_primary,
+                is_primary: index == primary_index,
                 sort_order: key.clone(),
                 created_at: now,
-            })?;
+            });
             previous_key = Some(key);
         }
+
+        // タスクとリソースは 1 つのトランザクションで入れる(中間状態を残さない)。
+        self.repo.insert_task_with_resources(&task, &resources)?;
 
         self.emit(DomainEvent::TaskCreated { task_id: task.id });
         Ok(task)
@@ -462,7 +501,7 @@ impl TaskService {
         let _guard = self.lock_writes();
         let mut task = self.require_task(id)?;
         let today = self.clock.today();
-        let week_start = self.read_settings().week_start;
+        let week_start = self.week_start();
 
         let (status, scheduled) = request.column.resolve(task.scheduled, today, week_start);
         let was_done = task.status == TaskStatus::Done;
@@ -530,7 +569,7 @@ impl TaskService {
             return Err(CoreError::NotInstant(id));
         }
         let today = self.clock.today();
-        let week_start = self.read_settings().week_start;
+        let week_start = self.week_start();
         let column = column.unwrap_or(BoardColumn::Today);
         let (status, scheduled) = column.resolve(task.scheduled, today, week_start);
 
@@ -596,13 +635,6 @@ impl TaskService {
         let now = self.clock.now();
         let is_primary = input.is_primary || existing.is_empty();
 
-        if is_primary {
-            for mut resource in existing.iter().filter(|r| r.is_primary).cloned() {
-                resource.is_primary = false;
-                self.repo.update_resource(&resource)?;
-            }
-        }
-
         let key =
             sort_order::generate_key_between(existing.last().map(|r| r.sort_order.as_str()), None)?;
         let resource = TaskResource {
@@ -615,7 +647,8 @@ impl TaskService {
             sort_order: key,
             created_at: now,
         };
-        self.repo.insert_resource(&resource)?;
+        // 既存の主リソースの解除と挿入は原子的に行う(主リソースが 0 件の瞬間を作らない)。
+        self.repo.replace_primary_and_insert(&resource)?;
         task.updated_at = now;
         self.persist(&task)?;
         self.emit(DomainEvent::TaskResourcesChanged { task_id: id });
@@ -691,12 +724,6 @@ impl TaskService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn read_settings(&self) -> CoreSettings {
-        self.settings
-            .read()
-            .map_or_else(|err| err.into_inner().clone(), |guard| guard.clone())
-    }
-
     fn emit(&self, event: DomainEvent) {
         // 購読者がいない場合のエラーは無視してよい。
         let _ = self.events.send(event);
@@ -757,10 +784,6 @@ fn normalize_title(title: &str) -> CoreResult<String> {
     Ok(trimmed.to_owned())
 }
 
-fn bucket_for(task: &Task, today: NaiveDate, week_start: WeekStart) -> Option<Bucket> {
-    (task.status == TaskStatus::Todo).then(|| derive_bucket(&task.scheduled, today, week_start))
-}
-
 fn build_card(
     task: Task,
     today: NaiveDate,
@@ -803,12 +826,17 @@ mod tests {
     }
 
     impl TaskRepository for MemoryRepository {
-        fn insert_task(&self, task: &Task) -> RepoResult<()> {
+        fn insert_task_with_resources(
+            &self,
+            task: &Task,
+            resources: &[TaskResource],
+        ) -> RepoResult<()> {
             let mut tasks = Self::lock(&self.tasks);
             if tasks.iter().any(|t| t.id == task.id) {
                 return Err(RepositoryError::message("重複した ID"));
             }
             tasks.push(task.clone());
+            Self::lock(&self.resources).extend(resources.iter().cloned());
             Ok(())
         }
 
@@ -853,20 +881,18 @@ mod tests {
             Ok(tasks)
         }
 
-        fn insert_resource(&self, resource: &TaskResource) -> RepoResult<()> {
-            Self::lock(&self.resources).push(resource.clone());
-            Ok(())
-        }
-
-        fn update_resource(&self, resource: &TaskResource) -> RepoResult<bool> {
+        fn replace_primary_and_insert(&self, resource: &TaskResource) -> RepoResult<()> {
             let mut resources = Self::lock(&self.resources);
-            match resources.iter_mut().find(|r| r.id == resource.id) {
-                Some(slot) => {
-                    *slot = resource.clone();
-                    Ok(true)
+            if resource.is_primary {
+                for existing in resources
+                    .iter_mut()
+                    .filter(|r| r.task_id == resource.task_id)
+                {
+                    existing.is_primary = false;
                 }
-                None => Ok(false),
             }
+            resources.push(resource.clone());
+            Ok(())
         }
 
         fn delete_resource(&self, id: ResourceId) -> RepoResult<bool> {
@@ -913,7 +939,7 @@ mod tests {
         TaskService::new(
             Arc::new(MemoryRepository::default()),
             Arc::new(FixedClock::at(today)),
-            CoreSettings::default(),
+            BoardSettings::default(),
         )
     }
 
@@ -1432,12 +1458,11 @@ mod tests {
     #[test]
     fn settings_can_be_replaced_and_affect_bucket_derivation() {
         let service = service();
-        assert_eq!(service.settings().week_start, WeekStart::Monday);
-        service.set_settings(CoreSettings {
+        assert_eq!(service.week_start(), WeekStart::Monday);
+        service.set_board_settings(BoardSettings {
             week_start: WeekStart::Sunday,
-            ..CoreSettings::default()
         });
-        assert_eq!(service.settings().week_start, WeekStart::Sunday);
+        assert_eq!(service.board_settings().week_start, WeekStart::Sunday);
 
         let task = service.create_task(new_task("週")).unwrap();
         service
@@ -1446,5 +1471,49 @@ mod tests {
         let board = service.board().unwrap();
         assert_eq!(board.week_start, WeekStart::Sunday);
         assert_eq!(board.columns.this_week.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn settings_changes_are_broadcast_on_demand() {
+        let service = service();
+        let mut rx = service.subscribe();
+        // 保持している値の差し替えだけではイベントを出さない。
+        service.set_board_settings(BoardSettings {
+            week_start: WeekStart::Sunday,
+        });
+        service.notify_settings_changed();
+        assert_eq!(rx.recv().await.unwrap(), DomainEvent::SettingsChanged);
+    }
+
+    #[test]
+    fn board_columns_iterate_left_to_right() {
+        let service = service();
+        let task = service.create_task(new_task("受信箱")).unwrap();
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Doing))
+            .unwrap();
+
+        let board = service.board().unwrap();
+        let columns: Vec<BoardColumn> = board.columns.iter().map(|(column, _)| column).collect();
+        assert_eq!(
+            columns,
+            [
+                BoardColumn::New,
+                BoardColumn::Today,
+                BoardColumn::Tomorrow,
+                BoardColumn::ThisWeek,
+                BoardColumn::NextWeek,
+                BoardColumn::Future,
+                BoardColumn::Doing,
+                BoardColumn::Done,
+            ]
+        );
+        let filled: Vec<(BoardColumn, usize)> = board
+            .columns
+            .iter()
+            .filter(|(_, cards)| !cards.is_empty())
+            .map(|(column, cards)| (column, cards.len()))
+            .collect();
+        assert_eq!(filled, [(BoardColumn::Doing, 1)]);
     }
 }

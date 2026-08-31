@@ -8,7 +8,7 @@ use questloom_core::clock::FixedClock;
 use questloom_core::model::{Origin, ResourceKind, Scheduled, TaskStatus};
 use questloom_core::repository::TaskRepository;
 use questloom_core::service::{MoveRequest, NewResource, NewTask, TaskPatch, TaskService};
-use questloom_core::settings::{CoreSettings, WeekStart, CORE_NAMESPACE};
+use questloom_core::settings::{BoardSettings, CoreSettings, WeekStart, CORE_NAMESPACE};
 use questloom_store::{backup, SqliteStore, CURRENT_SCHEMA_VERSION};
 use tempfile::TempDir;
 
@@ -24,7 +24,7 @@ fn make_service(store: Arc<SqliteStore>) -> TaskService {
     TaskService::new(
         store,
         Arc::new(FixedClock::at(today())),
-        CoreSettings::default(),
+        BoardSettings::default(),
     )
 }
 

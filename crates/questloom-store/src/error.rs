@@ -44,10 +44,6 @@ pub enum StoreError {
         /// バイナリが対応する最大バージョン。
         supported: i64,
     },
-
-    /// 保存されている値がドメインモデルへ変換できない。
-    #[error("保存データの変換に失敗しました: {0}")]
-    Decode(String),
 }
 
 impl From<StoreError> for RepositoryError {

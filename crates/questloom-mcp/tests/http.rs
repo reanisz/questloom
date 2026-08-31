@@ -1,24 +1,11 @@
 //! 実ポートで MCP サーバーを起動し、HTTP レベルの疎通と Bearer 認証を確認する。
 
-use std::sync::Arc;
-
-use questloom_core::clock::SystemClock;
-use questloom_core::repository::TaskRepository;
-use questloom_core::service::TaskService;
-use questloom_core::settings::CoreSettings;
 use questloom_mcp::{serve, McpServerConfig};
-use questloom_store::SqliteStore;
 use serde_json::json;
 
-fn service() -> Arc<TaskService> {
-    let store = Arc::new(SqliteStore::open_in_memory().expect("インメモリ DB を開ける"));
-    let repository: Arc<dyn TaskRepository> = store as Arc<dyn TaskRepository>;
-    Arc::new(TaskService::new(
-        repository,
-        Arc::new(SystemClock),
-        CoreSettings::default(),
-    ))
-}
+mod common;
+
+use common::service;
 
 /// MCP の `initialize` リクエスト(JSON-RPC)。
 fn initialize_body() -> String {

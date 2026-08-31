@@ -10,7 +10,7 @@ use questloom_core::model::{
     Origin, ResourceId, ResourceKind, Scheduled, Task, TaskId, TaskResource, TaskStatus,
     TaskUpdateEntry, UpdateId,
 };
-use rusqlite::types::Type;
+use rusqlite::types::{Type, Value};
 use rusqlite::{Error as SqlError, Row};
 
 /// 全カラムを固定順で読み出すための SELECT 句(`tasks`)。
@@ -28,6 +28,66 @@ pub const UPDATE_COLUMNS: &str = "id, task_id, body, origin, created_at";
 #[must_use]
 pub fn time_to_sql(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn text(value: impl Into<String>) -> Value {
+    Value::Text(value.into())
+}
+
+fn nullable_text(value: Option<impl Into<String>>) -> Value {
+    value.map_or(Value::Null, |value| Value::Text(value.into()))
+}
+
+/// [`TASK_COLUMNS`] と同じ順で `tasks` のバインド値を並べる。
+///
+/// INSERT と UPDATE で同じ並びを使う(UPDATE は `?1` を `WHERE id` に使い、
+/// 残りを SET に並べる)ため、14 カラムの列挙はこの 1 箇所だけにする。
+#[must_use]
+pub fn task_params(task: &Task) -> [Value; 14] {
+    let (kind, value) = task.scheduled.to_columns();
+    [
+        text(task.id.to_string()),
+        text(task.title.clone()),
+        text(task.description.clone()),
+        text(task.status.as_str()),
+        nullable_text(kind),
+        nullable_text(value),
+        nullable_text(task.deadline.map(time_to_sql)),
+        Value::Integer(i64::from(task.is_instant)),
+        text(task.origin.to_string()),
+        nullable_text(task.parent_id.map(|id| id.to_string())),
+        text(task.sort_order.clone()),
+        text(time_to_sql(task.created_at)),
+        text(time_to_sql(task.updated_at)),
+        nullable_text(task.done_at.map(time_to_sql)),
+    ]
+}
+
+/// [`RESOURCE_COLUMNS`] と同じ順で `task_resources` のバインド値を並べる。
+#[must_use]
+pub fn resource_params(resource: &TaskResource) -> [Value; 8] {
+    [
+        text(resource.id.to_string()),
+        text(resource.task_id.to_string()),
+        text(resource.kind.as_str()),
+        text(resource.value.clone()),
+        text(resource.label.clone()),
+        Value::Integer(i64::from(resource.is_primary)),
+        text(resource.sort_order.clone()),
+        text(time_to_sql(resource.created_at)),
+    ]
+}
+
+/// [`UPDATE_COLUMNS`] と同じ順で `task_updates` のバインド値を並べる。
+#[must_use]
+pub fn update_params(entry: &TaskUpdateEntry) -> [Value; 5] {
+    [
+        text(entry.id.to_string()),
+        text(entry.task_id.to_string()),
+        text(entry.body.clone()),
+        text(entry.origin.to_string()),
+        text(time_to_sql(entry.created_at)),
+    ]
 }
 
 fn conversion_error(index: usize, error: impl StdError + Send + Sync + 'static) -> SqlError {
@@ -118,4 +178,107 @@ pub fn update_from_row(row: &Row<'_>) -> Result<TaskUpdateEntry, SqlError> {
         origin: parse_at::<Origin>(3, &row.get::<_, String>(3)?)?,
         created_at: time_from_sql(4, &row.get::<_, String>(4)?)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::{params_from_iter, Connection};
+
+    /// [`task_params`] で書いた行を、そのまま読み戻すための最小の DB。
+    fn store_task(task: &Task) -> Connection {
+        let conn = Connection::open_in_memory().expect("インメモリ DB");
+        conn.execute_batch(
+            "CREATE TABLE tasks (id TEXT, title TEXT, description TEXT, status TEXT,
+                 scheduled_kind TEXT, scheduled_value TEXT, deadline TEXT, is_instant INTEGER,
+                 origin TEXT, parent_id TEXT, sort_order TEXT, created_at TEXT,
+                 updated_at TEXT, done_at TEXT);",
+        )
+        .expect("テーブルを作れる");
+        conn.execute(
+            "INSERT INTO tasks VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params_from_iter(task_params(task)),
+        )
+        .expect("挿入できる");
+        conn
+    }
+
+    fn read_task(conn: &Connection) -> Result<Task, SqlError> {
+        let sql = format!("SELECT {TASK_COLUMNS} FROM tasks");
+        conn.query_row(&sql, [], task_from_row)
+    }
+
+    fn sample() -> Task {
+        let now = DateTime::parse_from_rfc3339("2026-09-02T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        Task {
+            id: TaskId::new(),
+            title: "書き戻し".to_owned(),
+            description: "詳細".to_owned(),
+            status: TaskStatus::Todo,
+            scheduled: questloom_core::model::Scheduled::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
+            ),
+            deadline: Some(now),
+            is_instant: true,
+            origin: Origin::Plugin("github".to_owned()),
+            parent_id: Some(TaskId::new()),
+            sort_order: "a0".to_owned(),
+            created_at: now,
+            updated_at: now,
+            done_at: None,
+        }
+    }
+
+    #[test]
+    fn params_and_row_mapping_roundtrip() {
+        let task = sample();
+        let conn = store_task(&task);
+        assert_eq!(read_task(&conn).expect("読み戻せる"), task);
+    }
+
+    #[test]
+    fn unknown_status_is_reported_as_a_conversion_failure() {
+        let conn = store_task(&sample());
+        conn.execute("UPDATE tasks SET status = 'archived'", [])
+            .unwrap();
+        let error = read_task(&conn).expect_err("status を解釈できない");
+        assert!(
+            matches!(error, SqlError::FromSqlConversionFailure(3, _, _)),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("archived"), "{error}");
+    }
+
+    #[test]
+    fn unknown_origin_is_reported_as_a_conversion_failure() {
+        let conn = store_task(&sample());
+        // origin は `plugin:<id>` 以外の未知の値を受け付けない。
+        conn.execute("UPDATE tasks SET origin = ''", []).unwrap();
+        let error = read_task(&conn).expect_err("origin を解釈できない");
+        assert!(
+            matches!(error, SqlError::FromSqlConversionFailure(8, _, _)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn broken_timestamps_and_schedules_are_reported() {
+        let conn = store_task(&sample());
+        conn.execute("UPDATE tasks SET created_at = '昨日'", [])
+            .unwrap();
+        assert!(matches!(
+            read_task(&conn).expect_err("日時を解釈できない"),
+            SqlError::FromSqlConversionFailure(11, _, _)
+        ));
+
+        let conn = store_task(&sample());
+        conn.execute("UPDATE tasks SET scheduled_kind = 'month'", [])
+            .unwrap();
+        assert!(matches!(
+            read_task(&conn).expect_err("予定を解釈できない"),
+            SqlError::FromSqlConversionFailure(4, _, _)
+        ));
+    }
 }

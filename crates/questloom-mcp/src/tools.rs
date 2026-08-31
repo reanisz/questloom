@@ -7,12 +7,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use questloom_core::bucket::{derive_bucket, BoardColumn, Bucket};
-use questloom_core::error::CoreError;
+use questloom_core::bucket::{bucket_for, BoardColumn, Bucket};
+use questloom_core::error::{CoreError, CoreResult};
 use questloom_core::model::{Origin, ResourceKind, Scheduled, Task, TaskId, TaskStatus};
-use questloom_core::service::{
-    MoveRequest, NewResource, NewTask, TaskCard, TaskPatch, TaskService,
-};
+use questloom_core::service::{MoveRequest, NewResource, NewTask, TaskPatch, TaskService};
 use questloom_core::settings::WeekStart;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -293,42 +291,7 @@ impl QuestloomTools {
         &self,
         Parameters(args): Parameters<ListTasksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let board = match self.service.board() {
-            Ok(board) => board,
-            Err(error) => return Ok(core_error(&error)),
-        };
-        let wanted = args.status.map(TaskStatus::from);
-        let columns = [
-            (BoardColumn::New, &board.columns.new),
-            (BoardColumn::Today, &board.columns.today),
-            (BoardColumn::Tomorrow, &board.columns.tomorrow),
-            (BoardColumn::ThisWeek, &board.columns.this_week),
-            (BoardColumn::NextWeek, &board.columns.next_week),
-            (BoardColumn::Future, &board.columns.future),
-            (BoardColumn::Doing, &board.columns.doing),
-            (BoardColumn::Done, &board.columns.done),
-        ];
-        let requested = args.column.map(BoardColumn::from);
-
-        let mut tasks = Vec::new();
-        for (column, cards) in columns {
-            if requested.is_some_and(|wanted| wanted != column) {
-                continue;
-            }
-            for card in cards {
-                if wanted.is_some_and(|status| status != card.task.status) {
-                    continue;
-                }
-                tasks.push(card_summary(column, card));
-            }
-        }
-
-        Ok(json_result(&json!({
-            "today": board.today,
-            "weekStart": board.week_start,
-            "count": tasks.len(),
-            "tasks": tasks,
-        })))
+        respond(self.collect_tasks(&args))
     }
 
     #[tool(
@@ -339,10 +302,7 @@ impl QuestloomTools {
         Parameters(args): Parameters<TaskIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = parse_task_id(&args.task_id)?;
-        match self.service.task_detail(id) {
-            Ok(detail) => Ok(json_result(&detail)),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(self.service.task_detail(id))
     }
 
     #[tool(
@@ -381,10 +341,11 @@ impl QuestloomTools {
                 .map(NewResource::from)
                 .collect(),
         };
-        match self.service.create_task(input) {
-            Ok(task) => Ok(json_result(&self.task_summary(&task))),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(
+            self.service
+                .create_task(input)
+                .map(|task| self.task_summary(&task)),
+        )
     }
 
     #[tool(
@@ -404,10 +365,11 @@ impl QuestloomTools {
             scheduled: None,
             is_instant: None,
         };
-        match self.service.update_task(id, patch) {
-            Ok(task) => Ok(json_result(&self.task_summary(&task))),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(
+            self.service
+                .update_task(id, patch)
+                .map(|task| self.task_summary(&task)),
+        )
     }
 
     #[tool(
@@ -419,10 +381,11 @@ impl QuestloomTools {
     ) -> Result<CallToolResult, ErrorData> {
         let id = parse_task_id(&args.task_id)?;
         let request = MoveRequest::to_column(args.column.into());
-        match self.service.move_task(id, request) {
-            Ok(task) => Ok(json_result(&self.task_summary(&task))),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(
+            self.service
+                .move_task(id, request)
+                .map(|task| self.task_summary(&task)),
+        )
     }
 
     #[tool(description = "Mark a task as done. Idempotent.")]
@@ -431,10 +394,11 @@ impl QuestloomTools {
         Parameters(args): Parameters<TaskIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = parse_task_id(&args.task_id)?;
-        match self.service.complete_task(id) {
-            Ok(task) => Ok(json_result(&self.task_summary(&task))),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(
+            self.service
+                .complete_task(id)
+                .map(|task| self.task_summary(&task)),
+        )
     }
 
     #[tool(
@@ -445,10 +409,11 @@ impl QuestloomTools {
         Parameters(args): Parameters<PromoteTaskArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = parse_task_id(&args.task_id)?;
-        match self.service.promote_task(id, args.column.map(Into::into)) {
-            Ok(task) => Ok(json_result(&self.task_summary(&task))),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(
+            self.service
+                .promote_task(id, args.column.map(Into::into))
+                .map(|task| self.task_summary(&task)),
+        )
     }
 
     #[tool(description = "Append a progress note to a task's update history.")]
@@ -457,10 +422,7 @@ impl QuestloomTools {
         Parameters(args): Parameters<AddTaskUpdateArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = parse_task_id(&args.task_id)?;
-        match self.service.add_task_update(id, args.body, Origin::Mcp) {
-            Ok(entry) => Ok(json_result(&entry)),
-            Err(error) => Ok(core_error(&error)),
-        }
+        respond(self.service.add_task_update(id, args.body, Origin::Mcp))
     }
 
     #[tool(description = "Attach a related resource (URL or local file path) to a task.")]
@@ -475,22 +437,45 @@ impl QuestloomTools {
             label: args.label.unwrap_or_default(),
             is_primary: args.is_primary.unwrap_or(false),
         };
-        match self.service.add_resource(id, input) {
-            Ok(resource) => Ok(json_result(&resource)),
-            Err(error) => Ok(core_error(&error)),
+        respond(self.service.add_resource(id, input))
+    }
+
+    /// ボードを集計し、絞り込みを適用した一覧 JSON を作る。
+    fn collect_tasks(&self, args: &ListTasksArgs) -> CoreResult<Value> {
+        let board = self.service.board()?;
+        let wanted = args.status.map(TaskStatus::from);
+        let requested = args.column.map(BoardColumn::from);
+
+        let mut tasks = Vec::new();
+        for (column, cards) in board.columns.iter() {
+            if requested.is_some_and(|wanted| wanted != column) {
+                continue;
+            }
+            for card in cards {
+                if wanted.is_some_and(|status| status != card.task.status) {
+                    continue;
+                }
+                tasks.push(summary(column, &card.task, card.bucket));
+            }
         }
+
+        Ok(json!({
+            "today": board.today,
+            "weekStart": board.week_start,
+            "count": tasks.len(),
+            "tasks": tasks,
+        }))
     }
 
     fn today_and_week_start(&self) -> (chrono::NaiveDate, WeekStart) {
-        (self.service.today(), self.service.settings().week_start)
+        (self.service.today(), self.service.week_start())
     }
 
     /// 作成・更新直後の [`Task`] を一覧と同じ形の JSON にする。
     fn task_summary(&self, task: &Task) -> Value {
         let (today, week_start) = self.today_and_week_start();
-        let bucket = (task.status == TaskStatus::Todo)
-            .then(|| derive_bucket(&task.scheduled, today, week_start));
-        summary(column_of(task.status, bucket), task, bucket)
+        let bucket = bucket_for(task, today, week_start);
+        summary(BoardColumn::of(task.status, bucket), task, bucket)
     }
 }
 
@@ -525,19 +510,33 @@ fn parse_deadline(raw: &str) -> Result<DateTime<Utc>, ErrorData> {
         })
 }
 
-/// ドメインエラーは「ツールは動いたが失敗した」なので、ツールレベルのエラーとして返す。
+/// サービスの実行結果をツールの応答へ変換する。
+///
+/// ドメインエラーは「ツールは動いたが失敗した」なので、プロトコルエラー
+/// ([`ErrorData`])ではなくツールレベルのエラーとして返す。
+fn respond<T: serde::Serialize>(result: CoreResult<T>) -> Result<CallToolResult, ErrorData> {
+    Ok(match result {
+        Ok(value) => json_result(&value),
+        Err(error) => core_error(&error),
+    })
+}
+
+/// ドメインエラーをツールレベルのエラーとして返す。
 fn core_error(error: &CoreError) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(error.to_string())])
 }
 
+/// 値を整形した JSON テキストとして返す。JSON 化に失敗したらエラー結果にする。
 fn json_result<T: serde::Serialize>(value: &T) -> CallToolResult {
-    let text = serde_json::to_string_pretty(value)
-        .unwrap_or_else(|error| format!("{{\"error\":\"failed to serialize: {error}\"}}"));
-    CallToolResult::success(vec![ContentBlock::text(text)])
-}
-
-fn card_summary(column: BoardColumn, card: &TaskCard) -> Value {
-    summary(column, &card.task, card.bucket)
+    match serde_json::to_string_pretty(value) {
+        Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+        Err(error) => {
+            tracing::error!(%error, "ツールの応答を JSON にできませんでした");
+            CallToolResult::error(vec![ContentBlock::text(format!(
+                "failed to serialize the result: {error}"
+            ))])
+        }
+    }
 }
 
 fn summary(column: BoardColumn, task: &Task, bucket: Option<Bucket>) -> Value {
@@ -555,18 +554,53 @@ fn summary(column: BoardColumn, task: &Task, bucket: Option<Bucket>) -> Value {
     })
 }
 
-/// 状態と導出バケットから、ボード上の列を逆算する。
-const fn column_of(status: TaskStatus, bucket: Option<Bucket>) -> BoardColumn {
-    match status {
-        TaskStatus::New => BoardColumn::New,
-        TaskStatus::Doing => BoardColumn::Doing,
-        TaskStatus::Done => BoardColumn::Done,
-        TaskStatus::Todo => match bucket {
-            Some(Bucket::Today) => BoardColumn::Today,
-            Some(Bucket::Tomorrow) => BoardColumn::Tomorrow,
-            Some(Bucket::ThisWeek) => BoardColumn::ThisWeek,
-            Some(Bucket::NextWeek) => BoardColumn::NextWeek,
-            Some(Bucket::Future) | None => BoardColumn::Future,
-        },
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 引数の列挙型は core 型の serde 表現と 1 対 1 でなければならない
+    /// (MCP クライアントが受け取る JSON と、送れる引数を一致させるため)。
+    #[test]
+    fn argument_enums_round_trip_through_the_core_serde_representation() {
+        for status in [
+            TaskStatus::New,
+            TaskStatus::Todo,
+            TaskStatus::Doing,
+            TaskStatus::Done,
+        ] {
+            let json = serde_json::to_value(status).expect("core 型は JSON 化できる");
+            let arg: StatusArg =
+                serde_json::from_value(json.clone()).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(TaskStatus::from(arg), status);
+        }
+
+        for column in [
+            BoardColumn::New,
+            BoardColumn::Today,
+            BoardColumn::Tomorrow,
+            BoardColumn::ThisWeek,
+            BoardColumn::NextWeek,
+            BoardColumn::Future,
+            BoardColumn::Doing,
+            BoardColumn::Done,
+        ] {
+            let json = serde_json::to_value(column).expect("core 型は JSON 化できる");
+            let arg: ColumnArg =
+                serde_json::from_value(json.clone()).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(BoardColumn::from(arg), column);
+        }
+
+        for kind in [ResourceKind::Url, ResourceKind::File] {
+            let json = serde_json::to_value(kind).expect("core 型は JSON 化できる");
+            let arg: ResourceKindArg =
+                serde_json::from_value(json.clone()).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(ResourceKind::from(arg), kind);
+        }
+
+        // ドキュメント記載の綴り(camelCase)であることも固定する。
+        assert_eq!(
+            serde_json::to_value(BoardColumn::ThisWeek).unwrap(),
+            serde_json::json!("thisWeek")
+        );
     }
 }

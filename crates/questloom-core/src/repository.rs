@@ -57,13 +57,18 @@ impl StdError for RepositoryError {
 /// タスク・リソース・アップデート履歴の永続化。
 ///
 /// 同期 API。実装側は内部で必要な排他制御(接続の Mutex など)を行うこと。
-/// 書き込み系メソッドはそれぞれトランザクション内で実行される。
+/// 書き込み系メソッドはそれぞれ**ひとつのトランザクション**で実行される
+/// (途中で失敗しても中間状態を残さない)。
 pub trait TaskRepository: Send + Sync + 'static {
-    /// タスクを 1 件挿入する。
+    /// タスクと、その関連リソースをまとめて挿入する。
+    ///
+    /// リソースが空なら単なるタスクの挿入と同じ。全体が原子的に行われるため、
+    /// 途中で失敗してもリソースの無い(あるいは半端な)タスクは残らない。
     ///
     /// # Errors
     /// 永続化に失敗した場合。
-    fn insert_task(&self, task: &Task) -> RepoResult<()>;
+    fn insert_task_with_resources(&self, task: &Task, resources: &[TaskResource])
+        -> RepoResult<()>;
 
     /// タスクを 1 件更新する。存在しない場合は `Ok(false)`。
     ///
@@ -95,17 +100,14 @@ pub trait TaskRepository: Send + Sync + 'static {
     /// 永続化に失敗した場合。
     fn list_children(&self, parent_id: TaskId) -> RepoResult<Vec<Task>>;
 
-    /// リソースを 1 件挿入する。
+    /// リソースを 1 件挿入する。主リソースはタスクにつき 1 つに保つ。
+    ///
+    /// `resource.is_primary` が真の場合は、同じタスクの既存の主リソースを
+    /// 解除してから挿入する。解除と挿入は原子的に行う。
     ///
     /// # Errors
     /// 永続化に失敗した場合。
-    fn insert_resource(&self, resource: &TaskResource) -> RepoResult<()>;
-
-    /// リソースを 1 件更新する。存在しない場合は `Ok(false)`。
-    ///
-    /// # Errors
-    /// 永続化に失敗した場合。
-    fn update_resource(&self, resource: &TaskResource) -> RepoResult<bool>;
+    fn replace_primary_and_insert(&self, resource: &TaskResource) -> RepoResult<()>;
 
     /// リソースを 1 件削除する。存在しない場合は `Ok(false)`。
     ///

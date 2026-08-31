@@ -137,6 +137,12 @@ MCP 経由で作られたタスク・履歴の `origin` は `mcp` になる。
 Tauri command として配線する。ヘッダの「✨ AI」ボタンと、タスク詳細の
 「✨ AI で分割/詳細化」ボタンから使う。
 
+「プロバイダ解決 → プロンプト生成 → CLI 実行 → 応答の解釈 → `TaskService` への反映」は
+`questloom_ai::AiService`(`service.rs`)、同時実行 1 件の制御とキャンセルは
+`questloom_ai::AiRunner`(`runner.rs`)にある。src-tauri 側に残るのは command 定義・
+State の取り出し・`questloom://ai-status` の emit・エラーの文字列化だけで、進捗は
+`AiProgress` のコールバックとして受け取る。
+
 ### プロバイダ設定(`CoreSettings`)
 
 | 設定 | 既定 | 内容 |
@@ -328,9 +334,11 @@ Esc / 閉じるでボードへ戻る)。節は 一般 / ショートカットと
 manifest の `settingsSchema` からフォームを自動生成し、プラグインごとの保存ボタンで
 `plugin_set_settings` を呼ぶ(下記の一括「保存」は使わない)。
 自動保存はせず「保存」ボタンで `set_settings` を一括呼び出しする(未保存のまま閉じるときは確認)。
-検証はフロント (`apps/desktop/src/settings.ts`) とバックエンド
-(`apps/desktop/src-tauri/src/settings.rs::validate`、ショートカット文字列のパースを含む)の両方で行い、
-不正なら保存しない。稼働状態(MCP の URL・ショートカットの登録可否)は `get_runtime_status` で取得する。
+検証はフロント (`apps/desktop/src/settings.ts`) とバックエンドの両方で行い、不正なら保存しない。
+バックエンドの検証は `questloom_core::settings::CoreSettings::validate`(値の範囲・AI プロバイダ定義の
+整合性)に、`apps/desktop/src-tauri/src/settings.rs::validate` がショートカット文字列のパースを
+足したもの。設定の実体(`CoreSettings`)は `AppState` が保持し、`TaskService` はボード表示に要る
+`BoardSettings`(週開始曜日)だけを持つ。稼働状態(MCP の URL・ショートカットの登録可否)は `get_runtime_status` で取得する。
 
 ## 注意事項
 

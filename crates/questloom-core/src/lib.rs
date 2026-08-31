@@ -20,7 +20,9 @@ pub mod service;
 pub mod settings;
 pub mod sort_order;
 
-pub use bucket::{derive_bucket, scheduled_for_bucket, week_key_of, BoardColumn, Bucket};
+pub use bucket::{
+    bucket_for, derive_bucket, scheduled_for_bucket, week_key_of, BoardColumn, Bucket,
+};
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use error::{CoreError, CoreResult};
 pub use events::DomainEvent;
@@ -34,4 +36,4 @@ pub use service::{
     Board, BoardColumns, MoveRequest, NewResource, NewTask, TaskCard, TaskDetail, TaskPatch,
     TaskService,
 };
-pub use settings::{AiProvider, CoreSettings, WeekStart};
+pub use settings::{AiProvider, BoardSettings, CoreSettings, SettingsError, WeekStart};

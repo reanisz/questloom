@@ -1,4 +1,10 @@
 //! コア設定モデル。`settings` テーブルの `core` 名前空間に JSON で保存される。
+//!
+//! 値の検証は [`CoreSettings::validate`] にある。UI・Tauri に依存しない規則
+//! (数値の範囲・プロバイダ定義の整合性)はすべてここで判定し、シェル側は
+//! それにショートカット文字列のパースを足すだけでよい。
+
+use std::collections::HashSet;
 
 use chrono::Weekday;
 use serde::{Deserialize, Serialize};
@@ -28,6 +34,26 @@ impl WeekStart {
     }
 }
 
+/// ボード表示に関わる設定だけを抜き出したもの。
+///
+/// [`TaskService`](crate::service::TaskService) が保持するのはこれだけで、
+/// 設定全体([`CoreSettings`])の読み書き・配布はシェル(アプリ)側の責務。
+/// サービスがボード以外の設定(MCP・AI・ショートカット等)を抱えないようにするため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardSettings {
+    /// 週の開始曜日。バケット導出に用いる。
+    pub week_start: WeekStart,
+}
+
+impl From<&CoreSettings> for BoardSettings {
+    fn from(settings: &CoreSettings) -> Self {
+        Self {
+            week_start: settings.week_start,
+        }
+    }
+}
+
 /// グローバルショートカットの既定値。
 ///
 /// 文字列の解釈はシェル(デスクトップアプリ)側の責務。コアは値を保持するだけで、
@@ -36,6 +62,12 @@ pub const DEFAULT_GLOBAL_SHORTCUT: &str = "Ctrl+Space";
 
 /// 内蔵 MCP サーバーの既定ポート。127.0.0.1 のみにバインドする。
 pub const DEFAULT_MCP_PORT: u16 = 39150;
+
+/// MCP サーバーに許すポートの下限(well-known ポートは避ける)。
+pub const MIN_MCP_PORT: u16 = 1024;
+
+/// AI CLI のタイムアウトに許す範囲(秒)。
+pub const AI_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
 
 /// AI CLI の既定プロバイダ ID。
 pub const DEFAULT_AI_PROVIDER_ID: &str = "claude";
@@ -199,6 +231,100 @@ impl CoreSettings {
     pub fn enabled_ai_providers(&self) -> impl Iterator<Item = &AiProvider> {
         self.ai_providers.iter().filter(|provider| provider.enabled)
     }
+
+    /// 保存前に値を検証する。
+    ///
+    /// UI・Tauri に依存しない規則だけを見る。ショートカット文字列が解釈できるか
+    /// (`Ctrl+Space` など)は OS/フレームワーク依存なのでシェル側で追加検証する。
+    ///
+    /// # Errors
+    /// 値が不正な場合。メッセージはそのまま UI に出せる日本語。
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        if self.backup_generations < 1 {
+            return Err(SettingsError::BackupGenerations);
+        }
+        if self.mcp_port < MIN_MCP_PORT {
+            return Err(SettingsError::McpPort);
+        }
+        if !AI_TIMEOUT_RANGE.contains(&self.ai_timeout_secs) {
+            return Err(SettingsError::AiTimeout);
+        }
+
+        let mut seen = HashSet::new();
+        for provider in &self.ai_providers {
+            let id = provider.id.trim();
+            if id.is_empty() {
+                return Err(SettingsError::EmptyProviderId);
+            }
+            if !seen.insert(id) {
+                return Err(SettingsError::DuplicateProviderId { id: id.to_owned() });
+            }
+            if provider.label.trim().is_empty() {
+                return Err(SettingsError::EmptyProviderLabel { id: id.to_owned() });
+            }
+            if provider.command.trim().is_empty() {
+                return Err(SettingsError::EmptyProviderCommand { id: id.to_owned() });
+            }
+        }
+
+        if self.ai_provider(None).is_none() {
+            return Err(SettingsError::DefaultProviderUnavailable {
+                id: self.ai_default_provider_id.clone(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// [`CoreSettings::validate`] が見つけた不正な設定値。
+///
+/// メッセージはそのまま設定画面に出せる日本語にしてある。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SettingsError {
+    /// バックアップ世代数が 1 未満。
+    #[error("バックアップ世代数は 1 以上にしてください。")]
+    BackupGenerations,
+
+    /// MCP ポートが範囲外。
+    #[error("MCP ポートは {MIN_MCP_PORT}〜65535 の範囲で指定してください。")]
+    McpPort,
+
+    /// AI のタイムアウトが範囲外。
+    #[error("AI のタイムアウトは {}〜{} 秒の範囲で指定してください。", AI_TIMEOUT_RANGE.start(), AI_TIMEOUT_RANGE.end())]
+    AiTimeout,
+
+    /// プロバイダの id が空。
+    #[error("AI プロバイダの id を入力してください。")]
+    EmptyProviderId,
+
+    /// プロバイダの id が重複している。
+    #[error("AI プロバイダの id \"{id}\" が重複しています。")]
+    DuplicateProviderId {
+        /// 重複した id。
+        id: String,
+    },
+
+    /// プロバイダの表示名が空。
+    #[error("AI プロバイダ \"{id}\" の表示名を入力してください。")]
+    EmptyProviderLabel {
+        /// 対象プロバイダの id。
+        id: String,
+    },
+
+    /// プロバイダの command が空。
+    #[error("AI プロバイダ \"{id}\" の command を入力してください。")]
+    EmptyProviderCommand {
+        /// 対象プロバイダの id。
+        id: String,
+    },
+
+    /// 既定プロバイダが存在しないか無効。
+    #[error("既定の AI プロバイダ \"{id}\" が存在しないか無効です。")]
+    DefaultProviderUnavailable {
+        /// 既定プロバイダとして指定されている id。
+        id: String,
+    },
 }
 
 #[cfg(test)]
@@ -300,5 +426,167 @@ mod tests {
     fn empty_object_yields_defaults() {
         let parsed: CoreSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, CoreSettings::default());
+    }
+
+    #[test]
+    fn board_settings_are_derived_from_core_settings() {
+        assert_eq!(BoardSettings::default().week_start, WeekStart::Monday);
+        let settings = CoreSettings {
+            week_start: WeekStart::Sunday,
+            ..CoreSettings::default()
+        };
+        assert_eq!(
+            BoardSettings::from(&settings),
+            BoardSettings {
+                week_start: WeekStart::Sunday
+            }
+        );
+    }
+
+    // ---- 検証 ----
+
+    #[test]
+    fn defaults_are_valid() {
+        assert_eq!(CoreSettings::default().validate(), Ok(()));
+    }
+
+    #[test]
+    fn numeric_ranges_are_checked() {
+        assert_eq!(
+            CoreSettings {
+                backup_generations: 0,
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::BackupGenerations)
+        );
+        assert_eq!(
+            CoreSettings {
+                mcp_port: 80,
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::McpPort)
+        );
+        assert!(CoreSettings {
+            mcp_port: MIN_MCP_PORT,
+            ..CoreSettings::default()
+        }
+        .validate()
+        .is_ok());
+        assert_eq!(
+            CoreSettings {
+                ai_timeout_secs: 9,
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::AiTimeout)
+        );
+        assert_eq!(
+            CoreSettings {
+                ai_timeout_secs: 3601,
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::AiTimeout)
+        );
+    }
+
+    #[test]
+    fn providers_need_unique_ids_and_a_usable_default() {
+        let provider = |id: &str| AiProvider {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            command: id.to_owned(),
+            args: vec!["{prompt}".to_owned()],
+            enabled: true,
+            ..AiProvider::default()
+        };
+
+        assert!(matches!(
+            CoreSettings {
+                ai_providers: vec![provider("a"), provider("a")],
+                ai_default_provider_id: "a".to_owned(),
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::DuplicateProviderId { .. })
+        ));
+
+        assert!(matches!(
+            CoreSettings {
+                ai_providers: vec![AiProvider {
+                    id: "  ".to_owned(),
+                    ..provider("a")
+                }],
+                ai_default_provider_id: "a".to_owned(),
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::EmptyProviderId)
+        ));
+
+        assert!(matches!(
+            CoreSettings {
+                ai_providers: vec![AiProvider {
+                    label: String::new(),
+                    ..provider("a")
+                }],
+                ai_default_provider_id: "a".to_owned(),
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::EmptyProviderLabel { .. })
+        ));
+
+        assert!(matches!(
+            CoreSettings {
+                ai_providers: vec![AiProvider {
+                    command: String::new(),
+                    ..provider("a")
+                }],
+                ai_default_provider_id: "a".to_owned(),
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::EmptyProviderCommand { .. })
+        ));
+
+        // 既定プロバイダが無効なら保存させない。
+        assert!(matches!(
+            CoreSettings {
+                ai_providers: vec![AiProvider {
+                    enabled: false,
+                    ..provider("a")
+                }],
+                ai_default_provider_id: "a".to_owned(),
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Err(SettingsError::DefaultProviderUnavailable { .. })
+        ));
+
+        assert_eq!(
+            CoreSettings {
+                ai_providers: vec![provider("a"), provider("b")],
+                ai_default_provider_id: "b".to_owned(),
+                ..CoreSettings::default()
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn error_messages_name_the_offending_value() {
+        let error = CoreSettings {
+            ai_default_provider_id: "missing".to_owned(),
+            ..CoreSettings::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(error.to_string().contains("missing"), "{error}");
+        assert!(SettingsError::McpPort.to_string().contains("1024"));
+        assert!(SettingsError::AiTimeout.to_string().contains("3600"));
     }
 }

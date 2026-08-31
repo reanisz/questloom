@@ -109,18 +109,11 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, settings: &CoreSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use questloom_core::clock::SystemClock;
-    use questloom_core::repository::TaskRepository;
-    use questloom_store::SqliteStore;
+    use crate::state::test_support;
+    use questloom_core::settings::BoardSettings;
 
     fn supervisor() -> McpSupervisor {
-        let store = Arc::new(SqliteStore::open_in_memory().expect("インメモリ DB"));
-        let repository: Arc<dyn TaskRepository> = store as Arc<dyn TaskRepository>;
-        McpSupervisor::new(Arc::new(TaskService::new(
-            repository,
-            Arc::new(SystemClock),
-            CoreSettings::default(),
-        )))
+        McpSupervisor::new(test_support::service(BoardSettings::default()))
     }
 
     /// ポート 0 を使い、実ポートを占有せずに起動・再起動・停止の流れを確認する。

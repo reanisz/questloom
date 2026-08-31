@@ -1,12 +1,12 @@
 //! アプリ状態の初期化。DB を開き、マイグレーション・起動時バックアップを実行する。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use questloom_core::clock::SystemClock;
 use questloom_core::repository::TaskRepository;
 use questloom_core::service::TaskService;
-use questloom_core::settings::{CoreSettings, CORE_NAMESPACE};
+use questloom_core::settings::{BoardSettings, CoreSettings, CORE_NAMESPACE};
 use questloom_store::{backup, SqliteStore, StoreError};
 
 /// DB ファイル名。
@@ -34,6 +34,8 @@ pub enum SetupError {
 /// Tauri の State として保持するアプリ状態。
 ///
 /// [`TaskService`] は内部で排他制御を行うため、ここでは共有参照のみを持つ。
+/// コア設定の「いま有効な値」を持つのもここ(サービスはボード表示に要る分だけ
+/// を受け取る)。
 pub struct AppState {
     /// タスク操作のサービス層。
     pub service: Arc<TaskService>,
@@ -41,6 +43,8 @@ pub struct AppState {
     pub store: Arc<SqliteStore>,
     /// `%APPDATA%\questloom` 相当のデータディレクトリ。
     pub data_dir: PathBuf,
+    /// 現在のコア設定。[`save_settings`](Self::save_settings) で差し替える。
+    settings: RwLock<CoreSettings>,
 }
 
 impl AppState {
@@ -80,24 +84,62 @@ impl AppState {
         let service = Arc::new(TaskService::new(
             repository,
             Arc::new(SystemClock),
-            settings,
+            BoardSettings::from(&settings),
         ));
 
         Ok(Self {
             service,
             store,
             data_dir: data_dir.to_path_buf(),
+            settings: RwLock::new(settings),
         })
     }
 
-    /// コア設定を永続化し、サービスへ反映する。
+    /// 現在のコア設定を返す。
+    #[must_use]
+    pub fn settings(&self) -> CoreSettings {
+        self.settings
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// コア設定を永続化し、サービスとデスクトップ側へ反映する。
+    ///
+    /// 反映の順序は「保存 → 保持している値の差し替え → 通知」。
+    /// [`DomainEvent::SettingsChanged`](questloom_core::events::DomainEvent::SettingsChanged)
+    /// を受け取った watcher が新しい値を読めるようにするため、通知は最後に行う。
     ///
     /// # Errors
     /// 設定の保存に失敗した場合。
     pub fn save_settings(&self, settings: CoreSettings) -> Result<(), StoreError> {
         self.store.set_settings(CORE_NAMESPACE, &settings)?;
-        self.service.set_settings(settings);
+        self.service
+            .set_board_settings(BoardSettings::from(&settings));
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = settings;
+        self.service.notify_settings_changed();
         Ok(())
+    }
+}
+
+/// テスト用の組み立てヘルパ。
+///
+/// インメモリ DB に載せたサービスは複数のモジュールのテストで要るため、
+/// ここにまとめる。
+#[cfg(test)]
+pub mod test_support {
+    use super::{Arc, SystemClock, TaskRepository, TaskService};
+    use questloom_core::settings::BoardSettings;
+    use questloom_store::SqliteStore;
+
+    /// インメモリ SQLite に載せたサービスを作る。
+    pub fn service(board: BoardSettings) -> Arc<TaskService> {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("インメモリ DB"));
+        let repository: Arc<dyn TaskRepository> = store as Arc<dyn TaskRepository>;
+        Arc::new(TaskService::new(repository, Arc::new(SystemClock), board))
     }
 }
 
@@ -134,7 +176,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::initialize(dir.path()).unwrap();
-        assert_eq!(state.service.settings().week_start, WeekStart::Monday);
+        assert_eq!(state.settings().week_start, WeekStart::Monday);
+        assert_eq!(state.service.week_start(), WeekStart::Monday);
 
         state
             .save_settings(CoreSettings {
@@ -144,15 +187,38 @@ mod tests {
                 ..CoreSettings::default()
             })
             .unwrap();
-        assert_eq!(state.service.settings().week_start, WeekStart::Sunday);
+        assert_eq!(state.settings().week_start, WeekStart::Sunday);
+        // ボード表示に関わる分はサービスにも渡る。
+        assert_eq!(state.service.week_start(), WeekStart::Sunday);
 
         // 再起動しても保持される。
         drop(state);
         let state = AppState::initialize(dir.path()).unwrap();
-        assert_eq!(state.service.settings().week_start, WeekStart::Sunday);
-        assert_eq!(state.service.settings().backup_generations, 3);
-        assert!(!state.service.settings().overlay_enabled);
+        assert_eq!(state.settings().week_start, WeekStart::Sunday);
+        assert_eq!(state.service.week_start(), WeekStart::Sunday);
+        assert_eq!(state.settings().backup_generations, 3);
+        assert!(!state.settings().overlay_enabled);
         // 保存していない項目は既定値のまま残る。
-        assert_eq!(state.service.settings().global_shortcut, "Ctrl+Space");
+        assert_eq!(state.settings().global_shortcut, "Ctrl+Space");
+    }
+
+    #[tokio::test]
+    async fn saving_settings_notifies_subscribers_after_the_new_value_is_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::initialize(dir.path()).unwrap();
+        let mut events = state.service.subscribe();
+
+        state
+            .save_settings(CoreSettings {
+                overlay_enabled: false,
+                ..CoreSettings::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            events.recv().await.unwrap(),
+            questloom_core::events::DomainEvent::SettingsChanged
+        );
+        assert!(!state.settings().overlay_enabled);
     }
 }

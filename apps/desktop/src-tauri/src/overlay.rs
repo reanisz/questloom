@@ -29,13 +29,13 @@ pub fn sync<R: Runtime>(app: &AppHandle<R>) {
         // 初期化前に呼ばれた場合は何もしない。
         return;
     };
-    let visible = should_show(&state.service);
+    let visible = should_show(&state.service, state.settings().overlay_enabled);
     apply(app, visible);
 }
 
 /// オーバーレイを表示すべきか(オーバーレイ有効 かつ New タスクが 1 件以上)。
-fn should_show(service: &TaskService) -> bool {
-    if !service.settings().overlay_enabled {
+fn should_show(service: &TaskService, overlay_enabled: bool) -> bool {
+    if !overlay_enabled {
         return false;
     }
     match service.list_by_status(TaskStatus::New) {
@@ -110,22 +110,14 @@ pub fn spawn_watcher<R: Runtime>(app: AppHandle<R>, service: &Arc<TaskService>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use questloom_core::clock::SystemClock;
-    use questloom_core::repository::TaskRepository;
+    use crate::state::test_support;
     use questloom_core::service::NewTask;
-    use questloom_core::settings::CoreSettings;
-    use questloom_store::SqliteStore;
-
-    fn service(settings: CoreSettings) -> TaskService {
-        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let repo: Arc<dyn TaskRepository> = store as Arc<dyn TaskRepository>;
-        TaskService::new(repo, Arc::new(SystemClock), settings)
-    }
+    use questloom_core::settings::BoardSettings;
 
     #[test]
     fn hidden_without_new_tasks() {
-        let service = service(CoreSettings::default());
-        assert!(!should_show(&service));
+        let service = test_support::service(BoardSettings::default());
+        assert!(!should_show(&service, true));
 
         service
             .create_task(NewTask {
@@ -133,21 +125,18 @@ mod tests {
                 ..NewTask::default()
             })
             .unwrap();
-        assert!(should_show(&service));
+        assert!(should_show(&service, true));
     }
 
     #[test]
     fn hidden_when_overlay_is_disabled() {
-        let service = service(CoreSettings {
-            overlay_enabled: false,
-            ..CoreSettings::default()
-        });
+        let service = test_support::service(BoardSettings::default());
         service
             .create_task(NewTask {
                 title: "新着".to_owned(),
                 ..NewTask::default()
             })
             .unwrap();
-        assert!(!should_show(&service));
+        assert!(!should_show(&service, false));
     }
 }

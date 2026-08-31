@@ -62,10 +62,10 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let state = AppState::initialize(&data_dir)?;
             let service = Arc::clone(&state.service);
-            let settings = service.settings();
+            let settings = state.settings();
             app.manage(state);
             app.manage(Arc::new(mcp::McpSupervisor::new(Arc::clone(&service))));
-            app.manage(Arc::new(ai::AiRunner::new()));
+            app.manage(Arc::new(questloom_ai::AiRunner::new()));
             // TS プラグインのライフサイクルは plugin-host webview 上の JS が持つ。
             // Rust 側はそのロード結果を受け取るレジストリだけを用意する。
             app.manage(plugin_host::PluginRegistry::new());

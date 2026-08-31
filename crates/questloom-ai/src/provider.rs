@@ -11,8 +11,9 @@
 
 use std::time::Duration;
 
-use questloom_core::settings::AiProvider;
+use questloom_core::settings::{AiProvider, CoreSettings};
 
+use crate::error::{AiError, AiResult};
 use crate::exec::{AiRequest, PromptDelivery};
 
 /// 内蔵 MCP サーバーの接続情報。
@@ -43,6 +44,25 @@ pub struct PreparedRun {
     pub request: AiRequest,
     /// MCP 接続用の引数を付けられたか。
     pub mcp_attached: bool,
+}
+
+/// 設定から使用するプロバイダを決める。`id` が `None` なら既定プロバイダ。
+///
+/// 無効化されたプロバイダは「無い」ものとして扱う。
+///
+/// # Errors
+/// 該当するプロバイダが無いか無効な場合 [`AiError::UnknownProvider`]。
+pub fn resolve(settings: &CoreSettings, id: Option<&str>) -> AiResult<AiProvider> {
+    settings
+        .ai_provider(id)
+        .cloned()
+        .ok_or_else(|| AiError::UnknownProvider {
+            id: id.unwrap_or(&settings.ai_default_provider_id).to_owned(),
+            available: settings
+                .enabled_ai_providers()
+                .map(|provider| provider.id.clone())
+                .collect(),
+        })
 }
 
 /// プロバイダ定義とプロンプトから実行リクエストを組み立てる。
@@ -171,6 +191,35 @@ mod tests {
         timeout: Duration,
     ) -> PreparedRun {
         prepare_with(provider, prompt, mcp, timeout, PromptDelivery::Argument)
+    }
+
+    #[test]
+    fn resolves_providers_and_explains_failures() {
+        let settings = CoreSettings::default();
+        assert_eq!(resolve(&settings, None).unwrap().id, "claude");
+        assert_eq!(resolve(&settings, Some("codex")).unwrap().id, "codex");
+
+        // 既定で無効の antigravity は選べない。
+        let error = resolve(&settings, Some("antigravity")).unwrap_err();
+        assert!(matches!(error, AiError::UnknownProvider { .. }));
+        let message = error.to_string();
+        assert!(message.contains("antigravity"), "{message}");
+        assert!(message.contains("claude / codex"), "{message}");
+
+        let settings = CoreSettings {
+            ai_providers: default_ai_providers()
+                .into_iter()
+                .map(|provider| AiProvider {
+                    enabled: false,
+                    ..provider
+                })
+                .collect(),
+            ..CoreSettings::default()
+        };
+        // 既定プロバイダも無効なら、要求された id と「なし」を伝える。
+        let message = resolve(&settings, None).unwrap_err().to_string();
+        assert!(message.contains("claude"), "{message}");
+        assert!(message.contains("なし"), "{message}");
     }
 
     #[test]

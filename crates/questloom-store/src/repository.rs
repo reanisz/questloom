@@ -2,14 +2,44 @@
 
 use questloom_core::model::{ResourceId, Task, TaskId, TaskResource, TaskStatus, TaskUpdateEntry};
 use questloom_core::repository::{RepoResult, TaskRepository};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params_from_iter, Connection, OptionalExtension, Row, Transaction};
 
 use crate::error::StoreResult;
 use crate::mapping::{
-    resource_from_row, task_from_row, time_to_sql, update_from_row, RESOURCE_COLUMNS, TASK_COLUMNS,
-    UPDATE_COLUMNS,
+    resource_from_row, resource_params, task_from_row, task_params, update_from_row, update_params,
+    RESOURCE_COLUMNS, TASK_COLUMNS, UPDATE_COLUMNS,
 };
 use crate::SqliteStore;
+
+const INSERT_TASK: &str =
+    "INSERT INTO tasks (id, title, description, status, scheduled_kind, scheduled_value,
+         deadline, is_instant, origin, parent_id, sort_order, created_at, updated_at, done_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+
+const UPDATE_TASK: &str =
+    "UPDATE tasks SET title = ?2, description = ?3, status = ?4, scheduled_kind = ?5,
+         scheduled_value = ?6, deadline = ?7, is_instant = ?8, origin = ?9, parent_id = ?10,
+         sort_order = ?11, created_at = ?12, updated_at = ?13, done_at = ?14
+     WHERE id = ?1";
+
+const INSERT_RESOURCE: &str =
+    "INSERT INTO task_resources (id, task_id, kind, value, label, is_primary, sort_order, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+const INSERT_UPDATE: &str = "INSERT INTO task_updates (id, task_id, body, origin, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5)";
+
+/// 指定タスクの主リソースをすべて解除する。
+const CLEAR_PRIMARY: &str =
+    "UPDATE task_resources SET is_primary = 0 WHERE task_id = ?1 AND is_primary <> 0";
+
+/// ストア層の処理を実行し、エラーをリポジトリ層のエラーへ移す。
+///
+/// `TaskRepository` の各メソッドはこれで包むだけで、実装本体は trait impl に直接書く
+/// (別名のメソッドを作って委譲する二重定義を避けるため)。
+fn repo<T>(body: impl FnOnce() -> StoreResult<T>) -> RepoResult<T> {
+    body().map_err(Into::into)
+}
 
 fn query_all<T>(
     conn: &Connection,
@@ -27,240 +57,232 @@ fn query_all<T>(
 }
 
 impl SqliteStore {
-    fn insert_task_inner(&self, task: &Task) -> StoreResult<()> {
-        let (kind, value) = task.scheduled.to_columns();
+    /// 1 つのトランザクションで書き込みを行い、成功したらコミットする。
+    fn write<T>(
+        &self,
+        body: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>,
+    ) -> StoreResult<T> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO tasks (id, title, description, status, scheduled_kind, scheduled_value,
-                 deadline, is_instant, origin, parent_id, sort_order, created_at, updated_at, done_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                task.id.to_string(),
-                task.title,
-                task.description,
-                task.status.as_str(),
-                kind,
-                value,
-                task.deadline.map(time_to_sql),
-                i64::from(task.is_instant),
-                task.origin.to_string(),
-                task.parent_id.map(|id| id.to_string()),
-                task.sort_order,
-                time_to_sql(task.created_at),
-                time_to_sql(task.updated_at),
-                task.done_at.map(time_to_sql),
-            ],
-        )?;
+        let value = body(&tx)?;
         tx.commit()?;
-        Ok(())
-    }
-
-    fn update_task_inner(&self, task: &Task) -> StoreResult<bool> {
-        let (kind, value) = task.scheduled.to_columns();
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let affected = tx.execute(
-            "UPDATE tasks SET title = ?2, description = ?3, status = ?4, scheduled_kind = ?5,
-                 scheduled_value = ?6, deadline = ?7, is_instant = ?8, origin = ?9, parent_id = ?10,
-                 sort_order = ?11, created_at = ?12, updated_at = ?13, done_at = ?14
-             WHERE id = ?1",
-            params![
-                task.id.to_string(),
-                task.title,
-                task.description,
-                task.status.as_str(),
-                kind,
-                value,
-                task.deadline.map(time_to_sql),
-                i64::from(task.is_instant),
-                task.origin.to_string(),
-                task.parent_id.map(|id| id.to_string()),
-                task.sort_order,
-                time_to_sql(task.created_at),
-                time_to_sql(task.updated_at),
-                task.done_at.map(time_to_sql),
-            ],
-        )?;
-        tx.commit()?;
-        Ok(affected > 0)
-    }
-
-    fn find_task_inner(&self, id: TaskId) -> StoreResult<Option<Task>> {
-        let conn = self.conn();
-        let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1");
-        let task = conn
-            .query_row(&sql, [id.to_string()], task_from_row)
-            .optional()?;
-        Ok(task)
-    }
-
-    fn list_tasks_inner(&self) -> StoreResult<Vec<Task>> {
-        let conn = self.conn();
-        let sql = format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY sort_order, created_at");
-        query_all(&conn, &sql, [], task_from_row)
-    }
-
-    fn list_tasks_by_status_inner(&self, status: TaskStatus) -> StoreResult<Vec<Task>> {
-        let conn = self.conn();
-        let sql = format!(
-            "SELECT {TASK_COLUMNS} FROM tasks WHERE status = ?1 ORDER BY sort_order, created_at"
-        );
-        query_all(&conn, &sql, [status.as_str()], task_from_row)
-    }
-
-    fn list_children_inner(&self, parent_id: TaskId) -> StoreResult<Vec<Task>> {
-        let conn = self.conn();
-        let sql = format!(
-            "SELECT {TASK_COLUMNS} FROM tasks WHERE parent_id = ?1 ORDER BY sort_order, created_at"
-        );
-        query_all(&conn, &sql, [parent_id.to_string()], task_from_row)
-    }
-
-    fn insert_resource_inner(&self, resource: &TaskResource) -> StoreResult<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO task_resources (id, task_id, kind, value, label, is_primary, sort_order, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                resource.id.to_string(),
-                resource.task_id.to_string(),
-                resource.kind.as_str(),
-                resource.value,
-                resource.label,
-                i64::from(resource.is_primary),
-                resource.sort_order,
-                time_to_sql(resource.created_at),
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn update_resource_inner(&self, resource: &TaskResource) -> StoreResult<bool> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let affected = tx.execute(
-            "UPDATE task_resources SET task_id = ?2, kind = ?3, value = ?4, label = ?5,
-                 is_primary = ?6, sort_order = ?7, created_at = ?8
-             WHERE id = ?1",
-            params![
-                resource.id.to_string(),
-                resource.task_id.to_string(),
-                resource.kind.as_str(),
-                resource.value,
-                resource.label,
-                i64::from(resource.is_primary),
-                resource.sort_order,
-                time_to_sql(resource.created_at),
-            ],
-        )?;
-        tx.commit()?;
-        Ok(affected > 0)
-    }
-
-    fn delete_resource_inner(&self, id: ResourceId) -> StoreResult<bool> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let affected = tx.execute("DELETE FROM task_resources WHERE id = ?1", [id.to_string()])?;
-        tx.commit()?;
-        Ok(affected > 0)
-    }
-
-    fn list_resources_inner(&self, task_id: TaskId) -> StoreResult<Vec<TaskResource>> {
-        let conn = self.conn();
-        let sql = format!(
-            "SELECT {RESOURCE_COLUMNS} FROM task_resources WHERE task_id = ?1 ORDER BY sort_order, created_at"
-        );
-        query_all(&conn, &sql, [task_id.to_string()], resource_from_row)
-    }
-
-    fn list_all_resources_inner(&self) -> StoreResult<Vec<TaskResource>> {
-        let conn = self.conn();
-        let sql = format!(
-            "SELECT {RESOURCE_COLUMNS} FROM task_resources ORDER BY task_id, sort_order, created_at"
-        );
-        query_all(&conn, &sql, [], resource_from_row)
-    }
-
-    fn insert_update_inner(&self, entry: &TaskUpdateEntry) -> StoreResult<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO task_updates (id, task_id, body, origin, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                entry.id.to_string(),
-                entry.task_id.to_string(),
-                entry.body,
-                entry.origin.to_string(),
-                time_to_sql(entry.created_at),
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn list_updates_inner(&self, task_id: TaskId) -> StoreResult<Vec<TaskUpdateEntry>> {
-        let conn = self.conn();
-        let sql = format!(
-            "SELECT {UPDATE_COLUMNS} FROM task_updates WHERE task_id = ?1 ORDER BY created_at, id"
-        );
-        query_all(&conn, &sql, [task_id.to_string()], update_from_row)
+        Ok(value)
     }
 }
 
 impl TaskRepository for SqliteStore {
-    fn insert_task(&self, task: &Task) -> RepoResult<()> {
-        self.insert_task_inner(task).map_err(Into::into)
+    fn insert_task_with_resources(
+        &self,
+        task: &Task,
+        resources: &[TaskResource],
+    ) -> RepoResult<()> {
+        repo(|| {
+            self.write(|tx| {
+                tx.execute(INSERT_TASK, params_from_iter(task_params(task)))?;
+                for resource in resources {
+                    tx.execute(INSERT_RESOURCE, params_from_iter(resource_params(resource)))?;
+                }
+                Ok(())
+            })
+        })
     }
 
     fn update_task(&self, task: &Task) -> RepoResult<bool> {
-        self.update_task_inner(task).map_err(Into::into)
+        repo(|| {
+            self.write(|tx| tx.execute(UPDATE_TASK, params_from_iter(task_params(task))))
+                .map(|affected| affected > 0)
+        })
     }
 
     fn find_task(&self, id: TaskId) -> RepoResult<Option<Task>> {
-        self.find_task_inner(id).map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1");
+            conn.query_row(&sql, [id.to_string()], task_from_row)
+                .optional()
+                .map_err(Into::into)
+        })
     }
 
     fn list_tasks(&self) -> RepoResult<Vec<Task>> {
-        self.list_tasks_inner().map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY sort_order, created_at");
+            query_all(&conn, &sql, [], task_from_row)
+        })
     }
 
     fn list_tasks_by_status(&self, status: TaskStatus) -> RepoResult<Vec<Task>> {
-        self.list_tasks_by_status_inner(status).map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE status = ?1 ORDER BY sort_order, created_at"
+            );
+            query_all(&conn, &sql, [status.as_str()], task_from_row)
+        })
     }
 
     fn list_children(&self, parent_id: TaskId) -> RepoResult<Vec<Task>> {
-        self.list_children_inner(parent_id).map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE parent_id = ?1 ORDER BY sort_order, created_at"
+            );
+            query_all(&conn, &sql, [parent_id.to_string()], task_from_row)
+        })
     }
 
-    fn insert_resource(&self, resource: &TaskResource) -> RepoResult<()> {
-        self.insert_resource_inner(resource).map_err(Into::into)
-    }
-
-    fn update_resource(&self, resource: &TaskResource) -> RepoResult<bool> {
-        self.update_resource_inner(resource).map_err(Into::into)
+    fn replace_primary_and_insert(&self, resource: &TaskResource) -> RepoResult<()> {
+        repo(|| {
+            self.write(|tx| {
+                if resource.is_primary {
+                    // 主リソースは 1 タスクに 1 つ。挿入と同じトランザクションで解除する。
+                    tx.execute(CLEAR_PRIMARY, [resource.task_id.to_string()])?;
+                }
+                tx.execute(INSERT_RESOURCE, params_from_iter(resource_params(resource)))?;
+                Ok(())
+            })
+        })
     }
 
     fn delete_resource(&self, id: ResourceId) -> RepoResult<bool> {
-        self.delete_resource_inner(id).map_err(Into::into)
+        repo(|| {
+            self.write(|tx| {
+                tx.execute("DELETE FROM task_resources WHERE id = ?1", [id.to_string()])
+            })
+            .map(|affected| affected > 0)
+        })
     }
 
     fn list_resources(&self, task_id: TaskId) -> RepoResult<Vec<TaskResource>> {
-        self.list_resources_inner(task_id).map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {RESOURCE_COLUMNS} FROM task_resources WHERE task_id = ?1 ORDER BY sort_order, created_at"
+            );
+            query_all(&conn, &sql, [task_id.to_string()], resource_from_row)
+        })
     }
 
     fn list_all_resources(&self) -> RepoResult<Vec<TaskResource>> {
-        self.list_all_resources_inner().map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {RESOURCE_COLUMNS} FROM task_resources ORDER BY task_id, sort_order, created_at"
+            );
+            query_all(&conn, &sql, [], resource_from_row)
+        })
     }
 
     fn insert_update(&self, entry: &TaskUpdateEntry) -> RepoResult<()> {
-        self.insert_update_inner(entry).map_err(Into::into)
+        repo(|| {
+            self.write(|tx| {
+                tx.execute(INSERT_UPDATE, params_from_iter(update_params(entry)))?;
+                Ok(())
+            })
+        })
     }
 
     fn list_updates(&self, task_id: TaskId) -> RepoResult<Vec<TaskUpdateEntry>> {
-        self.list_updates_inner(task_id).map_err(Into::into)
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {UPDATE_COLUMNS} FROM task_updates WHERE task_id = ?1 ORDER BY created_at, id"
+            );
+            query_all(&conn, &sql, [task_id.to_string()], update_from_row)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use questloom_core::model::{Origin, ResourceKind, Scheduled};
+    use questloom_core::sort_order::FIRST_KEY;
+
+    fn task() -> Task {
+        let now = chrono::Utc::now();
+        Task {
+            id: TaskId::new(),
+            title: "原子性".to_owned(),
+            description: String::new(),
+            status: TaskStatus::New,
+            scheduled: Scheduled::None,
+            deadline: None,
+            is_instant: false,
+            origin: Origin::User,
+            parent_id: None,
+            sort_order: FIRST_KEY.to_owned(),
+            created_at: now,
+            updated_at: now,
+            done_at: None,
+        }
+    }
+
+    fn resource(task_id: TaskId, value: &str, is_primary: bool) -> TaskResource {
+        TaskResource {
+            id: ResourceId::new(),
+            task_id,
+            kind: ResourceKind::Url,
+            value: value.to_owned(),
+            label: String::new(),
+            is_primary,
+            sort_order: FIRST_KEY.to_owned(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_failed_resource_insert_rolls_back_the_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = task();
+        let duplicate = resource(task.id, "https://example.com", true);
+
+        // 同じ ID のリソースを 2 件渡すと主キー違反で失敗する。
+        let error = store
+            .insert_task_with_resources(&task, &[duplicate.clone(), duplicate])
+            .expect_err("主キー違反になる");
+        assert!(error.to_string().contains("SQLite"), "{error}");
+
+        // タスクごと巻き戻り、中途半端な行は残らない。
+        assert_eq!(store.find_task(task.id).unwrap(), None);
+        assert!(store.list_all_resources().unwrap().is_empty());
+    }
+
+    #[test]
+    fn inserting_a_primary_resource_demotes_the_previous_one() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = task();
+        let first = resource(task.id, "https://example.com/a", true);
+        store
+            .insert_task_with_resources(&task, std::slice::from_ref(&first))
+            .unwrap();
+
+        store
+            .replace_primary_and_insert(&resource(task.id, "https://example.com/b", true))
+            .unwrap();
+
+        let resources = store.list_resources(task.id).unwrap();
+        assert_eq!(resources.len(), 2);
+        let primaries: Vec<&str> = resources
+            .iter()
+            .filter(|r| r.is_primary)
+            .map(|r| r.value.as_str())
+            .collect();
+        assert_eq!(primaries, ["https://example.com/b"]);
+
+        // 主リソースでない挿入は既存を解除しない。
+        store
+            .replace_primary_and_insert(&resource(task.id, "https://example.com/c", false))
+            .unwrap();
+        assert_eq!(
+            store
+                .list_resources(task.id)
+                .unwrap()
+                .iter()
+                .filter(|r| r.is_primary)
+                .count(),
+            1
+        );
     }
 }

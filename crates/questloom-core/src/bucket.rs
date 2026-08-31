@@ -7,7 +7,7 @@
 use chrono::{Datelike, Days, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Scheduled, TaskStatus, WeekKey};
+use crate::model::{Scheduled, Task, TaskStatus, WeekKey};
 use crate::settings::WeekStart;
 
 /// Todo タスクの表示バケット。
@@ -49,6 +49,26 @@ pub enum BoardColumn {
 }
 
 impl BoardColumn {
+    /// 状態と導出バケットから、ボード上の列を逆算する。
+    ///
+    /// [`bucket`](Self::bucket) の逆向き。`Todo` なのにバケットが無い
+    /// (= 導出前)場合は Future 列として扱う。
+    #[must_use]
+    pub const fn of(status: TaskStatus, bucket: Option<Bucket>) -> Self {
+        match status {
+            TaskStatus::New => Self::New,
+            TaskStatus::Doing => Self::Doing,
+            TaskStatus::Done => Self::Done,
+            TaskStatus::Todo => match bucket {
+                Some(Bucket::Today) => Self::Today,
+                Some(Bucket::Tomorrow) => Self::Tomorrow,
+                Some(Bucket::ThisWeek) => Self::ThisWeek,
+                Some(Bucket::NextWeek) => Self::NextWeek,
+                Some(Bucket::Future) | None => Self::Future,
+            },
+        }
+    }
+
     /// 対応する時間バケット。Todo 列以外は `None`。
     #[must_use]
     pub const fn bucket(self) -> Option<Bucket> {
@@ -154,6 +174,12 @@ pub fn derive_bucket(scheduled: &Scheduled, today: NaiveDate, week_start: WeekSt
             }
         }
     }
+}
+
+/// タスクの表示バケット。`Todo` 以外の状態はバケットを持たない。
+#[must_use]
+pub fn bucket_for(task: &Task, today: NaiveDate, week_start: WeekStart) -> Option<Bucket> {
+    (task.status == TaskStatus::Todo).then(|| derive_bucket(&task.scheduled, today, week_start))
 }
 
 /// 列 → 予定のマッピング(ドラッグ&ドロップ時に使う)。
@@ -636,5 +662,30 @@ mod tests {
             BoardColumn::Done.resolve(current, today, ws),
             (TaskStatus::Done, current)
         );
+    }
+
+    #[test]
+    fn board_column_of_inverts_bucket() {
+        // Todo 列はバケットと 1 対 1 で対応する。
+        for column in [
+            BoardColumn::Today,
+            BoardColumn::Tomorrow,
+            BoardColumn::ThisWeek,
+            BoardColumn::NextWeek,
+            BoardColumn::Future,
+        ] {
+            assert_eq!(BoardColumn::of(TaskStatus::Todo, column.bucket()), column);
+        }
+        // Todo 以外はバケットを持たない。
+        for (status, column) in [
+            (TaskStatus::New, BoardColumn::New),
+            (TaskStatus::Doing, BoardColumn::Doing),
+            (TaskStatus::Done, BoardColumn::Done),
+        ] {
+            assert_eq!(BoardColumn::of(status, None), column);
+            assert_eq!(column.bucket(), None);
+        }
+        // バケット未導出の Todo は Future 扱い。
+        assert_eq!(BoardColumn::of(TaskStatus::Todo, None), BoardColumn::Future);
     }
 }

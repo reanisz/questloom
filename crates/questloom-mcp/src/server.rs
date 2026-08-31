@@ -179,3 +179,42 @@ async fn require_bearer(
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(token: Option<&str>) -> McpServerConfig {
+        McpServerConfig {
+            port: 0,
+            token: token.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn blank_tokens_mean_no_authentication() {
+        assert_eq!(McpServerConfig::default().port, DEFAULT_MCP_PORT);
+        assert_eq!(config(None).effective_token(), None);
+        assert_eq!(config(Some("")).effective_token(), None);
+        assert_eq!(config(Some("   ")).effective_token(), None);
+        assert_eq!(config(Some("\t\n ")).effective_token(), None);
+    }
+
+    #[test]
+    fn tokens_are_trimmed_before_use() {
+        assert_eq!(
+            config(Some("s3cret")).effective_token(),
+            Some("s3cret".to_owned())
+        );
+        // 設定画面での貼り付けミス(前後の空白)は落として扱う。
+        assert_eq!(
+            config(Some("  s3cret\n")).effective_token(),
+            Some("s3cret".to_owned())
+        );
+        // 内部の空白は残す。
+        assert_eq!(
+            config(Some(" a b ")).effective_token(),
+            Some("a b".to_owned())
+        );
+    }
+}

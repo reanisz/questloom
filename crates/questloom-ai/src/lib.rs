@@ -4,9 +4,12 @@
 //! タスクの永続化には依存せず、[`questloom_core`] のモデルと設定だけを参照する。
 //!
 //! - [`exec`] — プロセス起動、タイムアウト、キャンセル、Windows のシム(`.cmd`)対応
-//! - [`provider`] — プロバイダ定義から実行引数を組み立てる(MCP 接続引数を含む)
+//! - [`provider`] — プロバイダ定義の解決と、実行引数の組み立て(MCP 接続引数を含む)
 //! - [`prompt`] — 3 機能のプロンプト設計と応答 JSON の解釈
 //! - [`json`] — 説明文やコードフェンスに埋もれた JSON を取り出すヘルパ
+//! - [`runner`] — 同時実行を 1 件に制限するランナーとキャンセル
+//! - [`service`] — 上記を束ね、結果を [`TaskService`](questloom_core::service::TaskService)
+//!   へ反映する [`AiService`]
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), questloom_ai::AiError> {
@@ -30,6 +33,8 @@ pub mod exec;
 pub mod json;
 pub mod prompt;
 pub mod provider;
+pub mod runner;
+pub mod service;
 
 pub use error::{AiError, AiResult};
 pub use exec::{run, AiOutput, AiRequest, PromptDelivery};
@@ -37,4 +42,9 @@ pub use json::{extract_first_json, parse_first_json};
 pub use prompt::{
     create_tasks_prompt, free_instruction_prompt, parse_task_drafts, split_task_prompt, TaskDraft,
 };
-pub use provider::{prepare, prepare_with, McpEndpoint, PreparedRun};
+pub use provider::{prepare, prepare_with, resolve, McpEndpoint, PreparedRun};
+pub use runner::{AiFeature, AiRunner, JobGuard};
+pub use service::{
+    create_from_drafts, ignore_progress, AiCreateResult, AiProgress, AiService, AiTaskSummary,
+    AiTextResult, ProgressSink,
+};

@@ -128,7 +128,7 @@ pub fn set_parent(
 /// コア設定を返す。
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CommandResult<CoreSettings> {
-    Ok(state.service.settings())
+    Ok(state.settings())
 }
 
 /// 出荷時のコア設定を返す。設定画面の「既定値に戻す」で使う。
@@ -173,7 +173,7 @@ pub async fn get_runtime_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<RuntimeStatus> {
-    let shortcut_spec = state.service.settings().global_shortcut;
+    let shortcut_spec = state.settings().global_shortcut;
     // State の借用を await をまたいで持ち越さないよう、Arc を取り出しておく。
     let supervisor = app
         .try_state::<Arc<McpSupervisor>>()
