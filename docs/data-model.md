@@ -60,7 +60,8 @@ CREATE TABLE tasks (
     sort_order      TEXT NOT NULL,             -- 同一リスト内の並び順(辞書順の fractional key)
     created_at      TEXT NOT NULL,             -- RFC3339 (UTC)
     updated_at      TEXT NOT NULL,
-    done_at         TEXT
+    done_at         TEXT,
+    deleted_at      TEXT                       -- ソフトデリート時刻(NULL = 生存)。v2 で追加
 );
 CREATE INDEX idx_tasks_status ON tasks(status);
 CREATE INDEX idx_tasks_parent ON tasks(parent_id);
@@ -114,5 +115,9 @@ CREATE TABLE schema_version (
   1 行の UPDATE で済ませる。
 - 親子リンクは `parent_id` の単純な 1:N。循環はサービス層で禁止する。
 - インスタントタスクの「昇格」= `is_instant` を 0 にして `status`/`scheduled` を設定する操作。
-- タスク削除はまず考えない(Done で十分)。実装する場合も履歴保全のためソフトデリートを検討する。
+- タスク削除は**ソフトデリート**(`deleted_at` に時刻を設定。NULL = 生存)。
+  - 一覧・詳細・ボード等の通常クエリは削除済みを除外する。復元 = `deleted_at` を NULL に戻す。
+  - 親子リンクは削除時も保持し、表示時に「削除済みの親/子」を除外するだけにする
+    (復元すればリンクが自然に戻る)。子タスクへのカスケード削除はしない。
+  - 物理削除(DELETE 文)はユーザー操作としては提供しない。
 - シークレット(GitHub PAT 等)はこの DB には保存しない(keyring を使用)。
