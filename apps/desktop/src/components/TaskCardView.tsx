@@ -73,7 +73,16 @@ export function CardBody({ card, dragging }: { card: TaskCard; dragging?: boolea
   );
 }
 
-export function TaskCardView({ card }: { card: TaskCard }) {
+interface CardProps {
+  card: TaskCard;
+  /**
+   * 右クリックされた。カーソル位置を渡すので、呼び出し元がそこにメニューを出す。
+   * 標準のコンテキストメニューの抑止はここで済ませてある。
+   */
+  onContextMenu?: (card: TaskCard, at: { x: number; y: number }) => void;
+}
+
+export function TaskCardView({ card, onContextMenu }: CardProps) {
   const openTask = useBoardStore((state) => state.openTask);
   const origin = useRef<{ x: number; y: number } | null>(null);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -91,6 +100,14 @@ export function TaskCardView({ card }: { card: TaskCard }) {
       onPointerDown={(event) => {
         origin.current = { x: event.clientX, y: event.clientY };
         listeners?.onPointerDown?.(event);
+      }}
+      // 右クリックは標準メニューを止めて自前のメニューを出す。ドラッグ (dnd-kit の
+      // PointerSensor) は左ボタンしか見ないので、右ボタンで掴んでしまう心配はない。
+      onContextMenu={(event) => {
+        if (!onContextMenu) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onContextMenu(card, { x: event.clientX, y: event.clientY });
       }}
       onClick={(event) => {
         // ドラッグ後のクリックで詳細が開かないよう、移動量で判定する。

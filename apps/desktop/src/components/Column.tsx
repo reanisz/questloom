@@ -29,9 +29,18 @@ interface Props {
    * そこで判定は [`BoardView`](./BoardView.tsx) が `over` から一元的に行う。
    */
   over?: boolean;
+  /**
+   * カードが右クリックされた。列は自分のキーを添えて BoardView へ中継するだけ
+   * (メニューの状態はボード全体で 1 つなので BoardView が持つ)。
+   */
+  onCardContextMenu?: (
+    card: TaskCard,
+    column: BoardColumnKey,
+    at: { x: number; y: number },
+  ) => void;
 }
 
-export function Column({ columnKey, label, cards, focused, over }: Props) {
+export function Column({ columnKey, label, cards, focused, over, onCardContextMenu }: Props) {
   const mutate = useBoardStore((state) => state.mutate);
   // ドロップ先は列全体。ヘッダやクイック追加の上が死角にならないようにする。
   const { setNodeRef } = useDroppable({ id: `${COLUMN_DROPPABLE_PREFIX}${columnKey}` });
@@ -61,7 +70,14 @@ export function Column({ columnKey, label, cards, focused, over }: Props) {
       <div className="column-body">
         <SortableContext items={cards.map((card) => card.id)} strategy={verticalListSortingStrategy}>
           {cards.map((card) => (
-            <TaskCardView key={card.id} card={card} />
+            <TaskCardView
+              key={card.id}
+              card={card}
+              onContextMenu={
+                onCardContextMenu &&
+                ((target, at) => onCardContextMenu(target, columnKey, at))
+              }
+            />
           ))}
         </SortableContext>
         {cards.length === 0 && <p className="column-empty">タスクなし</p>}

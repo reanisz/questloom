@@ -20,7 +20,7 @@ import { useBoardStore } from "../store";
 import { toMessage } from "../tauri";
 import type { BoardColumnKey, ResourceKind, TaskCard, TaskDetail, TaskId } from "../types";
 import { AiSplitDialog } from "./AiSplitDialog";
-import { ModalShell } from "./ModalShell";
+import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { PromoteMenu } from "./PromoteMenu";
 
 /** リソースを既定のアプリで開く。file はエクスプローラで場所を表示する。 */
@@ -40,55 +40,6 @@ function TaskLink({ card, onOpen }: { card: TaskCard; onOpen: () => void }) {
       <span className="task-link-title">{card.title}</span>
       <span className="task-link-status">{formatStatus(card.status)}</span>
     </button>
-  );
-}
-
-/**
- * 削除の確認ダイアログ。
- *
- * 削除はソフトデリートなので取り返しはつくが、ボードから消える操作なので
- * 一度だけ止めて確認する(復元はヘッダの「削除済み」から)。
- */
-function DeleteConfirmDialog({
-  title,
-  busy,
-  onConfirm,
-  onClose,
-}: {
-  title: string;
-  busy: boolean;
-  onConfirm: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <ModalShell
-      title="タスクを削除"
-      className="modal-sm"
-      busy={busy}
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" disabled={busy} onClick={onClose}>
-            キャンセル
-          </button>
-          <button
-            type="button"
-            className="btn btn-danger"
-            data-testid="confirm-delete"
-            disabled={busy}
-            data-autofocus
-            onClick={onConfirm}
-          >
-            削除
-          </button>
-        </>
-      }
-    >
-      <p className="confirm-target">{title}</p>
-      <p className="muted">
-        ボードから消えますが、ヘッダの「削除済み」からいつでも復元できます。子タスクは削除されません。
-      </p>
-    </ModalShell>
   );
 }
 

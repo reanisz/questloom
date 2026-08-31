@@ -106,7 +106,8 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 - **GUI e2e スモーク** (`apps/desktop/e2e/smoke.spec.ts`) は WebdriverIO +
   [`@wdio/tauri-service`](https://webdriver.io/docs/wdio-tauri-service/) で実アプリを操作する。
   「起動 → ボード描画 → New へタスク作成 → カードから詳細ドロワー → 削除 →
-  『削除済み』から復元」を main ウィンドウだけで 1 本通す。設定は `apps/desktop/wdio.conf.ts`。
+  『削除済み』から復元 → カードを右クリック → メニューから削除 → 復元」を
+  main ウィンドウだけで 1 本通す。設定は `apps/desktop/wdio.conf.ts`。
 
   **前提は「フロント同梱の debug ビルド」**。`npm run tauri dev` / `cargo run` が作る exe は
   `devUrl`(Vite dev サーバー)を読みに行くので使えない。
@@ -129,7 +130,15 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   - セレクタは最小限の `data-testid`(`titlebar` / `column-<key>` /
     `quick-add-open-<key>`(クイック追加を開くテキストボタン)/ `quick-add-<key>`(開いた後の入力欄)/
     `task-card` / `task-drawer` / `drawer-delete` / `confirm-delete` / `open-deleted` /
-    `deleted-row` / `restore-task`)。ダイアログは `ModalShell` の `aria-label` で引く。
+    `deleted-row` / `restore-task` / `task-context-menu` / `context-<action>`(右クリック
+    メニューの項目。`open` / `complete` / `promote` / `move` / `url` / `delete` /
+    `back` / `promote-<column>` / `move-<column>`))。
+    ダイアログは `ModalShell` の `aria-label` で引く。
+  - **利用者が questloom を起動したままだと exe を差し替えられない**
+    (`tauri build` が `failed to remove file ... os error 5` で落ちる)。そのときは
+    リンク済みの `target/debug/deps/questloom_desktop.exe` を別の場所へ
+    `questloom-desktop.exe` という名前でコピーし(名前を保つと後片付けの対象に入る)、
+    `QUESTLOOM_E2E_APP_BINARY` にそのパスを入れて `npm run e2e` を走らせる。
   - overlay / plugin-host も同じバンドルを読むためウィンドウハンドルは複数返る。
     spec の冒頭で `[data-testid="titlebar"]`(= `App` にしか無い)を持つものへ切り替える。
 

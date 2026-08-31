@@ -40,15 +40,26 @@ import {
   type Board,
   type BoardColumnKey,
   type TaskCard,
+  type TaskId,
 } from "../types";
 import { boardCollisionDetection } from "./collision";
 import { Column, columnDomId } from "./Column";
+import { type Point } from "./contextMenu";
 import { DeferRail } from "./DeferRail";
+import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { columnOf, locate, resolveDropPosition } from "./dropPosition";
 import { CardBody } from "./TaskCardView";
+import { TaskContextMenu } from "./TaskContextMenu";
 
 /** レールから展開したバケットを強調しておく時間 (ms)。 */
 const FOCUS_HIGHLIGHT_MS = 1600;
+
+/** 開いている右クリックメニュー。 */
+interface MenuState {
+  card: TaskCard;
+  column: BoardColumnKey;
+  anchor: Point;
+}
 
 interface Props {
   board: Board;
@@ -64,6 +75,11 @@ export function BoardView({ board, expanded, onExpand }: Props) {
   const [activeCard, setActiveCard] = useState<TaskCard | null>(null);
   const [overColumn, setOverColumn] = useState<BoardColumnKey | null>(null);
   const [focused, setFocused] = useState<BoardColumnKey | null>(null);
+  /** カードの右クリックメニュー。ボード全体で高々 1 つ。 */
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  /** 右クリックメニューの「削除」の確認待ち。ドロワーのそれとは独立。 */
+  const [confirmDelete, setConfirmDelete] = useState<{ id: TaskId; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const columns = expanded ? BOARD_COLUMNS : BOARD_COLUMNS.filter(({ key }) => isPrimaryColumn(key));
 
@@ -85,7 +101,16 @@ export function BoardView({ board, expanded, onExpand }: Props) {
   // 数 px 動かすまではドラッグを開始しない(カードのクリックを潰さないため)。
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
+  /** 削除を確定する。ボードの更新は tasks-changed 任せ。 */
+  const runDelete = async (taskId: TaskId) => {
+    setDeleting(true);
+    await mutate(() => api.deleteTask(taskId));
+    setDeleting(false);
+    setConfirmDelete(null);
+  };
+
   const onDragStart = (event: DragStartEvent) => {
+    setMenu(null);
     const id = String(event.active.id);
     const column = locate(board.columns, id);
     setActiveCard(column ? (board.columns[column].find((card) => card.id === id) ?? null) : null);
@@ -138,6 +163,7 @@ export function BoardView({ board, expanded, onExpand }: Props) {
             cards={board.columns[key]}
             focused={focused === key}
             over={overColumn === key}
+            onCardContextMenu={(card, column, anchor) => setMenu({ card, column, anchor })}
           />
         ))}
         {!expanded && (
@@ -156,6 +182,25 @@ export function BoardView({ board, expanded, onExpand }: Props) {
           </div>
         )}
       </DragOverlay>
+      {menu && (
+        // 開き直しでも状態(第 2 階層など)を持ち越さないよう、カードと位置で作り直す。
+        <TaskContextMenu
+          key={`${menu.card.id}:${menu.anchor.x}:${menu.anchor.y}`}
+          card={menu.card}
+          column={menu.column}
+          anchor={menu.anchor}
+          onClose={() => setMenu(null)}
+          onDelete={() => setConfirmDelete({ id: menu.card.id, title: menu.card.title })}
+        />
+      )}
+      {confirmDelete && (
+        <DeleteConfirmDialog
+          title={confirmDelete.title}
+          busy={deleting}
+          onConfirm={() => void runDelete(confirmDelete.id)}
+          onClose={() => setConfirmDelete(null)}
+        />
+      )}
     </DndContext>
   );
 }

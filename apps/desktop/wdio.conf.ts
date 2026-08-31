@@ -63,8 +63,18 @@ if (!(process.env.PATH ?? "").split(delimiter).includes(cargoBin)) {
   process.env.PATH = `${cargoBin}${delimiter}${process.env.PATH ?? ""}`;
 }
 
-// exe は Cargo workspace のルート(= apps/desktop から 2 つ上)の target/ にできる。
-const appBinaryPath = resolve(import.meta.dirname, "../../target/debug/questloom-desktop.exe");
+/**
+ * 起動する exe。既定は Cargo workspace のルート(= apps/desktop から 2 つ上)の target/。
+ *
+ * `QUESTLOOM_E2E_APP_BINARY` で差し替えられる。利用者が questloom を起動したままだと
+ * Windows は exe を掴んだままになり、`tauri build` が
+ * `target/debug/questloom-desktop.exe` を置き換えられず os error 5 で落ちる。
+ * その場合は `target/debug/deps/questloom_desktop-<hash>.exe`(リンク済みの実体)を
+ * 別の場所へコピーして、このパスをそこへ向ければテストは走らせられる。
+ */
+const appBinaryPath =
+  process.env.QUESTLOOM_E2E_APP_BINARY ??
+  resolve(import.meta.dirname, "../../target/debug/questloom-desktop.exe");
 
 // ---- 後始末(プロセスの取りこぼし) ----
 

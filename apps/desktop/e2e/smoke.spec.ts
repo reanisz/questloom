@@ -1,6 +1,7 @@
 /**
  * GUI e2e スモーク。実アプリ(アセット同梱の debug ビルド)を起動して、
- * 「ボードが出る → 作る → 開く → 消す → 復元する」を 1 本で通す。
+ * 「ボードが出る → 作る → 開く → 消す → 復元する → 右クリックで消す → 復元する」を
+ * 1 本で通す。
  *
  * 触るのは **main ウィンドウだけ**。overlay / plugin-host も同じバンドルを読むので
  * ウィンドウハンドルは 3 つ返りうる。main の判別は独自タイトルバー
@@ -146,6 +147,37 @@ describe("questloom GUI スモーク", () => {
     await browser.keys("Escape");
     await dialog.waitForExist({ reverse: true, timeout: SETTLE_TIMEOUT });
 
+    await waitForText(NEW_CARDS, TITLE, true, `New 列に「${TITLE}」が戻りません`);
+  });
+
+  it("カードの右クリックメニューから削除し、「削除済み」から復元できる", async () => {
+    const card = await findByText(NEW_CARDS, TITLE);
+    if (!card) throw new Error(`「${TITLE}」のカードが見つかりません`);
+    // 右クリック。標準メニューはフロント側が preventDefault で止めている。
+    await card.click({ button: "right" });
+
+    await $('[data-testid="task-context-menu"]').waitForDisplayed();
+    await $('[data-testid="context-delete"]').click();
+
+    // 確認ダイアログはドロワーの削除と同じもの (DeleteConfirmDialog)。
+    await $('div[role="dialog"][aria-label="タスクを削除"]').waitForDisplayed();
+    await $('[data-testid="confirm-delete"]').click();
+
+    await waitForText(NEW_CARDS, TITLE, false, `New 列から「${TITLE}」が消えません`);
+
+    // 後片付けを兼ねて復元し、ボードを元の状態へ戻す。
+    await $('[data-testid="open-deleted"]').click();
+    const dialog = $('div[role="dialog"][aria-label="削除済みのタスク"]');
+    await dialog.waitForDisplayed();
+
+    const rows = '[data-testid="deleted-row"]';
+    await waitForText(rows, TITLE, true, `削除済み一覧に「${TITLE}」が出ません`);
+    const row = await findByText(rows, TITLE);
+    if (!row) throw new Error(`削除済みの「${TITLE}」が見つかりません`);
+    await row.$('[data-testid="restore-task"]').click();
+
+    await browser.keys("Escape");
+    await dialog.waitForExist({ reverse: true, timeout: SETTLE_TIMEOUT });
     await waitForText(NEW_CARDS, TITLE, true, `New 列に「${TITLE}」が戻りません`);
   });
 });
