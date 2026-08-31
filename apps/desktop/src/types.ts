@@ -177,6 +177,30 @@ export const BOARD_COLUMNS: readonly { key: BoardColumnKey; label: string }[] = 
   { key: "done", label: "Done" },
 ];
 
+/**
+ * 通常表示で列として並べる列。
+ * 先送りバケットはレールのドロップボックスへ追い出し、横スクロールなしで収まるようにする。
+ */
+export const PRIMARY_COLUMNS = [
+  "new",
+  "today",
+  "doing",
+  "done",
+] as const satisfies readonly BoardColumnKey[];
+
+/** 先送りバケット。通常表示ではレールのコンパクトなドロップボックスとして表示する。 */
+export const DEFER_COLUMNS = [
+  "tomorrow",
+  "thisWeek",
+  "nextWeek",
+  "future",
+] as const satisfies readonly BoardColumnKey[];
+
+/** 通常表示で列として表示する列か。 */
+export function isPrimaryColumn(key: BoardColumnKey): boolean {
+  return (PRIMARY_COLUMNS as readonly BoardColumnKey[]).includes(key);
+}
+
 /** 列キーの日本語ラベルを引く。 */
 export function columnLabel(key: BoardColumnKey): string {
   return BOARD_COLUMNS.find((column) => column.key === key)?.label ?? key;

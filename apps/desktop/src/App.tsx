@@ -5,7 +5,9 @@ import { useEffect } from "react";
 import { listenTasksChanged } from "./api";
 import { BoardView } from "./components/BoardView";
 import { TaskDrawer } from "./components/TaskDrawer";
+import { TitleBar } from "./components/TitleBar";
 import { useBoardStore } from "./store";
+import { useExpandedView } from "./viewMode";
 
 function App() {
   const board = useBoardStore((state) => state.board);
@@ -13,6 +15,7 @@ function App() {
   const error = useBoardStore((state) => state.error);
   const refresh = useBoardStore((state) => state.refresh);
   const setError = useBoardStore((state) => state.setError);
+  const [expanded, setExpanded] = useExpandedView();
 
   useEffect(() => {
     void refresh();
@@ -25,9 +28,25 @@ function App() {
 
   return (
     <div className="app">
+      <TitleBar />
+
       <header className="app-header">
-        <h1>questloom</h1>
         {board && <span className="muted">{board.today}</span>}
+        <div className="app-header-actions">
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            aria-pressed={expanded}
+            title={
+              expanded
+                ? "New / Today / Doing / Done + 先送りレールの表示に戻す"
+                : "先送りバケットも列として展開する"
+            }
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "▤ 通常表示" : "▦ 全列を展開"}
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -40,7 +59,7 @@ function App() {
       )}
 
       {board ? (
-        <BoardView board={board} />
+        <BoardView board={board} expanded={expanded} onExpand={() => setExpanded(true)} />
       ) : (
         <p className="placeholder">{ready ? "ボードを読み込めませんでした。" : "読み込み中…"}</p>
       )}

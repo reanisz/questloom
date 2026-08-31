@@ -12,13 +12,18 @@ import { TaskCardView } from "./TaskCardView";
 /** 列の droppable id。カード id と衝突しないよう接頭辞を付ける。 */
 export const COLUMN_DROPPABLE_PREFIX = "column:";
 
+/** 列を DOM から引くための id。レールから展開したバケットをスクロールで見せるのに使う。 */
+export const columnDomId = (key: BoardColumnKey) => `board-column-${key}`;
+
 interface Props {
   columnKey: BoardColumnKey;
   label: string;
   cards: TaskCard[];
+  /** レールから開かれた直後の一時的な強調。 */
+  focused?: boolean;
 }
 
-export function Column({ columnKey, label, cards }: Props) {
+export function Column({ columnKey, label, cards, focused }: Props) {
   const mutate = useBoardStore((state) => state.mutate);
   const [draft, setDraft] = useState("");
   const [adding, setAdding] = useState(false);
@@ -41,7 +46,10 @@ export function Column({ columnKey, label, cards }: Props) {
   };
 
   return (
-    <section className={`column${isOver ? " column-over" : ""}`}>
+    <section
+      id={columnDomId(columnKey)}
+      className={`column${isOver ? " column-over" : ""}${focused ? " column-focused" : ""}`}
+    >
       <header className="column-header">
         <h2>{label}</h2>
         <span className="column-count">{cards.length}</span>

@@ -15,13 +15,24 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import * as api from "../api";
 import { useBoardStore } from "../store";
-import { BOARD_COLUMNS, type Board, type BoardColumnKey, type TaskCard, type TaskId } from "../types";
-import { Column, COLUMN_DROPPABLE_PREFIX } from "./Column";
+import {
+  BOARD_COLUMNS,
+  isPrimaryColumn,
+  type Board,
+  type BoardColumnKey,
+  type TaskCard,
+  type TaskId,
+} from "../types";
+import { Column, COLUMN_DROPPABLE_PREFIX, columnDomId } from "./Column";
+import { DeferRail } from "./DeferRail";
 import { CardBody } from "./TaskCardView";
+
+/** レールから展開したバケットを強調しておく時間 (ms)。 */
+const FOCUS_HIGHLIGHT_MS = 1600;
 
 /** カードが属する列を探す。 */
 function locate(columns: Board["columns"], taskId: TaskId): BoardColumnKey | null {
@@ -31,10 +42,36 @@ function locate(columns: Board["columns"], taskId: TaskId): BoardColumnKey | nul
   return null;
 }
 
-export function BoardView({ board }: { board: Board }) {
+interface Props {
+  board: Board;
+  /** 全 8 列を列として表示するか。false なら 4 列 + 先送りレール。 */
+  expanded: boolean;
+  /** レールのバケットが選ばれたときに展開表示へ切り替える。 */
+  onExpand: () => void;
+}
+
+export function BoardView({ board, expanded, onExpand }: Props) {
   const mutate = useBoardStore((state) => state.mutate);
   const applyLocalMove = useBoardStore((state) => state.applyLocalMove);
   const [activeCard, setActiveCard] = useState<TaskCard | null>(null);
+  const [focused, setFocused] = useState<BoardColumnKey | null>(null);
+
+  const columns = expanded ? BOARD_COLUMNS : BOARD_COLUMNS.filter(({ key }) => isPrimaryColumn(key));
+
+  // 展開直後にその列を視界へ入れ、少し経ったら強調を消す。
+  useEffect(() => {
+    if (!focused) return;
+    document
+      .getElementById(columnDomId(focused))
+      ?.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
+    const timer = setTimeout(() => setFocused(null), FOCUS_HIGHLIGHT_MS);
+    return () => clearTimeout(timer);
+  }, [focused]);
+
+  const openBucket = (key: BoardColumnKey) => {
+    onExpand();
+    setFocused(key);
+  };
 
   // 数 px 動かすまではドラッグを開始しない(カードのクリックを潰さないため)。
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
@@ -97,10 +134,19 @@ export function BoardView({ board }: { board: Board }) {
       onDragEnd={onDragEnd}
       onDragCancel={() => setActiveCard(null)}
     >
-      <div className="board">
-        {BOARD_COLUMNS.map(({ key, label }) => (
-          <Column key={key} columnKey={key} label={label} cards={board.columns[key]} />
+      <div className={`board${expanded ? " board-expanded" : ""}`}>
+        {columns.map(({ key, label }) => (
+          <Column
+            key={key}
+            columnKey={key}
+            label={label}
+            cards={board.columns[key]}
+            focused={focused === key}
+          />
         ))}
+        {!expanded && (
+          <DeferRail columns={board.columns} dragging={activeCard != null} onOpen={openBucket} />
+        )}
       </div>
       <DragOverlay dropAnimation={null}>
         {activeCard && (
