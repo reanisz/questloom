@@ -1,0 +1,12 @@
+{
+  "name": "questloom-root",
+  "private": true,
+  "description": "ルートから apps/desktop の npm スクリプトへ転送するだけのヘルパ。実体は apps/desktop/package.json。",
+  "scripts": {
+    "install-desktop": "npm --prefix apps/desktop install",
+    "dev": "npm --prefix apps/desktop run tauri dev",
+    "build": "npm --prefix apps/desktop run tauri build",
+    "test": "npm --prefix apps/desktop test",
+    "e2e": "npm --prefix apps/desktop run e2e"
+  }
+}
