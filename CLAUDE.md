@@ -42,7 +42,7 @@ questloom/
 - `questloom-core` は他の questloom crate に依存しない。UI・Tauri・HTTP にも依存させないこと。
 - `questloom-store` / `questloom-mcp` / `questloom-ai` / `questloom-plugin-api` → `questloom-core`
 - `questloom-plugin-github` → `questloom-plugin-api`, `questloom-core`
-- `questloom-desktop` (src-tauri) → `questloom-core`, `questloom-store`, `questloom-mcp`
+- `questloom-desktop` (src-tauri) → `questloom-core`, `questloom-store`, `questloom-mcp`, `questloom-ai`
 - src-tauri は「配線」だけを担う薄いシェル。Tauri command はサービス層への委譲に留める。
 
 ## ビルド / 開発コマンド

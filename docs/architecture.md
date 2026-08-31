@@ -105,11 +105,13 @@ questloom/
 プラグインは 2 層に分ける。API の概念(タスク操作・イベント購読・設定・KV・ポーリング)は
 両層と MCP ツールで揃え、操作面が発散しないようにする。
 
-#### 第 1 層: Rust プラグイン (questloom-plugin-api)
+#### 第 1 層: Rust プラグイン (questloom-plugin-api) — 構想(未実装)
 
 コンパイル時に組み込む in-process Rust プラグイン(trait ベース)。コア機能・重い統合・
 ネイティブ性能が必要なもの向け。DLL 等の動的ロードは行わない(Rust の ABI 不安定のため。
 必要になったら外部プロセス + MCP / WASM を検討する)。
+**現状 questloom-plugin-api は空のプレースホルダで、以下は構想段階のコード例**
+(TS プラグイン層を先行させたため。roadmap.md 参照)。
 
 ```rust
 trait Plugin {
@@ -156,5 +158,7 @@ TS プラグイン層の実証として GitHub 統合を TS で実装する。
 ## セキュリティ方針
 
 - MCP・その他のリッスンは 127.0.0.1 のみにバインドする。
-- PAT 等のシークレットは Windows 資格情報マネージャー(keyring crate)に保存し、DB には置かない。
+- PAT 等のシークレットは、最終的には Windows 資格情報マネージャー(keyring crate)に保存する方針。
+  **ただし現状は未実装**で、PAT・MCP トークンは settings テーブルに平文で保存されている
+  (既知の制限。CLAUDE.md 参照)。
 - Tauri の capability は最小権限で構成する。

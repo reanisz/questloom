@@ -228,9 +228,11 @@ impl TaskService {
 
     /// コア設定を差し替え、[`DomainEvent::SettingsChanged`] を発行する。
     pub fn set_settings(&self, settings: CoreSettings) {
-        if let Ok(mut guard) = self.settings.write() {
-            *guard = settings;
-        }
+        // 毒された場合も更新を続行する(read_settings / lock_writes と同じ方針)。
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
         self.emit(DomainEvent::SettingsChanged);
     }
 
