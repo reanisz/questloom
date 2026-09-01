@@ -328,7 +328,10 @@ mod tests {
             Duration::from_secs(300),
         );
         assert!(!run.mcp_attached);
-        assert_eq!(run.request.args, ["exec", "整理して"]);
+        assert_eq!(
+            run.request.args,
+            ["exec", "--skip-git-repo-check", "整理して"]
+        );
     }
 
     #[test]
