@@ -139,6 +139,12 @@ h3 {
   height: var(--titlebar-height);
   /* タイトルバーは塗らず、メインの地色に溶け込ませる(ボタンのホバーだけで存在を示す)。 */
   background: transparent;
+  /*
+   * ドロワーの暗幕(50)やモーダルの暗幕(60)より上に置き、ダイアログ表示中も
+   * ぼかしがかからず、ドラッグ・ウィンドウボタンが常に効くようにする。
+   */
+  position: relative;
+  z-index: 70;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -261,6 +267,22 @@ h3 {
 
 .app-body:has(> .browser-pane) .app-header {
   padding-left: 8px;
+}
+
+/*
+ * ドロワー(タスク詳細)とペインが同時に開いているときは、中央に細いボードの
+ * 帯を残しても操作できず無駄なので、ペインを「ドロワー以外の全幅」まで広げる。
+ * ドロワーは .app-main の中にいるので .app-main 自体は隠せない(ドロワーごと
+ * 消えてしまう)。ペインの幅で押し出し、はみ出す中身はクリップする。
+ */
+.app:has(.drawer) .app-body:has(> .browser-pane) {
+  --browser-pane-width: calc(100vw - min(480px, 92vw));
+  /* ペイン幅がドロワー幅の補集合なので、上限による調整は不要になる。 */
+  --drawer-limit: 100vw;
+}
+
+.app:has(.drawer) .app-body:has(> .browser-pane) .app-main {
+  overflow: hidden;
 }
 
 .app-main {
