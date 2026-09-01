@@ -68,6 +68,10 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp
 サンプルは [examples/plugins/](examples/plugins/)(`hello.ts`、GitHub PR 監視の `github.ts`)。
 導入手順・設定は [CLAUDE.md](CLAUDE.md) の「GitHub プラグイン」節を参照。
 
+## ライセンス
+
+[BSD 3-Clause License](LICENSE)
+
 ## ドキュメント
 
 - [アーキテクチャ設計](docs/architecture.md)
