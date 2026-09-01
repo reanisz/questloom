@@ -70,7 +70,7 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp
 
 ## ライセンス
 
-[BSD 3-Clause License](LICENSE)
+[MIT License](LICENSE)
 
 ## ドキュメント
 

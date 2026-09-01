@@ -1,7 +1,7 @@
 {
   "name": "questloom-root",
   "private": true,
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "description": "ルートから apps/desktop の npm スクリプトへ転送するだけのヘルパ。実体は apps/desktop/package.json。",
   "scripts": {
     "install-desktop": "npm --prefix apps/desktop install",
