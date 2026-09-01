@@ -26,6 +26,12 @@ use crate::sort_order;
 /// ドメインイベントのブロードキャスト容量。
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// [`TaskService::list_archived_done`] が 1 回で返す最大件数。
+///
+/// 「過去の完了」は掘り返す一覧であって作業対象ではないので、ページングは持たず
+/// 直近だけを返す。総件数は [`ArchivedDone::total`] で分かる。
+pub const ARCHIVED_DONE_LIMIT: usize = 200;
+
 /// タスク作成の入力。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -194,6 +200,24 @@ pub struct Board {
     pub week_start: WeekStart,
     /// 各列のタスク(いずれも `sort_order` 昇順)。
     pub columns: BoardColumns,
+    /// 前日以前に完了したタスクの件数。
+    ///
+    /// [`board`](TaskService::board) の Done 列は**今日完了した分だけ**なので、
+    /// それ以前の完了はここに件数としてだけ現れる。中身は
+    /// [`list_archived_done`](TaskService::list_archived_done) で取る。
+    pub archived_done_count: usize,
+}
+
+/// 「過去の完了」一覧([`list_archived_done`](TaskService::list_archived_done))。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedDone {
+    /// 完了が新しい順。最大 [`limit`](Self::limit) 件。
+    pub tasks: Vec<TaskCard>,
+    /// 条件に合う総件数(`tasks` が切り詰められていても実数)。
+    pub total: usize,
+    /// 適用した上限。`total > limit` なら古い分は返っていない。
+    pub limit: usize,
 }
 
 /// タスク詳細。
@@ -303,9 +327,33 @@ impl TaskService {
 
     /// ボード全体を、バケット導出済みの構造で返す。
     ///
+    /// **Done 列には「今日完了した分」しか入らない。** 前日以前の完了は
+    /// [`Board::archived_done_count`] に件数としてだけ現れ、中身は
+    /// [`list_archived_done`](Self::list_archived_done) で取る。
+    /// バケット導出と同じで、これは**保存された状態ではなく表示時の導出**なので、
+    /// 日付が変われば([`DomainEvent::DayChanged`] を受けた再取得で)自動的に消える。
+    ///
     /// # Errors
     /// 永続化層のエラー。
     pub fn board(&self) -> CoreResult<Board> {
+        self.build_board(false)
+    }
+
+    /// Done を絞り込まないボード。
+    ///
+    /// [`board`](Self::board) が今日の完了だけを見せるのに対し、こちらは
+    /// 完了したタスクを**すべて** Done 列に入れる。MCP のように「ボードの見た目」ではなく
+    /// 「いま何があるか」を知りたい呼び出し側のためのもの。
+    /// [`Board::archived_done_count`] の意味は [`board`](Self::board) と同じ
+    /// (= そのうち前日以前に完了した件数)。
+    ///
+    /// # Errors
+    /// 永続化層のエラー。
+    pub fn full_board(&self) -> CoreResult<Board> {
+        self.build_board(true)
+    }
+
+    fn build_board(&self, include_archived_done: bool) -> CoreResult<Board> {
         let today = self.clock.today();
         let week_start = self.week_start();
 
@@ -335,10 +383,64 @@ impl TaskService {
                 .push(card);
         }
 
+        // Done 列は「今日完了した分」だけ。件数は絞り込みの前に数える。
+        let archived_done_count = columns
+            .done
+            .iter()
+            .filter(|card| self.is_archived_done(&card.task, today))
+            .count();
+        if !include_archived_done {
+            columns
+                .done
+                .retain(|card| !self.is_archived_done(&card.task, today));
+        }
+
         Ok(Board {
             today,
             week_start,
             columns,
+            archived_done_count,
+        })
+    }
+
+    /// 前日以前に完了したか(= ボードの Done 列から外れるか)。
+    ///
+    /// `done_at` を持たない完了タスク(サービス経由では作れないが、古いデータには
+    /// ありうる)は隠さない。いつ終わったか分からないものを黙って消さないため。
+    fn is_archived_done(&self, task: &Task, today: NaiveDate) -> bool {
+        task.done_at
+            .is_some_and(|at| self.clock.local_date(at) < today)
+    }
+
+    /// 前日以前に完了したタスクを、完了が新しい順に返す。
+    ///
+    /// ボードの Done 列から外れた分の一覧。1 回で返すのは
+    /// [`ARCHIVED_DONE_LIMIT`] 件までで、それを超える分は返さない
+    /// (`total` に総件数が入る。ページングは提供しない)。
+    /// 削除済みは含まない。復元 UI と同じく、子タスク数・リソース数は集計しない。
+    ///
+    /// # Errors
+    /// 永続化層のエラー。
+    pub fn list_archived_done(&self) -> CoreResult<ArchivedDone> {
+        let today = self.clock.today();
+        let week_start = self.week_start();
+        // 「ローカル日付が今日より前」= 「今日の 0:00 (UTC 換算) より前」。
+        let before = self.clock.local_day_start(today);
+
+        let total = self.repo.count_done_before(before)?;
+        let empty_counts = HashMap::new();
+        let empty_resources = HashMap::new();
+        let tasks = self
+            .repo
+            .list_done_before(before, ARCHIVED_DONE_LIMIT)?
+            .into_iter()
+            .map(|task| build_card(task, today, week_start, &empty_counts, &empty_resources))
+            .collect();
+
+        Ok(ArchivedDone {
+            tasks,
+            total,
+            limit: ARCHIVED_DONE_LIMIT,
         })
     }
 
@@ -985,6 +1087,19 @@ mod tests {
         fn lock<T>(guard: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
             guard.lock().unwrap_or_else(|e| e.into_inner())
         }
+
+        /// `before` より前に完了した(削除済みでない)タスク。SQL 側の条件と同じ。
+        fn done_before(&self, before: DateTime<Utc>) -> Vec<Task> {
+            Self::lock(&self.tasks)
+                .iter()
+                .filter(|t| {
+                    t.status == TaskStatus::Done
+                        && !t.is_deleted()
+                        && t.done_at.is_some_and(|at| at < before)
+                })
+                .cloned()
+                .collect()
+        }
     }
 
     impl TaskRepository for MemoryRepository {
@@ -1062,6 +1177,18 @@ mod tests {
                     .then_with(|| a.id.cmp(&b.id))
             });
             Ok(tasks)
+        }
+
+        fn list_done_before(&self, before: DateTime<Utc>, limit: usize) -> RepoResult<Vec<Task>> {
+            let mut tasks = self.done_before(before);
+            // 完了が新しいものが先。同時刻なら id で安定させる。
+            tasks.sort_by(|a, b| b.done_at.cmp(&a.done_at).then_with(|| b.id.cmp(&a.id)));
+            tasks.truncate(limit);
+            Ok(tasks)
+        }
+
+        fn count_done_before(&self, before: DateTime<Utc>) -> RepoResult<usize> {
+            Ok(self.done_before(before).len())
         }
 
         fn replace_primary_and_insert(&self, resource: &TaskResource) -> RepoResult<()> {
@@ -1288,6 +1415,8 @@ mod tests {
         let board = serde_json::to_value(service.board().unwrap()).unwrap();
         assert_eq!(board["today"], "2026-09-02");
         assert_eq!(board["weekStart"], "monday");
+        // Done 列は今日完了した分だけ。前日以前の分は件数としてだけ載る。
+        assert_eq!(board["archivedDoneCount"], 0);
         let card = &board["columns"]["thisWeek"][0];
         // TaskCard は Task を平坦化して持つ。
         assert_eq!(card["id"], task.id.to_string());
@@ -2219,5 +2348,203 @@ mod tests {
         assert_eq!(card["id"], task.id.to_string());
         assert_eq!(card["status"], "watching");
         assert!(card["bucket"].is_null());
+    }
+
+    // ---- 過去の完了(Done 列の絞り込み)----
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("有効な日付")
+    }
+
+    fn instant(raw: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(raw)
+            .expect("RFC3339")
+            .with_timezone(&Utc)
+    }
+
+    /// リポジトリを共有したまま、別のクロックのサービスを作る。
+    ///
+    /// 「昨日終えたタスク」は昨日のクロックで完了させるしかないので、
+    /// 日付をまたぐテストはこれで時計を進める。
+    fn service_at(repo: &Arc<MemoryRepository>, clock: FixedClock) -> TaskService {
+        TaskService::new(
+            Arc::clone(repo) as Arc<dyn TaskRepository>,
+            Arc::new(clock),
+            BoardSettings::default(),
+        )
+    }
+
+    /// 指定のクロックでタスクを 1 件作り、そのまま完了させる。
+    fn complete_at(repo: &Arc<MemoryRepository>, clock: FixedClock, title: &str) -> TaskId {
+        let service = service_at(repo, clock);
+        let task = service.create_task(new_task(title)).unwrap();
+        service.complete_task(task.id).unwrap();
+        task.id
+    }
+
+    fn done_ids(board: &Board) -> Vec<TaskId> {
+        board.columns.done.iter().map(|card| card.task.id).collect()
+    }
+
+    #[test]
+    fn the_done_column_keeps_only_todays_completions() {
+        let repo = Arc::new(MemoryRepository::default());
+        let today = date(2026, 9, 2);
+        let old = complete_at(&repo, FixedClock::at(date(2026, 9, 1)), "昨日終えた");
+
+        let service = service_at(&repo, FixedClock::at(today));
+        let fresh = service.create_task(new_task("今日終えた")).unwrap();
+        service.complete_task(fresh.id).unwrap();
+
+        let board = service.board().unwrap();
+        assert_eq!(done_ids(&board), [fresh.id], "昨日の完了は Done 列に出ない");
+        assert_eq!(board.archived_done_count, 1);
+
+        // 一覧には昨日の分だけが出る。
+        let archived = service.list_archived_done().unwrap();
+        assert_eq!(archived.total, 1);
+        assert_eq!(archived.limit, ARCHIVED_DONE_LIMIT);
+        assert_eq!(
+            archived.tasks.iter().map(|c| c.task.id).collect::<Vec<_>>(),
+            [old]
+        );
+    }
+
+    /// MCP のように「全部見せたい」呼び出し側のための入口。
+    #[test]
+    fn the_full_board_keeps_every_completion() {
+        let repo = Arc::new(MemoryRepository::default());
+        let old = complete_at(&repo, FixedClock::at(date(2026, 9, 1)), "昨日終えた");
+        let service = service_at(&repo, FixedClock::at(date(2026, 9, 2)));
+        let fresh = complete_at(&repo, FixedClock::at(date(2026, 9, 2)), "今日終えた");
+
+        let full = service.full_board().unwrap();
+        let listed: HashSet<TaskId> = done_ids(&full).into_iter().collect();
+        assert_eq!(listed, HashSet::from([old, fresh]));
+        // 「そのうち何件が過去の完了か」の意味は board() と同じ。
+        assert_eq!(full.archived_done_count, 1);
+    }
+
+    /// 日付が変わるだけで、データを動かさずに Done 列から消えること。
+    #[test]
+    fn advancing_the_clock_archives_todays_completions() {
+        let repo = Arc::new(MemoryRepository::default());
+        let done = complete_at(&repo, FixedClock::at(date(2026, 9, 2)), "今日終えた");
+
+        let today = service_at(&repo, FixedClock::at(date(2026, 9, 2)));
+        let board = today.board().unwrap();
+        assert_eq!(done_ids(&board), [done]);
+        assert_eq!(board.archived_done_count, 0);
+
+        // 同じ DB のまま翌日になると、Done 列から落ちて一覧へ回る。
+        let tomorrow = service_at(&repo, FixedClock::at(date(2026, 9, 3)));
+        let board = tomorrow.board().unwrap();
+        assert!(board.columns.done.is_empty());
+        assert_eq!(board.archived_done_count, 1);
+        assert_eq!(
+            tomorrow.list_archived_done().unwrap().tasks[0].task.id,
+            done
+        );
+    }
+
+    /// UTC では前日でも、ローカル(+9)では今日なら Done 列に残る。
+    #[test]
+    fn the_boundary_follows_the_local_day_not_utc() {
+        let repo = Arc::new(MemoryRepository::default());
+        let today = date(2026, 9, 2);
+        // 09-01 23:00Z = 09-02 08:00 (+09:00) → ローカルでは今日。
+        let local_today = complete_at(
+            &repo,
+            FixedClock::new(instant("2026-09-01T23:00:00Z"), today).with_offset_hours(9),
+            "ローカルでは今日",
+        );
+        // 09-01 14:00Z = 09-01 23:00 (+09:00) → ローカルでも昨日。
+        let local_yesterday = complete_at(
+            &repo,
+            FixedClock::new(instant("2026-09-01T14:00:00Z"), today).with_offset_hours(9),
+            "ローカルでも昨日",
+        );
+
+        let service = service_at(
+            &repo,
+            FixedClock::new(instant("2026-09-02T03:00:00Z"), today).with_offset_hours(9),
+        );
+        let board = service.board().unwrap();
+        assert_eq!(done_ids(&board), [local_today]);
+        assert_eq!(board.archived_done_count, 1);
+        assert_eq!(
+            service.list_archived_done().unwrap().tasks[0].task.id,
+            local_yesterday
+        );
+
+        // 同じデータでも UTC のクロックなら、どちらも「昨日」になる。
+        let utc = service_at(
+            &repo,
+            FixedClock::new(instant("2026-09-02T03:00:00Z"), today),
+        );
+        assert!(utc.board().unwrap().columns.done.is_empty());
+        assert_eq!(utc.list_archived_done().unwrap().total, 2);
+    }
+
+    #[test]
+    fn archived_done_is_newest_first_and_capped() {
+        let repo = Arc::new(MemoryRepository::default());
+        let today = date(2026, 9, 10);
+        let clock_at = |raw: &str| FixedClock::new(instant(raw), today);
+
+        let oldest = complete_at(&repo, clock_at("2026-09-01T00:00:00Z"), "いちばん古い");
+        let middle = complete_at(&repo, clock_at("2026-09-05T00:00:00Z"), "まんなか");
+        let newest = complete_at(&repo, clock_at("2026-09-09T23:00:00Z"), "いちばん新しい");
+
+        let service = service_at(&repo, FixedClock::at(today));
+        let archived = service.list_archived_done().unwrap();
+        assert_eq!(
+            archived.tasks.iter().map(|c| c.task.id).collect::<Vec<_>>(),
+            [newest, middle, oldest],
+            "完了が新しい順"
+        );
+        assert_eq!(archived.total, 3);
+
+        // 上限を超えたら、総件数はそのままに返す件数だけが切り詰められる。
+        for i in 0..ARCHIVED_DONE_LIMIT {
+            complete_at(&repo, clock_at("2026-09-02T00:00:00Z"), &format!("古い{i}"));
+        }
+        let archived = service.list_archived_done().unwrap();
+        assert_eq!(archived.total, ARCHIVED_DONE_LIMIT + 3);
+        assert_eq!(archived.tasks.len(), ARCHIVED_DONE_LIMIT);
+        assert_eq!(archived.tasks[0].task.id, newest, "新しい方から返る");
+    }
+
+    /// 削除したタスクは、過去の完了一覧にもボードの件数にも出ない。
+    #[test]
+    fn deleted_tasks_are_not_archived_done() {
+        let repo = Arc::new(MemoryRepository::default());
+        let old = complete_at(&repo, FixedClock::at(date(2026, 9, 1)), "昨日終えて消した");
+
+        let service = service_at(&repo, FixedClock::at(date(2026, 9, 2)));
+        service.delete_task(old).unwrap();
+
+        assert_eq!(service.board().unwrap().archived_done_count, 0);
+        let archived = service.list_archived_done().unwrap();
+        assert_eq!(archived.total, 0);
+        assert!(archived.tasks.is_empty());
+    }
+
+    /// `done_at` が無い完了タスク(古いデータ)は隠さない。
+    #[test]
+    fn a_completion_without_a_timestamp_stays_visible() {
+        let repo = Arc::new(MemoryRepository::default());
+        let service = service_at(&repo, FixedClock::at(date(2026, 9, 2)));
+        let task = service.create_task(new_task("いつ終えたか不明")).unwrap();
+        service.complete_task(task.id).unwrap();
+        // サービス経由では作れない状態を、リポジトリへ直接書いて再現する。
+        let mut stored = repo.find_task(task.id).unwrap().unwrap();
+        stored.done_at = None;
+        assert!(repo.update_task(&stored).unwrap());
+
+        let board = service.board().unwrap();
+        assert_eq!(done_ids(&board), [task.id]);
+        assert_eq!(board.archived_done_count, 0);
+        assert_eq!(service.list_archived_done().unwrap().total, 0);
     }
 }

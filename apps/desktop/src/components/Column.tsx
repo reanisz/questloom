@@ -2,6 +2,7 @@
 
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import type { ReactNode } from "react";
 
 import * as api from "../api";
 import { useBoardStore } from "../store";
@@ -30,6 +31,12 @@ interface Props {
    */
   over?: boolean;
   /**
+   * カード一覧とクイック追加の間に出す補足(Done 列の「過去の完了」リンクなど)。
+   *
+   * 列そのものは中身を知らない。何を出すかは [`BoardView`](./BoardView.tsx) が決める。
+   */
+  footer?: ReactNode;
+  /**
    * カードが右クリックされた。列は自分のキーを添えて BoardView へ中継するだけ
    * (メニューの状態はボード全体で 1 つなので BoardView が持つ)。
    */
@@ -40,7 +47,15 @@ interface Props {
   ) => void;
 }
 
-export function Column({ columnKey, label, cards, focused, over, onCardContextMenu }: Props) {
+export function Column({
+  columnKey,
+  label,
+  cards,
+  focused,
+  over,
+  footer,
+  onCardContextMenu,
+}: Props) {
   const mutate = useBoardStore((state) => state.mutate);
   // ドロップ先は列全体。ヘッダやクイック追加の上が死角にならないようにする。
   const { setNodeRef } = useDroppable({ id: `${COLUMN_DROPPABLE_PREFIX}${columnKey}` });
@@ -91,6 +106,8 @@ export function Column({ columnKey, label, cards, focused, over, onCardContextMe
         </SortableContext>
         {cards.length === 0 && <p className="column-empty">タスクなし</p>}
       </div>
+
+      {footer && <div className="column-footer">{footer}</div>}
 
       <QuickAdd columnKey={columnKey} label={label} onAdd={add} />
     </section>

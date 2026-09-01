@@ -125,6 +125,23 @@ export interface Board {
   today: string;
   weekStart: WeekStart;
   columns: BoardColumns;
+  /**
+   * 前日以前に完了したタスクの件数。
+   *
+   * `columns.done` は**今日完了した分だけ**なので、それ以前はここに件数としてだけ現れる。
+   * 中身は `list_archived_done`([`listArchivedDone`](./api.ts))で取る。
+   */
+  archivedDoneCount: number;
+}
+
+/** 過去の完了一覧 (`list_archived_done`)。 */
+export interface ArchivedDone {
+  /** 完了が新しい順。最大 `limit` 件。 */
+  tasks: TaskCard[];
+  /** 条件に合う総件数(`tasks` が切り詰められていても実数)。 */
+  total: number;
+  /** 適用された上限。`total > limit` なら古い分は返っていない。 */
+  limit: number;
 }
 
 /** タスク詳細。TaskCard を平坦化して関連情報を足したもの。 */

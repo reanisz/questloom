@@ -517,6 +517,28 @@ h3 {
   font-size: 12px;
 }
 
+/* 列の補足行(Done 列の「過去の完了」への入口)。カード一覧とクイック追加の間。 */
+.column-footer {
+  padding: 0 10px 8px;
+}
+
+.column-link {
+  padding: 3px 4px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.column-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
 /*
  * クイック追加。通常は控えめなテキストボタンで、押すと入力欄に入れ替わる。
  * 開閉で列の高さが動かないよう、ボタンと入力欄の padding は揃えておく。
@@ -1260,6 +1282,21 @@ textarea {
   align-items: center;
   gap: 8px;
   font-size: 11px;
+}
+
+/* 過去の完了は行そのものが「詳細を開く」ボタン。見た目は行のまま。 */
+.archived-open {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.archived-open:hover .deleted-title {
+  text-decoration: underline;
 }
 
 /* ---- AI ダイアログの中身 ---- */

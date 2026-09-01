@@ -13,6 +13,7 @@ import type {
   AiCreateResult,
   AiStatus,
   AiTextResult,
+  ArchivedDone,
   Board,
   BoardColumnKey,
   CoreSettings,
@@ -107,6 +108,14 @@ export const restoreTask = (taskId: TaskId) => call<Task>("restore_task", { task
 
 /** 削除済みタスクの一覧。新しく消したものが先頭。 */
 export const listDeletedTasks = () => call<TaskCard[]>("list_deleted_tasks");
+
+/**
+ * 過去の完了(前日以前に完了したタスク)の一覧。完了が新しい順。
+ *
+ * ボードの Done 列は今日完了した分だけで、件数は `board.archivedDoneCount` に出る。
+ * 返るのは `limit` 件までで、`total` が総件数(ページングは無い)。
+ */
+export const listArchivedDone = () => call<ArchivedDone>("list_archived_done");
 
 /** コア設定を取得する。 */
 export const getSettings = () => call<CoreSettings>("get_settings");

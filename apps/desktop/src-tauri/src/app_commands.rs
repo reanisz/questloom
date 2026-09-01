@@ -37,6 +37,8 @@ pub const APP_COMMANDS: &[&str] = &[
     "delete_task",
     "restore_task",
     "list_deleted_tasks",
+    // 過去の完了(main ウィンドウ専用)
+    "list_archived_done",
     // 設定・稼働状態・ウィンドウ
     "get_settings",
     "get_default_settings",

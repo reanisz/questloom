@@ -129,7 +129,12 @@ export interface PluginTaskApi {
   updateTask(taskId: TaskId, patch: TaskPatch): Promise<Task>;
   /** タスク詳細(リソース・履歴・親子込み)を取る。 */
   getTask(taskId: TaskId): Promise<TaskDetail>;
-  /** 全タスクを 1 本の配列で返す(`get_board` を平坦化したもの)。 */
+  /**
+   * 全タスクを 1 本の配列で返す(`get_board` を平坦化したもの)。
+   *
+   * ボードと同じ絞り込みがかかる。**完了済みは「今日完了した分」しか含まれない**
+   * (前日以前の完了は画面でも別扱いで、プラグインからは見えない)。
+   */
   listTasks(): Promise<TaskCard[]>;
   /** タスクを完了にする(冪等)。 */
   completeTask(taskId: TaskId): Promise<Task>;

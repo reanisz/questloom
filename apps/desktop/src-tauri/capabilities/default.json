@@ -27,6 +27,7 @@
     "allow-delete-task",
     "allow-restore-task",
     "allow-list-deleted-tasks",
+    "allow-list-archived-done",
 
     "allow-get-settings",
     "allow-get-default-settings",

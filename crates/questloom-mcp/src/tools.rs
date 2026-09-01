@@ -30,7 +30,9 @@ Tasks created here default to instant tasks in the New column, which show up in 
 overlay for one-click completion; pass `column` to create a regular task instead. \
 The `watching` column parks a task that is waiting on something external: any change you \
 make from here (add_task_update, or create_task with that task as `parent_id`) wakes it \
-back up into New so the user sees it.";
+back up into New so the user sees it. \
+The user's board only shows completions from today in `done` (older ones move to a separate \
+\"past completions\" list), but the tools here always see every completed task.";
 
 // ---- 引数に使う列挙型 ----
 //
@@ -294,7 +296,9 @@ impl QuestloomTools {
     }
 
     #[tool(
-        description = "List tasks on the board. Optionally filter by status and/or board column."
+        description = "List tasks on the board. Optionally filter by status and/or board column. \
+             The \"done\" column here holds every completed task; the desktop board only shows \
+             the ones completed today and keeps older completions in a separate list."
     )]
     pub fn list_tasks(
         &self,
@@ -489,8 +493,11 @@ impl QuestloomTools {
     }
 
     /// ボードを集計し、絞り込みを適用した一覧 JSON を作る。
+    ///
+    /// 使うのは [`TaskService::full_board`] の方。UI のボードは Done 列に
+    /// 「今日完了した分」しか出さないが、AI には完了済みも全部見せる。
     fn collect_tasks(&self, args: &ListTasksArgs) -> CoreResult<Value> {
-        let board = self.service.board()?;
+        let board = self.service.full_board()?;
         let wanted = args.status.map(TaskStatus::from);
         let requested = args.column.map(BoardColumn::from);
 

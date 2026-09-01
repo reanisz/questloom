@@ -42,6 +42,7 @@ import {
   type TaskCard,
   type TaskId,
 } from "../types";
+import { ArchivedDoneDialog } from "./ArchivedDoneDialog";
 import { boardCollisionDetection } from "./collision";
 import { Column, columnDomId } from "./Column";
 import { type Point } from "./contextMenu";
@@ -80,6 +81,8 @@ export function BoardView({ board, expanded, onExpand }: Props) {
   /** 右クリックメニューの「削除」の確認待ち。ドロワーのそれとは独立。 */
   const [confirmDelete, setConfirmDelete] = useState<{ id: TaskId; title: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  /** Done 列のフッタから開く「過去の完了」一覧。 */
+  const [archivedOpen, setArchivedOpen] = useState(false);
 
   const columns = expanded ? BOARD_COLUMNS : BOARD_COLUMNS.filter(({ key }) => isPrimaryColumn(key));
 
@@ -163,6 +166,20 @@ export function BoardView({ board, expanded, onExpand }: Props) {
             cards={board.columns[key]}
             focused={focused === key}
             over={overColumn === key}
+            // Done 列は今日完了した分しか出さないので、それ以前への入口を足す。
+            footer={
+              key === "done" && board.archivedDoneCount > 0 ? (
+                <button
+                  type="button"
+                  className="column-link"
+                  data-testid="open-archived-done"
+                  title="前日以前に完了したタスクを見る"
+                  onClick={() => setArchivedOpen(true)}
+                >
+                  過去の完了 {board.archivedDoneCount} 件…
+                </button>
+              ) : undefined
+            }
             onCardContextMenu={(card, column, anchor) => setMenu({ card, column, anchor })}
           />
         ))}
@@ -193,6 +210,7 @@ export function BoardView({ board, expanded, onExpand }: Props) {
           onDelete={() => setConfirmDelete({ id: menu.card.id, title: menu.card.title })}
         />
       )}
+      {archivedOpen && <ArchivedDoneDialog onClose={() => setArchivedOpen(false)} />}
       {confirmDelete && (
         <DeleteConfirmDialog
           title={confirmDelete.title}

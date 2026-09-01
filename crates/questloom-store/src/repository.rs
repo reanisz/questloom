@@ -1,13 +1,14 @@
 //! [`TaskRepository`] の SQLite 実装。書き込みはすべてトランザクション内で行う。
 
+use chrono::{DateTime, Utc};
 use questloom_core::model::{ResourceId, Task, TaskId, TaskResource, TaskStatus, TaskUpdateEntry};
 use questloom_core::repository::{RepoResult, TaskRepository};
-use rusqlite::{params_from_iter, Connection, OptionalExtension, Row, Transaction};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 
 use crate::error::StoreResult;
 use crate::mapping::{
-    resource_from_row, resource_params, task_from_row, task_params, update_from_row, update_params,
-    RESOURCE_COLUMNS, TASK_COLUMNS, UPDATE_COLUMNS,
+    resource_from_row, resource_params, task_from_row, task_params, time_to_sql, update_from_row,
+    update_params, RESOURCE_COLUMNS, TASK_COLUMNS, UPDATE_COLUMNS,
 };
 use crate::SqliteStore;
 
@@ -35,6 +36,13 @@ const INSERT_UPDATE: &str = "INSERT INTO task_updates (id, task_id, body, origin
 ///
 /// `find_task` は復元のために削除済みも返す。除外するのはそれ以外の通常クエリ。
 const ALIVE: &str = "deleted_at IS NULL";
+
+/// 「`?2` の時刻より前に完了した、生存しているタスク」の条件(`?1` は `status`)。
+///
+/// `done_at` は RFC3339(UTC・ミリ秒)の固定長テキストなので、文字列の大小比較が
+/// そのまま時刻の前後比較になる(`ORDER BY done_at` も同じ理由で使える)。
+const DONE_BEFORE: &str =
+    "status = ?1 AND done_at IS NOT NULL AND done_at < ?2 AND deleted_at IS NULL";
 
 /// 指定タスクの主リソースをすべて解除する。
 const CLEAR_PRIMARY: &str =
@@ -152,6 +160,37 @@ impl TaskRepository for SqliteStore {
                  ORDER BY deleted_at DESC, id DESC"
             );
             query_all(&conn, &sql, [], task_from_row)
+        })
+    }
+
+    fn list_done_before(&self, before: DateTime<Utc>, limit: usize) -> RepoResult<Vec<Task>> {
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE {DONE_BEFORE}
+                 ORDER BY done_at DESC, id DESC LIMIT ?3"
+            );
+            // usize が i64 に収まらないほどの limit は来ない(来ても上限として無害)。
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            query_all(
+                &conn,
+                &sql,
+                params![TaskStatus::Done.as_str(), time_to_sql(before), limit],
+                task_from_row,
+            )
+        })
+    }
+
+    fn count_done_before(&self, before: DateTime<Utc>) -> RepoResult<usize> {
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!("SELECT COUNT(*) FROM tasks WHERE {DONE_BEFORE}");
+            let count: i64 = conn.query_row(
+                &sql,
+                params![TaskStatus::Done.as_str(), time_to_sql(before)],
+                |row| row.get(0),
+            )?;
+            Ok(usize::try_from(count).unwrap_or(0))
         })
     }
 
@@ -353,6 +392,52 @@ mod tests {
         let listed = store.list_deleted_tasks().unwrap();
         let ids: Vec<TaskId> = listed.iter().map(|t| t.id).collect();
         assert_eq!(ids, [newer.id, older.id]);
+    }
+
+    /// 過去の完了だけを、新しい順・件数制限つきで拾えること。
+    #[test]
+    fn done_before_lists_the_newest_completions_within_the_limit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let at = |raw: &str| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let done = |raw: &str| Task {
+            status: TaskStatus::Done,
+            done_at: Some(at(raw)),
+            ..task()
+        };
+
+        let oldest = done("2026-09-01T10:00:00Z");
+        let newer = done("2026-09-02T10:00:00Z");
+        // 境界そのもの(cutoff と同時刻)は「今日の分」なので含めない。
+        let boundary = done("2026-09-03T00:00:00Z");
+        // 完了しているが削除済み。
+        let removed = Task {
+            deleted_at: Some(at("2026-09-02T12:00:00Z")),
+            ..done("2026-09-01T12:00:00Z")
+        };
+        // 未完了。done_at も持たない。
+        let open = task();
+        for task in [&oldest, &newer, &boundary, &removed, &open] {
+            store.insert_task_with_resources(task, &[]).unwrap();
+        }
+
+        let cutoff = at("2026-09-03T00:00:00Z");
+        assert_eq!(store.count_done_before(cutoff).unwrap(), 2);
+        let listed = store.list_done_before(cutoff, 10).unwrap();
+        assert_eq!(
+            listed.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [newer.id, oldest.id],
+            "完了が新しい順"
+        );
+
+        // 上限で切り詰めても、切り詰めるのは古い方。
+        let limited = store.list_done_before(cutoff, 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, newer.id);
+        assert!(store.list_done_before(cutoff, 0).unwrap().is_empty());
     }
 
     #[test]

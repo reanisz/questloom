@@ -3,6 +3,8 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+use chrono::{DateTime, Utc};
+
 use crate::model::{ResourceId, Task, TaskId, TaskResource, TaskStatus, TaskUpdateEntry};
 
 /// リポジトリ操作の `Result` 別名。
@@ -119,6 +121,24 @@ pub trait TaskRepository: Send + Sync + 'static {
     /// # Errors
     /// 永続化に失敗した場合。
     fn list_deleted_tasks(&self) -> RepoResult<Vec<Task>>;
+
+    /// `before` より前に完了したタスクを `done_at` 降順で最大 `limit` 件返す。
+    ///
+    /// ボードの Done 列から外れた「過去の完了」一覧
+    /// ([`list_archived_done`](crate::service::TaskService::list_archived_done))のためのクエリ。
+    /// 削除済みと、`done_at` を持たない行は除外する。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn list_done_before(&self, before: DateTime<Utc>, limit: usize) -> RepoResult<Vec<Task>>;
+
+    /// [`list_done_before`](Self::list_done_before) と同じ条件の総件数。
+    ///
+    /// `limit` で切り詰める前の件数を UI に出すために分けてある。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn count_done_before(&self, before: DateTime<Utc>) -> RepoResult<usize>;
 
     /// リソースを 1 件挿入する。主リソースはタスクにつき 1 つに保つ。
     ///

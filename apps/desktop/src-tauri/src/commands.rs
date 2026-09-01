@@ -7,7 +7,7 @@ use std::sync::Arc;
 use questloom_core::bucket::BoardColumn;
 use questloom_core::model::{Origin, ResourceId, Task, TaskId, TaskResource, TaskUpdateEntry};
 use questloom_core::service::{
-    Board, MoveRequest, NewResource, NewTask, TaskCard, TaskDetail, TaskPatch,
+    ArchivedDone, Board, MoveRequest, NewResource, NewTask, TaskCard, TaskDetail, TaskPatch,
 };
 use questloom_core::settings::CoreSettings;
 use serde::Serialize;
@@ -137,6 +137,15 @@ pub fn restore_task(state: State<'_, AppState>, task_id: TaskId) -> CommandResul
 #[tauri::command]
 pub fn list_deleted_tasks(state: State<'_, AppState>) -> CommandResult<Vec<TaskCard>> {
     state.service.list_deleted().map_err(fail)
+}
+
+/// 前日以前に完了したタスクを、完了が新しい順に返す。
+///
+/// ボードの Done 列は今日完了した分だけなので、それ以前を見るための入口。
+/// 返るのは上限つき(`limit`)で、総件数は `total` に入る。
+#[tauri::command]
+pub fn list_archived_done(state: State<'_, AppState>) -> CommandResult<ArchivedDone> {
+    state.service.list_archived_done().map_err(fail)
 }
 
 /// 親タスクを設定・解除する(循環は禁止)。

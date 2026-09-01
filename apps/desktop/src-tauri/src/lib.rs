@@ -162,6 +162,7 @@ pub fn run() {
             commands::delete_task,
             commands::restore_task,
             commands::list_deleted_tasks,
+            commands::list_archived_done,
             commands::get_settings,
             commands::get_default_settings,
             commands::set_settings,
@@ -553,13 +554,16 @@ mod tests {
     ///
     /// タスクの削除・復元(`delete_task` / `restore_task` / `list_deleted_tasks`)も
     /// **main だけ**にする。オーバーレイは完了させるだけ、プラグインには
-    /// 他人のタスクを消す手段を与えない。
+    /// 他人のタスクを消す手段を与えない。過去の完了一覧 (`list_archived_done`) も
+    /// ボードの画面のためのものなので main だけに配る(プラグインが完了履歴を
+    /// まとめて舐める道は作らない。`get_board` から見えるのは今日の完了まで)。
     #[test]
     fn management_commands_are_never_exposed_to_untrusted_windows() {
         let forbidden = allowed(&[
             "delete_task",
             "restore_task",
             "list_deleted_tasks",
+            "list_archived_done",
             "get_settings",
             "get_default_settings",
             "set_settings",

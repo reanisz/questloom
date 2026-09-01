@@ -5,7 +5,9 @@
 questloom はタスク管理・通知管理のデスクトップアプリ。当面は Windows 向けスタンドアロンだが、
 将来モバイル・Web・CLI 等へ展開する可能性を見越し、コアロジックを UI から分離した Rust workspace 構成をとる。
 UI は Trello 風のボード(New / Today / Tomorrow / ThisWeek / NextWeek / Future / Watching / Doing / Done)で、
-時間バケットは DB に保存せず `scheduled_*` から導出する。`Watching`(監視中)は「外部の変化待ち」で、
+時間バケットは DB に保存せず `scheduled_*` から導出する。同じ考え方で **Done 列に出るのは
+「今日完了した分」だけ**で、前日以前の完了は列フッタの「過去の完了 n 件…」から見る
+(下記「Done 列」節)。`Watching`(監視中)は「外部の変化待ち」で、
 ユーザー以外の origin による変化を受けると自動的に New へ戻る(下記「Watching」節)。加えて、内蔵 MCP サーバー経由で
 Claude Code / Codex などの AI エージェントからタスクを操作でき、AI CLI 呼び出しやプラグイン
 (第一弾は GitHub PR 監視)による自動タスク生成を備える。
@@ -219,6 +221,29 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 - DB は `status` が自由な TEXT なのでマイグレーション不要
   (`migrations.rs` の `a_v2_database_accepts_the_watching_status_without_a_migration` が担保)。
 
+## Done 列(今日の完了だけ)
+
+**ボードの Done 列に出るのは「今日完了した分」だけ**で、前日以前に完了したタスクは
+列フッタの「過去の完了 n 件…」リンク → ダイアログ(`components/ArchivedDoneDialog.tsx`)で見る。
+時間バケットと同じく**保存された状態ではなく表示時の導出**なので、データは 1 行も動かない。
+日付が変われば既存の `DayChanged` → 再フェッチでひとりでに消える。
+
+- 判定は `TaskService::board()`。`done_at` の**ローカル日付**が `Clock::today()` より前なら
+  列から外し、`Board::archivedDoneCount` に件数だけ載せる。`done_at` を持たない完了タスク
+  (サービス経由では作れないが古いデータにはありうる)は隠さない。
+- UTC ↔ ローカル日付の変換は **`Clock` の責務**(`local_date` / `local_day_start`)。
+  サービス層が `chrono::Local` を直接触ると、`FixedClock` で今日を固定してもタイムゾーン
+  絡みの判定だけ実機に引きずられる。`FixedClock::with_offset_hours` でその境界も試せる。
+- 中身は `list_archived_done`(`TaskService::list_archived_done` → `ArchivedDone`)。
+  完了が新しい順に **最大 `ARCHIVED_DONE_LIMIT`(200)件**で、総件数は `total`。
+  ページングは無く、切り詰めたときはダイアログが「全 n 件のうち…」と断る。
+  削除済みは含まない。SQL は `repository.rs` の `DONE_BEFORE`(`done_at` は固定長の
+  RFC3339 テキストなので文字列比較でよい)。
+- **`get_board` 越しに見えるのも今日の完了まで**(オーバーレイ・plugin-host も同じ)。
+  完了済みを全部見たい呼び出し側は `TaskService::full_board()` を使う。使っているのは
+  MCP の `list_tasks` だけで、AI には従来どおり全件を見せる。
+- `list_archived_done` command は **main ウィンドウだけ**に配る(削除・復元と同じ扱い)。
+
 ## 内蔵 MCP サーバー
 
 `crates/questloom-mcp` が、公式 Rust SDK([rmcp](https://docs.rs/rmcp) 3.x)の
@@ -253,7 +278,7 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 
 | ツール | 引数 | 内容 |
 |---|---|---|
-| `list_tasks` | `status?`, `column?` | ボードのタスク一覧(id, title, status, column, bucket, isInstant, deadline, scheduled) |
+| `list_tasks` | `status?`, `column?` | ボードのタスク一覧(id, title, status, column, bucket, isInstant, deadline, scheduled)。**`done` は完了済み全件**(画面の Done 列は今日の分だけ)|
 | `get_task` | `task_id` | 詳細(関連リソース・アップデート履歴・親子込み) |
 | `create_task` | `title`, `description?`, `column?`, `deadline?`, `is_instant?`, `parent_id?`, `resources?` | 作成。既定は **インスタントタスクを New へ**。`column` 指定時は通常タスクとしてその列へ |
 | `update_task` | `task_id`, `title?`, `description?`, `deadline?`, `clear_deadline?` | タイトル・詳細・締切の更新 |
@@ -499,7 +524,8 @@ KV に持つのは `inbox:<owner>/<repo>#<番号>`
 2. 対象は「description が空(空白のみを含む)で、PR の URL を関連リソースに持つタスク」。
    1 タスクにつきリソース順で最初に見つかった PR を 1 件だけ使う。
    このプラグインが作ったタスク (`origin == plugin:github`) と削除済みタスクは対象外。
-   Done は対象に含める。
+   Done も対象に含める(ただし `get_board` が返す Done は**今日完了した分まで**なので、
+   前日以前に完了したタスクには結局書き込まない)。
 3. `GET /repos/{owner}/{repo}/pulls/{番号}` を 1 回だけ叩き(PAT があれば `Authorization` 付き、
    無ければ認証なし)、次の形を `update_task` で書き込む。本文が空なら 2 行目までで終わる。
 
@@ -785,14 +811,14 @@ CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-
 
 | webview | 許可 |
 |---|---|
-| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`) は**ここだけ** |
+| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、過去の完了 (`list_archived_done`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
 | `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings`、設定画面専用の `plugin_directory` / `plugin_list_loaded` / `plugin_secret_set` / `plugin_secret_status` を除く)+ シークレットの読み出し `plugin_secret_get` + `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
 | `browser-pane` | **`browser_pane_escape` だけ**(`capabilities/browser-pane.json`)。外部ページが載るので、ここに 2 つ目を足さないこと |
 
 plugin-host では第三者のプラグインコードが動くので、`get_settings` / `set_settings` /
 `get_runtime_status`(MCP の URL が載る)/ `get_mcp_token_status` / `set_mcp_token` /
-`ai_*` / `browser_pane_*` / タスクの削除・復元は**渡さない**。許可されていない
+`ai_*` / `browser_pane_*` / タスクの削除・復元 / `list_archived_done` は**渡さない**。許可されていない
 command を invoke すると Tauri が拒否する。command を足したら `APP_COMMANDS` と
 `capabilities/default.json` の両方に足すこと(食い違いは `src-tauri/src/lib.rs` の
 テストが検出する)。

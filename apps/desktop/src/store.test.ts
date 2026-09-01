@@ -58,7 +58,7 @@ function board(columns: Partial<Record<BoardColumnKey, string[]>>): Board {
   for (const [key, ids] of Object.entries(columns) as [BoardColumnKey, string[]][]) {
     empty[key] = ids.map(card);
   }
-  return { today: "2026-08-31", weekStart: "monday", columns: empty };
+  return { today: "2026-08-31", weekStart: "monday", columns: empty, archivedDoneCount: 0 };
 }
 
 /** 列の並びを id だけで読む。 */
