@@ -320,6 +320,30 @@ describe("内蔵ブラウザペイン", () => {
     expect(useBoardStore.getState().paneUrl).toBeNull();
   });
 
+  it("ドロワーが開いている間に開いたペインは、ドロワーを閉じると一緒に閉じる", () => {
+    reset({ selectedId: "a", detail: {} as TaskDetail });
+    useBoardStore.getState().openPane("https://example.com");
+    expect(useBoardStore.getState().paneTiedToDrawer).toBe(true);
+
+    useBoardStore.getState().closeTask();
+    expect(useBoardStore.getState().paneUrl).toBeNull();
+    expect(useBoardStore.getState().paneTiedToDrawer).toBe(false);
+  });
+
+  it("ドロワーなしで開いたペインは、ドロワーの開閉に影響されない", () => {
+    useBoardStore.getState().openPane("https://example.com");
+    expect(useBoardStore.getState().paneTiedToDrawer).toBe(false);
+
+    reset({
+      selectedId: "a",
+      detail: {} as TaskDetail,
+      paneUrl: "https://example.com",
+      paneTiedToDrawer: false,
+    });
+    useBoardStore.getState().closeTask();
+    expect(useBoardStore.getState().paneUrl).toBe("https://example.com");
+  });
+
   it("覆う UI の数を数え、閉じ過ぎても負にしない", () => {
     const occlude = useBoardStore.getState().occludePane;
     occlude(1);

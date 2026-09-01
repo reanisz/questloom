@@ -46,6 +46,14 @@ interface BoardState {
    * 0 でない間はペインを隠して、後ろに回り込んだ UI が操作できなくならないようにする。
    */
   paneOccluders: number;
+  /**
+   * ペインがドロワー(タスク詳細)に紐づいて開かれたか。
+   *
+   * 真ならドロワーを閉じたときに一緒に閉じる。internalAuto の自動表示と、
+   * ドロワー内のリソースクリックが該当する。コンテキストメニューから
+   * ドロワーなしで開いた場合は偽で、ドロワーの開閉に影響されない。
+   */
+  paneTiedToDrawer: boolean;
   /** URL リソースをクリックしたときの既定の開き方(コア設定の写し)。 */
   urlOpenMode: UrlOpenMode;
 
@@ -95,6 +103,7 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
   error: null,
   paneUrl: null,
   paneOccluders: 0,
+  paneTiedToDrawer: false,
   urlOpenMode: "external",
 
   async refresh() {
@@ -124,7 +133,12 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
   },
 
   closeTask() {
-    set({ selectedId: null, detail: null });
+    // ドロワー由来のペインはドロワーと運命を共にする。
+    set((state) => ({
+      selectedId: null,
+      detail: null,
+      ...(state.paneTiedToDrawer ? { paneUrl: null, paneTiedToDrawer: false } : {}),
+    }));
   },
 
   setError(error) {
@@ -132,11 +146,13 @@ export const useBoardStore = create<BoardState>()((set, get) => ({
   },
 
   openPane(url) {
-    set({ paneUrl: url });
+    // ドロワーが開いている間に開いたペインはドロワーに紐づける
+    // (internalAuto の自動表示・ドロワー内のリソースクリック)。
+    set((state) => ({ paneUrl: url, paneTiedToDrawer: state.selectedId != null }));
   },
 
   closePane() {
-    set({ paneUrl: null });
+    set({ paneUrl: null, paneTiedToDrawer: false });
   },
 
   occludePane(delta) {
