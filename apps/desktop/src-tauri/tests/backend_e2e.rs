@@ -487,6 +487,124 @@ async fn a_watching_task_wakes_up_over_mcp() {
     dir.close().expect("一時ディレクトリを片付けられる");
 }
 
+/// 実アプリでチェックリストを一往復させる。
+///
+/// 「MCP で項目を足す → `get_task` に出る → チェックする → 監視中タスクへの追加で起床」まで。
+/// v3 マイグレーションが実 DB に当たり、`task_checklist_items` が実際に作られて
+/// 読み書きできることを、起動配線ごと確かめるのが狙い。
+#[tokio::test]
+#[ignore = "ビルド済みの target/debug/questloom-desktop を要する (--ignored で実行)"]
+async fn checklist_items_round_trip_over_mcp() {
+    const CHECKED: &str = "バックエンド e2e のチェックリスト";
+    const WATCHED: &str = "バックエンド e2e のチェックリスト起床";
+
+    let exe = desktop_exe();
+    let dir = tempfile::tempdir().expect("一時ディレクトリ");
+    let port = free_port();
+
+    let mut app = SpawnedApp::spawn(&exe, dir.path(), port);
+    let mut mcp = McpClient::new(format!("http://127.0.0.1:{port}/mcp"));
+    mcp.initialize(&mut app).await;
+
+    // 通常タスクを作り、チェックリストを 2 件足す。
+    let created = mcp
+        .call(
+            "create_task",
+            json!({ "title": CHECKED, "column": "today" }),
+        )
+        .await;
+    let task_id = created["id"].as_str().expect("id が返る").to_owned();
+
+    let first = mcp
+        .call(
+            "add_checklist_item",
+            json!({ "task_id": task_id, "body": "住所変更" }),
+        )
+        .await;
+    let item_id = first["id"].as_str().expect("項目の id が返る").to_owned();
+    assert_eq!(first["body"], "住所変更");
+    assert_eq!(first["checked"], false);
+    mcp.call(
+        "add_checklist_item",
+        json!({ "task_id": task_id, "body": "電気の停止" }),
+    )
+    .await;
+
+    // get_task に checklist と進捗が出る。
+    let detail = mcp.call("get_task", json!({ "task_id": task_id })).await;
+    let checklist = detail["checklist"].as_array().expect("checklist は配列");
+    assert_eq!(checklist.len(), 2, "{detail}");
+    assert_eq!(checklist[0]["body"], "住所変更");
+    assert_eq!(checklist[1]["body"], "電気の停止");
+    assert_eq!(detail["checklistTotal"], 2);
+    assert_eq!(detail["checklistDone"], 0);
+
+    // チェックする。
+    let ticked = mcp
+        .call(
+            "set_checklist_item",
+            json!({ "task_id": task_id, "item_id": item_id, "checked": true }),
+        )
+        .await;
+    assert_eq!(ticked["checked"], true);
+    let detail = mcp.call("get_task", json!({ "task_id": task_id })).await;
+    assert_eq!(detail["checklistDone"], 1);
+    assert_eq!(
+        detail["status"], "todo",
+        "チェックしてもタスクは完了しない: {detail}"
+    );
+
+    // 監視中のタスクへ MCP から項目を足すと起床する。
+    let watched = mcp
+        .call(
+            "create_task",
+            json!({ "title": WATCHED, "column": "watching" }),
+        )
+        .await;
+    let watched_id = watched["id"].as_str().expect("id が返る").to_owned();
+    assert_eq!(watched["status"], "watching");
+
+    mcp.call(
+        "add_checklist_item",
+        json!({ "task_id": watched_id, "body": "外から足された項目" }),
+    )
+    .await;
+
+    let listed = mcp.call("list_tasks", json!({ "column": "new" })).await;
+    let woken = find_task(&listed, &watched_id).expect("New に現れる");
+    assert_eq!(woken["status"], "new", "{listed}");
+
+    assert!(app.is_running(), "往復のあいだアプリは生きている");
+    app.stop();
+
+    {
+        // 実 DB に残っていること(v3 のテーブルへ実際に書けている)。
+        let state = reopen(dir.path());
+        let detail = state
+            .service
+            .task_detail(task_id.parse().expect("UUID"))
+            .expect("詳細を取れる");
+        assert_eq!(detail.checklist.len(), 2);
+        assert_eq!(detail.checklist[0].body, "住所変更");
+        assert!(detail.checklist[0].checked);
+        assert!(!detail.checklist[1].checked);
+        assert_eq!(detail.card.checklist_done, 1);
+        assert_eq!(detail.card.checklist_total, 2);
+
+        // 起床した側は New に居て、チェックリストも残っている。
+        let board = state.service.board().expect("ボードを取れる");
+        let card = board
+            .columns
+            .new
+            .iter()
+            .find(|card| card.task.id.to_string() == watched_id)
+            .expect("New に残っている");
+        assert_eq!(card.checklist_total, 1);
+    }
+
+    dir.close().expect("一時ディレクトリを片付けられる");
+}
+
 /// 既存ユーザーの移行パスを実プロセス・実バックエンドで通す。
 ///
 /// 「設定 JSON に平文の `mcpToken` を仕込む → 実アプリを起動 → 資格情報マネージャーへ

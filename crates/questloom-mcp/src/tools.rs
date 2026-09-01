@@ -9,7 +9,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use questloom_core::bucket::{bucket_for, BoardColumn, Bucket};
 use questloom_core::error::{CoreError, CoreResult};
-use questloom_core::model::{Origin, ResourceKind, Scheduled, Task, TaskId, TaskStatus};
+use questloom_core::model::{
+    ChecklistItemId, Origin, ResourceKind, Scheduled, Task, TaskId, TaskStatus,
+};
 use questloom_core::service::{MoveRequest, NewResource, NewTask, TaskPatch, TaskService};
 use questloom_core::settings::WeekStart;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -29,8 +31,10 @@ Time buckets are derived from the schedule, so moving a task to a column sets it
 Tasks created here default to instant tasks in the New column, which show up in the user's \
 overlay for one-click completion; pass `column` to create a regular task instead. \
 The `watching` column parks a task that is waiting on something external: any change you \
-make from here (add_task_update, or create_task with that task as `parent_id`) wakes it \
-back up into New so the user sees it. \
+make from here (add_task_update, add_checklist_item / set_checklist_item, or create_task \
+with that task as `parent_id`) wakes it back up into New so the user sees it. \
+Tasks also carry an in-task checklist for steps too small to be child tasks; ticking every \
+item does not complete the task. \
 The user's board only shows completions from today in `done` (older ones move to a separate \
 \"past completions\" list), but the tools here always see every completed task.";
 
@@ -260,6 +264,39 @@ pub struct AddResourceArgs {
     pub is_primary: Option<bool>,
 }
 
+/// `add_checklist_item` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct AddChecklistItemArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// The checklist item text. Required, must not be blank.
+    pub body: String,
+}
+
+/// `set_checklist_item` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SetChecklistItemArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// The checklist item id (UUID), from `get_task`.
+    pub item_id: String,
+    /// Tick or untick the item.
+    #[serde(default)]
+    pub checked: Option<bool>,
+    /// Replace the item text. Must not be blank.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// `remove_checklist_item` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct RemoveChecklistItemArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// The checklist item id (UUID), from `get_task`.
+    pub item_id: String,
+}
+
 // ---- ツール本体 ----
 
 /// [`TaskService`] を MCP ツールとして公開するハンドラ。
@@ -477,6 +514,56 @@ impl QuestloomTools {
         respond(self.service.add_task_update(id, args.body, Origin::Mcp))
     }
 
+    #[tool(
+        description = "Append an item to a task's in-task checklist (for steps too small to be \
+                       child tasks). Ticking every item does NOT complete the task. A task in the \
+                       \"watching\" column wakes back into New when this is called."
+    )]
+    pub fn add_checklist_item(
+        &self,
+        Parameters(args): Parameters<AddChecklistItemArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        respond(self.service.add_checklist_item(id, args.body, Origin::Mcp))
+    }
+
+    #[tool(
+        description = "Tick/untick or rewrite one checklist item. Item ids come from `get_task`. \
+                       Omitted fields are left as-is. A task in the \"watching\" column wakes back \
+                       into New when this is called."
+    )]
+    pub fn set_checklist_item(
+        &self,
+        Parameters(args): Parameters<SetChecklistItemArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        let item_id = parse_checklist_item_id(&args.item_id)?;
+        respond(self.service.update_checklist_item(
+            id,
+            item_id,
+            args.body,
+            args.checked,
+            Origin::Mcp,
+        ))
+    }
+
+    #[tool(
+        description = "Remove one checklist item from a task. Item ids come from `get_task`. \
+                       Unlike adding or ticking, this never wakes a \"watching\" task."
+    )]
+    pub fn remove_checklist_item(
+        &self,
+        Parameters(args): Parameters<RemoveChecklistItemArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        let item_id = parse_checklist_item_id(&args.item_id)?;
+        respond(
+            self.service
+                .remove_checklist_item(id, item_id, Origin::Mcp)
+                .map(|()| json!({ "taskId": id, "itemId": item_id, "removed": true })),
+        )
+    }
+
     #[tool(description = "Attach a related resource (URL or local file path) to a task.")]
     pub fn add_resource(
         &self,
@@ -551,6 +638,12 @@ impl ServerHandler for QuestloomTools {
 fn parse_task_id(raw: &str) -> Result<TaskId, ErrorData> {
     TaskId::from_str(raw).map_err(|error| {
         ErrorData::invalid_params(format!("invalid task_id {raw:?}: {error}"), None)
+    })
+}
+
+fn parse_checklist_item_id(raw: &str) -> Result<ChecklistItemId, ErrorData> {
+    ChecklistItemId::from_str(raw).map_err(|error| {
+        ErrorData::invalid_params(format!("invalid item_id {raw:?}: {error}"), None)
     })
 }
 

@@ -159,6 +159,10 @@ pub fn run() {
             commands::add_resource,
             commands::remove_resource,
             commands::set_parent,
+            commands::add_checklist_item,
+            commands::update_checklist_item,
+            commands::remove_checklist_item,
+            commands::reorder_checklist_item,
             commands::delete_task,
             commands::restore_task,
             commands::list_deleted_tasks,
@@ -611,6 +615,11 @@ mod tests {
     /// 他人のタスクを消す手段を与えない。過去の完了一覧 (`list_archived_done`) も
     /// ボードの画面のためのものなので main だけに配る(プラグインが完了履歴を
     /// まとめて舐める道は作らない。`get_board` から見えるのは今日の完了まで)。
+    ///
+    /// チェックリストの command (`*_checklist_item`) も main だけ。これらは origin を
+    /// `User` に固定しているので、plugin-host に配ると**第三者のプラグインが
+    /// 「利用者の操作」を騙れる**(= 監視中タスクを起こさずに中身を書き換えられる)。
+    /// プラグイン・AI がチェックリストを触る道は MCP のツール(origin は `Mcp`)。
     #[test]
     fn management_commands_are_never_exposed_to_untrusted_windows() {
         let forbidden = allowed(&[
@@ -618,6 +627,10 @@ mod tests {
             "restore_task",
             "list_deleted_tasks",
             "list_archived_done",
+            "add_checklist_item",
+            "update_checklist_item",
+            "remove_checklist_item",
+            "reorder_checklist_item",
             "get_settings",
             "get_default_settings",
             "set_settings",

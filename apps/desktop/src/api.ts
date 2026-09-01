@@ -16,6 +16,8 @@ import type {
   ArchivedDone,
   Board,
   BoardColumnKey,
+  ChecklistItem,
+  ChecklistItemId,
   CoreSettings,
   MoveRequest,
   NewResource,
@@ -94,6 +96,44 @@ export const removeResource = (taskId: TaskId, resourceId: ResourceId) =>
 /** 親タスクを設定・解除する(循環は禁止)。 */
 export const setParent = (taskId: TaskId, parentId: TaskId | null) =>
   call<Task>("set_parent", { taskId, parentId });
+
+/*
+ * チェックリスト。バックエンド側の origin は User 固定なので、ここからの操作で
+ * 監視中タスクが起きることはない(起こすのは MCP 経由の外部からの変化だけ)。
+ */
+
+/** チェックリスト項目を末尾に追加する。空白のみの本文は拒否される。 */
+export const addChecklistItem = (taskId: TaskId, body: string) =>
+  call<ChecklistItem>("add_checklist_item", { taskId, body });
+
+/** チェックリスト項目の本文・チェック状態を変更する。省略した項目は変わらない。 */
+export const updateChecklistItem = (
+  taskId: TaskId,
+  itemId: ChecklistItemId,
+  patch: { body?: string; checked?: boolean },
+) =>
+  call<ChecklistItem>("update_checklist_item", {
+    taskId,
+    itemId,
+    body: patch.body ?? null,
+    checked: patch.checked ?? null,
+  });
+
+/** チェックリスト項目を削除する(冪等ではない)。 */
+export const removeChecklistItem = (taskId: TaskId, itemId: ChecklistItemId) =>
+  call<void>("remove_checklist_item", { taskId, itemId });
+
+/**
+ * チェックリスト項目を `prevId` と `nextId` の間へ動かす(両方 null なら末尾)。
+ *
+ * command は用意してあるが、並び替えの UI はまだ無い。
+ */
+export const reorderChecklistItem = (
+  taskId: TaskId,
+  itemId: ChecklistItemId,
+  prevId: ChecklistItemId | null = null,
+  nextId: ChecklistItemId | null = null,
+) => call<ChecklistItem>("reorder_checklist_item", { taskId, itemId, prevId, nextId });
 
 /**
  * タスクを削除する(ソフトデリート。冪等)。

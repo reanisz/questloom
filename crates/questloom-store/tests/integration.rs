@@ -316,6 +316,93 @@ fn resources_updates_and_parent_links_persist() {
     assert!(detail.card.task.is_instant);
 }
 
+/// チェックリストが実ファイル DB を往復し、ボードの進捗集計にも出ること。
+#[test]
+fn checklist_items_persist_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(&dir);
+    let service = make_service(Arc::clone(&store));
+
+    let task = service
+        .create_task(NewTask {
+            title: "引っ越し".to_owned(),
+            ..NewTask::default()
+        })
+        .unwrap();
+    let first = service
+        .add_checklist_item(task.id, "住所変更", Origin::User)
+        .unwrap();
+    let second = service
+        .add_checklist_item(task.id, "電気の停止", Origin::User)
+        .unwrap();
+    let third = service
+        .add_checklist_item(task.id, "ガスの停止", Origin::Mcp)
+        .unwrap();
+    service
+        .update_checklist_item(task.id, first.id, None, Some(true), Origin::User)
+        .unwrap();
+    // 3 番目を先頭へ動かす。
+    service
+        .reorder_checklist_item(task.id, third.id, None, Some(first.id))
+        .unwrap();
+    service
+        .remove_checklist_item(task.id, second.id, Origin::User)
+        .unwrap();
+
+    // 再オープン後も並び順・チェック状態が保たれている。
+    drop(service);
+    drop(store);
+    let reopened = make_service(open(&dir));
+    let detail = reopened.task_detail(task.id).unwrap();
+    assert_eq!(
+        detail
+            .checklist
+            .iter()
+            .map(|item| item.body.as_str())
+            .collect::<Vec<_>>(),
+        ["ガスの停止", "住所変更"]
+    );
+    assert!(!detail.checklist[0].checked);
+    assert!(detail.checklist[1].checked);
+
+    // ボードのカードにも進捗が載る。
+    let board = reopened.board().unwrap();
+    let card = board
+        .columns
+        .new
+        .iter()
+        .find(|card| card.task.id == task.id)
+        .expect("New にある");
+    assert_eq!(card.checklist_done, 1);
+    assert_eq!(card.checklist_total, 2);
+}
+
+/// タスクを物理削除すると、チェックリストも `ON DELETE CASCADE` で消えること。
+#[test]
+fn foreign_keys_cascade_checklist_items_on_task_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(&dir);
+    let service = make_service(Arc::clone(&store));
+    let task = service
+        .create_task(NewTask {
+            title: "削除される".to_owned(),
+            ..NewTask::default()
+        })
+        .unwrap();
+    service
+        .add_checklist_item(task.id, "項目", Origin::User)
+        .unwrap();
+    assert_eq!(store.list_all_checklist_items().unwrap().len(), 1);
+
+    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    conn.execute("DELETE FROM tasks WHERE id = ?1", [task.id.to_string()])
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(store.list_all_checklist_items().unwrap().len(), 0);
+}
+
 #[test]
 fn deleting_a_resource_removes_only_that_row() {
     let dir = tempfile::tempdir().unwrap();

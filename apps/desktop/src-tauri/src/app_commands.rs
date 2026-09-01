@@ -33,6 +33,11 @@ pub const APP_COMMANDS: &[&str] = &[
     "add_resource",
     "remove_resource",
     "set_parent",
+    // タスク内チェックリスト(main ウィンドウ専用。origin は User 固定)
+    "add_checklist_item",
+    "update_checklist_item",
+    "remove_checklist_item",
+    "reorder_checklist_item",
     // ソフトデリート(main ウィンドウ専用)
     "delete_task",
     "restore_task",

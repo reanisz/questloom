@@ -7,8 +7,8 @@ use std::error::Error as StdError;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use questloom_core::model::{
-    Origin, ResourceId, ResourceKind, Scheduled, Task, TaskId, TaskResource, TaskStatus,
-    TaskUpdateEntry, UpdateId,
+    ChecklistItem, ChecklistItemId, Origin, ResourceId, ResourceKind, Scheduled, Task, TaskId,
+    TaskResource, TaskStatus, TaskUpdateEntry, UpdateId,
 };
 use rusqlite::types::{Type, Value};
 use rusqlite::{Error as SqlError, Row};
@@ -24,6 +24,9 @@ pub const RESOURCE_COLUMNS: &str =
 
 /// 全カラムを固定順で読み出すための SELECT 句(`task_updates`)。
 pub const UPDATE_COLUMNS: &str = "id, task_id, body, origin, created_at";
+
+/// 全カラムを固定順で読み出すための SELECT 句(`task_checklist_items`)。
+pub const CHECKLIST_COLUMNS: &str = "id, task_id, body, checked, sort_order, created_at";
 
 /// 日時を DB 表現へ変換する。
 #[must_use]
@@ -89,6 +92,21 @@ pub fn update_params(entry: &TaskUpdateEntry) -> [Value; 5] {
         text(entry.body.clone()),
         text(entry.origin.to_string()),
         text(time_to_sql(entry.created_at)),
+    ]
+}
+
+/// [`CHECKLIST_COLUMNS`] と同じ順で `task_checklist_items` のバインド値を並べる。
+///
+/// INSERT と UPDATE で同じ並びを使う(UPDATE は `?1` を `WHERE id` に使う)。
+#[must_use]
+pub fn checklist_params(item: &ChecklistItem) -> [Value; 6] {
+    [
+        text(item.id.to_string()),
+        text(item.task_id.to_string()),
+        text(item.body.clone()),
+        Value::Integer(i64::from(item.checked)),
+        text(item.sort_order.clone()),
+        text(time_to_sql(item.created_at)),
     ]
 }
 
@@ -187,6 +205,21 @@ pub fn update_from_row(row: &Row<'_>) -> Result<TaskUpdateEntry, SqlError> {
     })
 }
 
+/// [`CHECKLIST_COLUMNS`] の順で並んだ行から [`ChecklistItem`] を復元する。
+///
+/// # Errors
+/// カラムの読み出しまたはドメイン値への変換に失敗した場合。
+pub fn checklist_from_row(row: &Row<'_>) -> Result<ChecklistItem, SqlError> {
+    Ok(ChecklistItem {
+        id: parse_at::<ChecklistItemId>(0, &row.get::<_, String>(0)?)?,
+        task_id: parse_at::<TaskId>(1, &row.get::<_, String>(1)?)?,
+        body: row.get(2)?,
+        checked: row.get::<_, i64>(3)? != 0,
+        sort_order: row.get(4)?,
+        created_at: time_from_sql(5, &row.get::<_, String>(5)?)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +309,48 @@ mod tests {
         let read = read_task(&conn).expect("読み戻せる");
         assert_eq!(read.deleted_at, Some(deleted_at));
         assert!(read.is_deleted());
+    }
+
+    /// チェックリスト項目も、書いた並びのまま読み戻せること。
+    #[test]
+    fn checklist_params_and_row_mapping_roundtrip() {
+        let item = ChecklistItem {
+            id: ChecklistItemId::new(),
+            task_id: TaskId::new(),
+            body: "住所変更".to_owned(),
+            checked: true,
+            sort_order: "a0".to_owned(),
+            created_at: DateTime::parse_from_rfc3339("2026-09-02T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let conn = Connection::open_in_memory().expect("インメモリ DB");
+        conn.execute_batch(
+            "CREATE TABLE task_checklist_items (id TEXT, task_id TEXT, body TEXT,
+                 checked INTEGER, sort_order TEXT, created_at TEXT);",
+        )
+        .expect("テーブルを作れる");
+        conn.execute(
+            "INSERT INTO task_checklist_items VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params_from_iter(checklist_params(&item)),
+        )
+        .expect("挿入できる");
+
+        let sql = format!("SELECT {CHECKLIST_COLUMNS} FROM task_checklist_items");
+        let read = conn
+            .query_row(&sql, [], checklist_from_row)
+            .expect("読み戻せる");
+        assert_eq!(read, item);
+
+        // checked は 0/1 の整数。0 なら偽として読める。
+        conn.execute("UPDATE task_checklist_items SET checked = 0", [])
+            .unwrap();
+        assert!(
+            !conn
+                .query_row(&sql, [], checklist_from_row)
+                .unwrap()
+                .checked
+        );
     }
 
     #[test]

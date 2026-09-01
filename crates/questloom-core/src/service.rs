@@ -16,8 +16,8 @@ use crate::clock::Clock;
 use crate::error::{CoreError, CoreResult};
 use crate::events::DomainEvent;
 use crate::model::{
-    Origin, ResourceId, ResourceKind, Scheduled, Task, TaskId, TaskResource, TaskStatus,
-    TaskUpdateEntry, UpdateId,
+    ChecklistItem, ChecklistItemId, Origin, ResourceId, ResourceKind, Scheduled, Task, TaskId,
+    TaskResource, TaskStatus, TaskUpdateEntry, UpdateId,
 };
 use crate::repository::TaskRepository;
 use crate::settings::{BoardSettings, WeekStart};
@@ -131,7 +131,14 @@ pub struct TaskCard {
     pub resource_count: usize,
     /// 主リソース(オーバーレイのワンクリック起動対象)。
     pub primary_resource: Option<TaskResource>,
+    /// チェック済みのチェックリスト項目数。
+    pub checklist_done: usize,
+    /// チェックリスト項目の総数。0 ならチェックリストを持たない。
+    pub checklist_total: usize,
 }
+
+/// ボード集計用のチェックリスト進捗 (`(チェック済み, 総数)`)。
+type ChecklistProgress = (usize, usize);
 
 /// ボードの各列。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -229,6 +236,8 @@ pub struct TaskDetail {
     pub card: TaskCard,
     /// 関連リソース。
     pub resources: Vec<TaskResource>,
+    /// チェックリスト項目(`sort_order` 昇順)。
+    pub checklist: Vec<ChecklistItem>,
     /// アップデート履歴(古い順)。
     pub updates: Vec<TaskUpdateEntry>,
     /// 親タスク。
@@ -359,6 +368,9 @@ impl TaskService {
 
         let tasks = self.repo.list_tasks()?;
         let resources = self.repo.list_all_resources()?;
+        // チェックリストもリソースと同じく 1 クエリで全件取り、ここで集計する
+        // (タスクごとに問い合わせると、ボード 1 枚で N+1 クエリになる)。
+        let checklist_items = self.repo.list_all_checklist_items()?;
 
         let mut child_counts: HashMap<TaskId, usize> = HashMap::new();
         for task in &tasks {
@@ -374,10 +386,25 @@ impl TaskService {
                 entry.1 = Some(resource);
             }
         }
+        let mut checklist_index: HashMap<TaskId, ChecklistProgress> = HashMap::new();
+        for item in checklist_items {
+            let entry = checklist_index.entry(item.task_id).or_insert((0, 0));
+            entry.1 += 1;
+            if item.checked {
+                entry.0 += 1;
+            }
+        }
 
         let mut columns = BoardColumns::default();
         for task in tasks {
-            let card = build_card(task, today, week_start, &child_counts, &resource_index);
+            let card = build_card(
+                task,
+                today,
+                week_start,
+                &child_counts,
+                &resource_index,
+                &checklist_index,
+            );
             columns
                 .column_mut(BoardColumn::of(card.task.status, card.bucket))
                 .push(card);
@@ -430,11 +457,21 @@ impl TaskService {
         let total = self.repo.count_done_before(before)?;
         let empty_counts = HashMap::new();
         let empty_resources = HashMap::new();
+        let empty_checklists = HashMap::new();
         let tasks = self
             .repo
             .list_done_before(before, ARCHIVED_DONE_LIMIT)?
             .into_iter()
-            .map(|task| build_card(task, today, week_start, &empty_counts, &empty_resources))
+            .map(|task| {
+                build_card(
+                    task,
+                    today,
+                    week_start,
+                    &empty_counts,
+                    &empty_resources,
+                    &empty_checklists,
+                )
+            })
             .collect();
 
         Ok(ArchivedDone {
@@ -454,6 +491,7 @@ impl TaskService {
         let task = self.require_task(id)?;
 
         let resources = self.repo.list_resources(id)?;
+        let checklist = self.repo.list_checklist_items(id)?;
         let updates = self.repo.list_updates(id)?;
         let children = self.repo.list_children(id)?;
         // 親子リンクは削除しても保持するので、削除済みの親はここで落とすだけにする
@@ -475,20 +513,36 @@ impl TaskService {
             ),
         )]);
 
-        let card = build_card(task, today, week_start, &child_counts, &resource_index);
+        let checklist_index = HashMap::from([(id, checklist_progress(&checklist))]);
+
+        let card = build_card(
+            task,
+            today,
+            week_start,
+            &child_counts,
+            &resource_index,
+            &checklist_index,
+        );
         let empty_counts = HashMap::new();
         let empty_resources = HashMap::new();
+        let empty_checklists = HashMap::new();
+        let plain = |task: Task| {
+            build_card(
+                task,
+                today,
+                week_start,
+                &empty_counts,
+                &empty_resources,
+                &empty_checklists,
+            )
+        };
         Ok(TaskDetail {
             card,
             resources,
+            checklist,
             updates,
-            parent: parent.map(|parent| {
-                build_card(parent, today, week_start, &empty_counts, &empty_resources)
-            }),
-            children: children
-                .into_iter()
-                .map(|child| build_card(child, today, week_start, &empty_counts, &empty_resources))
-                .collect(),
+            parent: parent.map(plain),
+            children: children.into_iter().map(plain).collect(),
         })
     }
 
@@ -523,11 +577,21 @@ impl TaskService {
         let week_start = self.week_start();
         let empty_counts = HashMap::new();
         let empty_resources = HashMap::new();
+        let empty_checklists = HashMap::new();
         Ok(self
             .repo
             .list_deleted_tasks()?
             .into_iter()
-            .map(|task| build_card(task, today, week_start, &empty_counts, &empty_resources))
+            .map(|task| {
+                build_card(
+                    task,
+                    today,
+                    week_start,
+                    &empty_counts,
+                    &empty_resources,
+                    &empty_checklists,
+                )
+            })
             .collect())
     }
 
@@ -822,6 +886,190 @@ impl TaskService {
         Ok(())
     }
 
+    // ---- チェックリスト ----
+
+    /// チェックリスト項目を末尾に追加する。
+    ///
+    /// **監視中 ([`TaskStatus::Watching`]) のタスクへ、ユーザー以外の origin で
+    /// 追加すると起床する**([`add_task_update`](Self::add_task_update) と同じ規則)。
+    /// チェックが全部埋まってもタスクは自動完了しない。
+    ///
+    /// # Errors
+    /// タスクが存在しない・削除済み、本文が空白のみ、または永続化層のエラー。
+    pub fn add_checklist_item(
+        &self,
+        id: TaskId,
+        body: impl Into<String>,
+        origin: Origin,
+    ) -> CoreResult<ChecklistItem> {
+        let _guard = self.lock_writes();
+        let mut task = self.require_task(id)?;
+        let body = normalize_checklist_body(&body.into())?;
+        let existing = self.repo.list_checklist_items(id)?;
+        let now = self.clock.now();
+
+        let item = ChecklistItem {
+            id: ChecklistItemId::new(),
+            task_id: id,
+            body,
+            checked: false,
+            sort_order: sort_order::generate_key_between(
+                existing.last().map(|item| item.sort_order.as_str()),
+                None,
+            )?,
+            created_at: now,
+        };
+        self.repo.insert_checklist_item(&item)?;
+        task.updated_at = now;
+        // 履歴追記と同じく、起床も同じ 1 回の書き込みに載せる。
+        let woken = self.wake(&mut task, &origin)?;
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskChecklistChanged { task_id: id });
+        if woken {
+            self.emit_woken(id);
+        }
+        Ok(item)
+    }
+
+    /// チェックリスト項目の本文・チェック状態を変更する。`None` の項目は変えない。
+    ///
+    /// 本文とチェックのどちらの変更でも、ユーザー以外の origin なら監視中のタスクを
+    /// 起こす(外から「終わった」と知らされるのも変化のうち)。
+    ///
+    /// # Errors
+    /// タスク・項目が存在しない、項目が別タスクに属する、本文が空白のみ、
+    /// または永続化層のエラー。
+    pub fn update_checklist_item(
+        &self,
+        id: TaskId,
+        item_id: ChecklistItemId,
+        body: Option<String>,
+        checked: Option<bool>,
+        origin: Origin,
+    ) -> CoreResult<ChecklistItem> {
+        let _guard = self.lock_writes();
+        let mut task = self.require_task(id)?;
+        let mut item = self.require_checklist_item(id, item_id)?;
+
+        if let Some(body) = body {
+            item.body = normalize_checklist_body(&body)?;
+        }
+        if let Some(checked) = checked {
+            item.checked = checked;
+        }
+        if !self.repo.update_checklist_item(&item)? {
+            return Err(CoreError::ChecklistItemNotFound(item_id));
+        }
+
+        task.updated_at = self.clock.now();
+        let woken = self.wake(&mut task, &origin)?;
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskChecklistChanged { task_id: id });
+        if woken {
+            self.emit_woken(id);
+        }
+        Ok(item)
+    }
+
+    /// チェックリスト項目を削除する。
+    ///
+    /// 「消えた」は待っていた変化ではないので、**起床はしない**
+    /// (docs/data-model.md の起床規則は追加・変更だけを対象にする)。
+    /// 冪等ではない: 存在しない項目は [`CoreError::ChecklistItemNotFound`]。
+    ///
+    /// # Errors
+    /// タスク・項目が存在しない、項目が別タスクに属する、または永続化層のエラー。
+    pub fn remove_checklist_item(
+        &self,
+        id: TaskId,
+        item_id: ChecklistItemId,
+        _origin: Origin,
+    ) -> CoreResult<()> {
+        let _guard = self.lock_writes();
+        let mut task = self.require_task(id)?;
+        self.require_checklist_item(id, item_id)?;
+        if !self.repo.delete_checklist_item(item_id)? {
+            return Err(CoreError::ChecklistItemNotFound(item_id));
+        }
+        task.updated_at = self.clock.now();
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskChecklistChanged { task_id: id });
+        Ok(())
+    }
+
+    /// チェックリスト項目を `prev` と `next` の間へ動かす。両方省略なら末尾。
+    ///
+    /// 並び替えは表示上の都合なので、origin を取らず**起床もしない**。
+    ///
+    /// # Errors
+    /// タスク・項目が存在しない、隣接指定が別タスクの項目、並び順キーの生成に失敗、
+    /// または永続化層のエラー。
+    pub fn reorder_checklist_item(
+        &self,
+        id: TaskId,
+        item_id: ChecklistItemId,
+        prev_id: Option<ChecklistItemId>,
+        next_id: Option<ChecklistItemId>,
+    ) -> CoreResult<ChecklistItem> {
+        let _guard = self.lock_writes();
+        let mut task = self.require_task(id)?;
+        let items = self.repo.list_checklist_items(id)?;
+        let mut item = items
+            .iter()
+            .find(|item| item.id == item_id)
+            .cloned()
+            .ok_or(CoreError::ChecklistItemNotFound(item_id))?;
+
+        // 動かしている項目自身を隣接に指定されても、自分のキーは基準にしない。
+        let key_of = |wanted: Option<ChecklistItemId>| -> CoreResult<Option<String>> {
+            match wanted.filter(|wanted| *wanted != item_id) {
+                Some(wanted) => items
+                    .iter()
+                    .find(|item| item.id == wanted)
+                    .map(|item| Some(item.sort_order.clone()))
+                    .ok_or(CoreError::ChecklistItemNotFound(wanted)),
+                None => Ok(None),
+            }
+        };
+        let prev = key_of(prev_id)?;
+        let next = key_of(next_id)?;
+        item.sort_order = match (prev, next) {
+            // 末尾へ。自分を除いた最後の項目の後ろに置く。
+            (None, None) => sort_order::generate_key_between(
+                items
+                    .iter()
+                    .rfind(|item| item.id != item_id)
+                    .map(|item| item.sort_order.as_str()),
+                None,
+            )?,
+            (prev, next) => sort_order::generate_key_between(prev.as_deref(), next.as_deref())?,
+        };
+
+        if !self.repo.update_checklist_item(&item)? {
+            return Err(CoreError::ChecklistItemNotFound(item_id));
+        }
+        task.updated_at = self.clock.now();
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskChecklistChanged { task_id: id });
+        Ok(item)
+    }
+
+    /// そのタスクに属するチェックリスト項目を取り出す。
+    ///
+    /// 別タスクの項目 id を渡された場合も「見つからない」として弾く
+    /// (タスクをまたいだ書き換えを通さないため)。書き込みロックを取った状態で呼ぶこと。
+    fn require_checklist_item(
+        &self,
+        id: TaskId,
+        item_id: ChecklistItemId,
+    ) -> CoreResult<ChecklistItem> {
+        self.repo
+            .list_checklist_items(id)?
+            .into_iter()
+            .find(|item| item.id == item_id)
+            .ok_or(CoreError::ChecklistItemNotFound(item_id))
+    }
+
     /// タスクを削除する(ソフトデリート)。
     ///
     /// `deleted_at` を立てるだけで行は消さない。ボード・一覧・子タスクからは
@@ -1048,23 +1296,44 @@ fn normalize_title(title: &str) -> CoreResult<String> {
     Ok(trimmed.to_owned())
 }
 
+fn normalize_checklist_body(body: &str) -> CoreResult<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err(CoreError::EmptyChecklistBody);
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// チェックリストの進捗 `(チェック済み, 総数)` を数える。
+fn checklist_progress(items: &[ChecklistItem]) -> ChecklistProgress {
+    (
+        items.iter().filter(|item| item.checked).count(),
+        items.len(),
+    )
+}
+
 fn build_card(
     task: Task,
     today: NaiveDate,
     week_start: WeekStart,
     child_counts: &HashMap<TaskId, usize>,
     resource_index: &HashMap<TaskId, (usize, Option<TaskResource>)>,
+    checklist_index: &HashMap<TaskId, ChecklistProgress>,
 ) -> TaskCard {
     let bucket = bucket_for(&task, today, week_start);
     let child_count = child_counts.get(&task.id).copied().unwrap_or(0);
     let (resource_count, primary_resource) =
         resource_index.get(&task.id).cloned().unwrap_or((0, None));
+    let (checklist_done, checklist_total) =
+        checklist_index.get(&task.id).copied().unwrap_or((0, 0));
     TaskCard {
         task,
         bucket,
         child_count,
         resource_count,
         primary_resource,
+        checklist_done,
+        checklist_total,
     }
 }
 
@@ -1081,6 +1350,7 @@ mod tests {
         tasks: StdMutex<Vec<Task>>,
         resources: StdMutex<Vec<TaskResource>>,
         updates: StdMutex<Vec<TaskUpdateEntry>>,
+        checklist: StdMutex<Vec<ChecklistItem>>,
     }
 
     impl MemoryRepository {
@@ -1250,6 +1520,54 @@ mod tests {
                 .collect();
             updates.sort_by_key(|u| u.created_at);
             Ok(updates)
+        }
+
+        fn list_checklist_items(&self, task_id: TaskId) -> RepoResult<Vec<ChecklistItem>> {
+            let mut items: Vec<ChecklistItem> = Self::lock(&self.checklist)
+                .iter()
+                .filter(|item| item.task_id == task_id)
+                .cloned()
+                .collect();
+            items.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
+            Ok(items)
+        }
+
+        fn list_all_checklist_items(&self) -> RepoResult<Vec<ChecklistItem>> {
+            let alive: HashSet<TaskId> = Self::lock(&self.tasks)
+                .iter()
+                .filter(|t| !t.is_deleted())
+                .map(|t| t.id)
+                .collect();
+            let mut items: Vec<ChecklistItem> = Self::lock(&self.checklist)
+                .iter()
+                .filter(|item| alive.contains(&item.task_id))
+                .cloned()
+                .collect();
+            items.sort_by(|a, b| (a.task_id, &a.sort_order).cmp(&(b.task_id, &b.sort_order)));
+            Ok(items)
+        }
+
+        fn insert_checklist_item(&self, item: &ChecklistItem) -> RepoResult<()> {
+            Self::lock(&self.checklist).push(item.clone());
+            Ok(())
+        }
+
+        fn update_checklist_item(&self, item: &ChecklistItem) -> RepoResult<bool> {
+            let mut items = Self::lock(&self.checklist);
+            match items.iter_mut().find(|slot| slot.id == item.id) {
+                Some(slot) => {
+                    *slot = item.clone();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        fn delete_checklist_item(&self, id: ChecklistItemId) -> RepoResult<bool> {
+            let mut items = Self::lock(&self.checklist);
+            let before = items.len();
+            items.retain(|item| item.id != id);
+            Ok(items.len() != before)
         }
     }
 
@@ -2348,6 +2666,489 @@ mod tests {
         assert_eq!(card["id"], task.id.to_string());
         assert_eq!(card["status"], "watching");
         assert!(card["bucket"].is_null());
+    }
+
+    // ---- チェックリスト ----
+
+    /// 項目を並び順どおりに並べた本文の配列。
+    fn bodies(service: &TaskService, id: TaskId) -> Vec<String> {
+        service
+            .task_detail(id)
+            .unwrap()
+            .checklist
+            .into_iter()
+            .map(|item| item.body)
+            .collect()
+    }
+
+    #[test]
+    fn checklist_items_are_appended_in_order_and_visible_in_the_detail() {
+        let service = service();
+        let task = service.create_task(new_task("引っ越し")).unwrap();
+
+        let first = service
+            .add_checklist_item(task.id, "  住所変更  ", Origin::User)
+            .unwrap();
+        let second = service
+            .add_checklist_item(task.id, "電気の停止", Origin::User)
+            .unwrap();
+
+        assert_eq!(first.body, "住所変更", "本文は trim される");
+        assert!(!first.checked);
+        assert_eq!(first.task_id, task.id);
+        assert!(first.sort_order < second.sort_order, "末尾に足される");
+        assert_eq!(bodies(&service, task.id), ["住所変更", "電気の停止"]);
+    }
+
+    #[test]
+    fn a_blank_checklist_body_is_rejected() {
+        let service = service();
+        let task = service.create_task(new_task("空")).unwrap();
+        assert!(matches!(
+            service.add_checklist_item(task.id, "   ", Origin::User),
+            Err(CoreError::EmptyChecklistBody)
+        ));
+        let item = service
+            .add_checklist_item(task.id, "ある", Origin::User)
+            .unwrap();
+        assert!(matches!(
+            service.update_checklist_item(
+                task.id,
+                item.id,
+                Some(" ".to_owned()),
+                None,
+                Origin::User
+            ),
+            Err(CoreError::EmptyChecklistBody)
+        ));
+    }
+
+    #[test]
+    fn updating_an_item_changes_only_the_given_fields() {
+        let service = service();
+        let task = service.create_task(new_task("手順")).unwrap();
+        let item = service
+            .add_checklist_item(task.id, "もとの本文", Origin::User)
+            .unwrap();
+
+        let checked = service
+            .update_checklist_item(task.id, item.id, None, Some(true), Origin::User)
+            .unwrap();
+        assert!(checked.checked);
+        assert_eq!(checked.body, "もとの本文", "本文は据え置き");
+
+        let renamed = service
+            .update_checklist_item(
+                task.id,
+                item.id,
+                Some("新しい本文".to_owned()),
+                None,
+                Origin::User,
+            )
+            .unwrap();
+        assert_eq!(renamed.body, "新しい本文");
+        assert!(renamed.checked, "チェックは据え置き");
+    }
+
+    #[test]
+    fn removing_an_item_is_not_idempotent() {
+        let service = service();
+        let task = service.create_task(new_task("消す")).unwrap();
+        let item = service
+            .add_checklist_item(task.id, "項目", Origin::User)
+            .unwrap();
+
+        service
+            .remove_checklist_item(task.id, item.id, Origin::User)
+            .unwrap();
+        assert!(service.task_detail(task.id).unwrap().checklist.is_empty());
+        assert!(matches!(
+            service.remove_checklist_item(task.id, item.id, Origin::User),
+            Err(CoreError::ChecklistItemNotFound(_))
+        ));
+    }
+
+    /// 別タスクの項目 id を渡しても書き換えられないこと。
+    #[test]
+    fn items_belong_to_exactly_one_task() {
+        let service = service();
+        let a = service.create_task(new_task("a")).unwrap();
+        let b = service.create_task(new_task("b")).unwrap();
+        let item = service
+            .add_checklist_item(a.id, "a の項目", Origin::User)
+            .unwrap();
+
+        assert!(matches!(
+            service.update_checklist_item(b.id, item.id, None, Some(true), Origin::User),
+            Err(CoreError::ChecklistItemNotFound(_))
+        ));
+        assert!(matches!(
+            service.remove_checklist_item(b.id, item.id, Origin::User),
+            Err(CoreError::ChecklistItemNotFound(_))
+        ));
+        assert!(matches!(
+            service.reorder_checklist_item(b.id, item.id, None, None),
+            Err(CoreError::ChecklistItemNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn reordering_moves_an_item_between_its_neighbours() {
+        let service = service();
+        let task = service.create_task(new_task("並べ替え")).unwrap();
+        let a = service
+            .add_checklist_item(task.id, "a", Origin::User)
+            .unwrap();
+        let b = service
+            .add_checklist_item(task.id, "b", Origin::User)
+            .unwrap();
+        let c = service
+            .add_checklist_item(task.id, "c", Origin::User)
+            .unwrap();
+
+        // c を a と b の間へ。
+        let moved = service
+            .reorder_checklist_item(task.id, c.id, Some(a.id), Some(b.id))
+            .unwrap();
+        assert!(a.sort_order < moved.sort_order);
+        assert!(moved.sort_order < b.sort_order);
+        assert_eq!(bodies(&service, task.id), ["a", "c", "b"]);
+
+        // 先頭へ。
+        service
+            .reorder_checklist_item(task.id, c.id, None, Some(a.id))
+            .unwrap();
+        assert_eq!(bodies(&service, task.id), ["c", "a", "b"]);
+
+        // 両端を省略したら末尾。
+        service
+            .reorder_checklist_item(task.id, c.id, None, None)
+            .unwrap();
+        assert_eq!(bodies(&service, task.id), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn the_board_card_carries_the_checklist_progress() {
+        let service = service();
+        let task = service.create_task(new_task("進捗")).unwrap();
+        let other = service.create_task(new_task("持たない")).unwrap();
+        let done = service
+            .add_checklist_item(task.id, "終わった", Origin::User)
+            .unwrap();
+        service
+            .add_checklist_item(task.id, "まだ", Origin::User)
+            .unwrap();
+        service
+            .update_checklist_item(task.id, done.id, None, Some(true), Origin::User)
+            .unwrap();
+
+        let board = service.board().unwrap();
+        let card = |id: TaskId| {
+            board
+                .columns
+                .new
+                .iter()
+                .find(|card| card.task.id == id)
+                .expect("ボードにある")
+        };
+        assert_eq!(card(task.id).checklist_done, 1);
+        assert_eq!(card(task.id).checklist_total, 2);
+        assert_eq!(card(other.id).checklist_total, 0, "持たないタスクは 0");
+
+        // 詳細のカードも同じ集計を持つ。
+        let detail = service.task_detail(task.id).unwrap();
+        assert_eq!(detail.card.checklist_done, 1);
+        assert_eq!(detail.card.checklist_total, 2);
+    }
+
+    /// 削除済みタスクの項目はボードの集計に混ざらない。
+    #[test]
+    fn checklists_of_deleted_tasks_are_not_counted() {
+        let service = service();
+        let task = service.create_task(new_task("消える")).unwrap();
+        service
+            .add_checklist_item(task.id, "項目", Origin::User)
+            .unwrap();
+        service.delete_task(task.id).unwrap();
+
+        assert!(service.board().unwrap().columns.new.is_empty());
+        assert_eq!(service.list_deleted().unwrap()[0].checklist_total, 0);
+    }
+
+    /// チェックが全部埋まってもタスクは自動完了しない。
+    #[test]
+    fn completing_every_item_does_not_complete_the_task() {
+        let service = service();
+        let task = service.create_task(new_task("全部やる")).unwrap();
+        for body in ["1", "2"] {
+            let item = service
+                .add_checklist_item(task.id, body, Origin::User)
+                .unwrap();
+            service
+                .update_checklist_item(task.id, item.id, None, Some(true), Origin::User)
+                .unwrap();
+        }
+
+        let after = service.find_task(task.id).unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::New);
+        assert!(after.done_at.is_none());
+    }
+
+    #[test]
+    fn checklist_operations_bump_updated_at_and_are_rejected_on_deleted_tasks() {
+        let service = service();
+        let task = service.create_task(new_task("削除済み")).unwrap();
+        let item = service
+            .add_checklist_item(task.id, "項目", Origin::User)
+            .unwrap();
+        assert_eq!(
+            service.find_task(task.id).unwrap().unwrap().updated_at,
+            service.clock.now(),
+            "追加でタスクの updated_at が進む"
+        );
+
+        service.delete_task(task.id).unwrap();
+        fn deleted<T>(result: CoreResult<T>) -> bool {
+            matches!(result, Err(CoreError::TaskDeleted(_)))
+        }
+        assert!(deleted(service.add_checklist_item(
+            task.id,
+            "追加",
+            Origin::User
+        )));
+        assert!(deleted(service.update_checklist_item(
+            task.id,
+            item.id,
+            None,
+            Some(true),
+            Origin::User
+        )));
+        assert!(deleted(service.remove_checklist_item(
+            task.id,
+            item.id,
+            Origin::User
+        )));
+        assert!(deleted(
+            service.reorder_checklist_item(task.id, item.id, None, None)
+        ));
+    }
+
+    /// フロントが読む JSON の形を固定する。
+    #[test]
+    fn checklist_json_shape() {
+        let service = service();
+        let task = service.create_task(new_task("契約")).unwrap();
+        let item = service
+            .add_checklist_item(task.id, "項目", Origin::User)
+            .unwrap();
+        service
+            .update_checklist_item(task.id, item.id, None, Some(true), Origin::User)
+            .unwrap();
+
+        let detail = serde_json::to_value(service.task_detail(task.id).unwrap()).unwrap();
+        assert_eq!(detail["checklistDone"], 1);
+        assert_eq!(detail["checklistTotal"], 1);
+        let entry = &detail["checklist"][0];
+        assert_eq!(entry["id"], item.id.to_string());
+        assert_eq!(entry["taskId"], task.id.to_string());
+        assert_eq!(entry["body"], "項目");
+        assert_eq!(entry["checked"], true);
+        assert!(entry["sortOrder"].is_string());
+        assert!(entry["createdAt"].is_string());
+
+        let board = serde_json::to_value(service.board().unwrap()).unwrap();
+        let card = &board["columns"]["new"][0];
+        assert_eq!(card["checklistDone"], 1);
+        assert_eq!(card["checklistTotal"], 1);
+    }
+
+    // ---- チェックリストによる起床 ----
+
+    #[test]
+    fn a_non_user_checklist_addition_wakes_a_watching_task() {
+        let service = service();
+        let task = watching_task(&service, "外の作業待ち");
+        let before = task.scheduled;
+
+        service
+            .add_checklist_item(task.id, "外から足された項目", Origin::Mcp)
+            .unwrap();
+
+        let woken = service.find_task(task.id).unwrap().expect("生きている");
+        assert_eq!(woken.status, TaskStatus::New);
+        assert_eq!(woken.scheduled, before, "起床しても予定は保持する");
+    }
+
+    #[test]
+    fn every_non_user_origin_wakes_through_the_checklist() {
+        for origin in [
+            Origin::Mcp,
+            Origin::Ai,
+            Origin::System,
+            Origin::Plugin("github".into()),
+        ] {
+            // 追加で起きる。
+            let added = service();
+            let task = watching_task(&added, "追加");
+            added
+                .add_checklist_item(task.id, "項目", origin.clone())
+                .unwrap();
+            assert_eq!(
+                added.find_task(task.id).unwrap().unwrap().status,
+                TaskStatus::New,
+                "{origin} の追加では起床する"
+            );
+
+            // チェックだけでも起きる。
+            let ticked = service();
+            let task = watching_task(&ticked, "チェック");
+            let item = ticked
+                .add_checklist_item(task.id, "項目", Origin::User)
+                .unwrap();
+            ticked
+                .update_checklist_item(task.id, item.id, None, Some(true), origin.clone())
+                .unwrap();
+            assert_eq!(
+                ticked.find_task(task.id).unwrap().unwrap().status,
+                TaskStatus::New,
+                "{origin} のチェックでは起床する"
+            );
+
+            // 本文の書き換えでも起きる。
+            let renamed = service();
+            let task = watching_task(&renamed, "本文");
+            let item = renamed
+                .add_checklist_item(task.id, "項目", Origin::User)
+                .unwrap();
+            renamed
+                .update_checklist_item(
+                    task.id,
+                    item.id,
+                    Some("書き換え".to_owned()),
+                    None,
+                    origin.clone(),
+                )
+                .unwrap();
+            assert_eq!(
+                renamed.find_task(task.id).unwrap().unwrap().status,
+                TaskStatus::New,
+                "{origin} の本文変更では起床する"
+            );
+        }
+    }
+
+    #[test]
+    fn user_checklist_edits_do_not_wake_a_watching_task() {
+        let service = service();
+        let task = watching_task(&service, "自分で書く");
+        let item = service
+            .add_checklist_item(task.id, "自分の項目", Origin::User)
+            .unwrap();
+        service
+            .update_checklist_item(task.id, item.id, None, Some(true), Origin::User)
+            .unwrap();
+
+        assert_eq!(
+            service.find_task(task.id).unwrap().unwrap().status,
+            TaskStatus::Watching
+        );
+        assert_eq!(service.board().unwrap().columns.watching.len(), 1);
+    }
+
+    /// 削除と並び替えでは起きない(待っていた「変化」ではないため)。
+    #[test]
+    fn removing_or_reordering_does_not_wake_a_watching_task() {
+        let service = service();
+        let task = watching_task(&service, "起きない");
+        let a = service
+            .add_checklist_item(task.id, "a", Origin::User)
+            .unwrap();
+        let b = service
+            .add_checklist_item(task.id, "b", Origin::User)
+            .unwrap();
+
+        service
+            .reorder_checklist_item(task.id, b.id, None, Some(a.id))
+            .unwrap();
+        assert_eq!(
+            service.find_task(task.id).unwrap().unwrap().status,
+            TaskStatus::Watching,
+            "並び替えでは起きない"
+        );
+
+        service
+            .remove_checklist_item(task.id, a.id, Origin::Mcp)
+            .unwrap();
+        assert_eq!(
+            service.find_task(task.id).unwrap().unwrap().status,
+            TaskStatus::Watching,
+            "削除では起きない"
+        );
+    }
+
+    #[tokio::test]
+    async fn checklist_changes_are_broadcast() {
+        let service = service();
+        let task = service.create_task(new_task("通知")).unwrap();
+        let mut rx = service.subscribe();
+
+        let item = service
+            .add_checklist_item(task.id, "項目", Origin::User)
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskChecklistChanged { task_id: task.id }
+        );
+        service
+            .update_checklist_item(task.id, item.id, None, Some(true), Origin::User)
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskChecklistChanged { task_id: task.id }
+        );
+        service
+            .reorder_checklist_item(task.id, item.id, None, None)
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskChecklistChanged { task_id: task.id }
+        );
+        service
+            .remove_checklist_item(task.id, item.id, Origin::User)
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskChecklistChanged { task_id: task.id }
+        );
+    }
+
+    /// 起床したときは、変更イベントのあとに起床 → New への移動が続く。
+    #[tokio::test]
+    async fn a_waking_checklist_change_broadcasts_woken_then_moved() {
+        let service = service();
+        let task = watching_task(&service, "通知");
+        let mut rx = service.subscribe();
+
+        service
+            .add_checklist_item(task.id, "外から", Origin::Mcp)
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskChecklistChanged { task_id: task.id }
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskWoken { task_id: task.id }
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskMoved {
+                task_id: task.id,
+                status: TaskStatus::New,
+                bucket: None,
+            }
+        );
     }
 
     // ---- 過去の完了(Done 列の絞り込み)----

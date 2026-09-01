@@ -336,6 +336,83 @@ describe("questloom GUI スモーク", () => {
   });
 
   /**
+   * タスク内チェックリストの往復。
+   *
+   * 「ドロワーで 2 件足す → 1 件チェックする → 閉じるとカードに `☑ 1/2` が出る」まで。
+   * command は main ウィンドウにしか配っていないので、ACL の配線が抜けていれば
+   * ここで invoke が拒否されて落ちる。
+   */
+  it("ドロワーでチェックリストを足してチェックすると、カードにバッジが出る", async () => {
+    const card = await findByText(NEW_CARDS, TITLE);
+    if (!card) throw new Error(`「${TITLE}」のカードが見つかりません`);
+    await card.click();
+
+    const drawer = $('[data-testid="task-drawer"]');
+    await drawer.waitForDisplayed();
+    // ドロワーの中身は get_task の往復待ち。追加欄が出たら読み込み済み。
+    const input = $('[data-testid="checklist-add"]');
+    await input.waitForDisplayed();
+
+    // Enter で追加。入力欄は残るので、続けてもう 1 件足せる。
+    await input.setValue("住所変更");
+    await browser.keys("Enter");
+    await browser.waitUntil(async () => (await $$('[data-testid="checklist-item"]')).length === 1, {
+      timeout: SETTLE_TIMEOUT,
+      interval: 250,
+      timeoutMsg: "チェックリストに 1 件目が出ません",
+    });
+
+    await $('[data-testid="checklist-add"]').setValue("電気の停止");
+    await browser.keys("Enter");
+    await browser.waitUntil(async () => (await $$('[data-testid="checklist-item"]')).length === 2, {
+      timeout: SETTLE_TIMEOUT,
+      interval: 250,
+      timeoutMsg: "チェックリストに 2 件目が出ません",
+    });
+
+    const progress = $('[data-testid="checklist-progress"]');
+    await progress.waitForDisplayed();
+    await browser.waitUntil(async () => (await progress.getText()) === "0/2", {
+      timeout: SETTLE_TIMEOUT,
+      interval: 250,
+      timeoutMsg: "進捗が 0/2 になりません",
+    });
+
+    // 1 件目をチェックすると進捗が進む。タスク自体は完了しない(New のまま)。
+    const toggles = await $$('[data-testid="checklist-toggle"]');
+    await toggles[0].click();
+    await browser.waitUntil(async () => (await progress.getText()) === "1/2", {
+      timeout: SETTLE_TIMEOUT,
+      interval: 250,
+      timeoutMsg: "進捗が 1/2 になりません",
+    });
+
+    // ドロワーを閉じて、ボードのカードにバッジが出ていることを見る。
+    await browser.keys("Escape");
+    await drawer.waitForExist({ reverse: true, timeout: SETTLE_TIMEOUT });
+
+    await browser.waitUntil(
+      async () => {
+        const target = await findByText(NEW_CARDS, TITLE);
+        if (!target) return false;
+        const badge = await target.$('[data-testid="checklist-badge"]');
+        if (!(await badge.isExisting())) return false;
+        return (await badge.getText()).includes("1/2");
+      },
+      {
+        timeout: SETTLE_TIMEOUT,
+        interval: 250,
+        timeoutMsg: `「${TITLE}」のカードに ☑ 1/2 のバッジが出ません`,
+      },
+    );
+
+    // チェックを埋めてもタスクは完了しない(Done へ動かない)。
+    const listed = await callMcp("list_tasks", { column: "new" });
+    const task = listed.tasks.find((item: { title: string }) => item.title === TITLE);
+    if (!task) throw new Error(`チェック後も New にいるはずの「${TITLE}」がいません`);
+  });
+
+  /**
    * 展開表示は 9 列(監視中を含む)。既定のウィンドウ幅 1280px で横スクロールを出さない
    * ことを実寸で見る(`--column-min-expanded` の見積もりが崩れたら落ちる)。
    */

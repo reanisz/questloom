@@ -28,6 +28,7 @@ import type {
   UrlOpenMode,
 } from "../types";
 import { AiSplitDialog } from "./AiSplitDialog";
+import { ChecklistSection } from "./ChecklistSection";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { PromoteMenu } from "./PromoteMenu";
 
@@ -341,6 +342,19 @@ function DrawerBody({
           </button>
         </form>
       </section>
+
+      <ChecklistSection
+        items={detail.checklist}
+        progress={detail}
+        onAdd={(body) => void mutate(() => api.addChecklistItem(detail.id, body))}
+        onToggle={(item, checked) =>
+          void mutate(() => api.updateChecklistItem(detail.id, item.id, { checked }))
+        }
+        onRename={(item, body) =>
+          void mutate(() => api.updateChecklistItem(detail.id, item.id, { body }))
+        }
+        onRemove={(item) => void mutate(() => api.removeChecklistItem(detail.id, item.id))}
+      />
 
       <section className="drawer-section">
         <h3>親タスク</h3>

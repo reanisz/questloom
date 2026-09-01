@@ -1,6 +1,6 @@
 //! ドメインエラー型。
 
-use crate::model::{ParseDomainError, ResourceId, TaskId};
+use crate::model::{ChecklistItemId, ParseDomainError, ResourceId, TaskId};
 use crate::repository::RepositoryError;
 use crate::sort_order::SortKeyError;
 
@@ -38,9 +38,17 @@ pub enum CoreError {
         parent: TaskId,
     },
 
+    /// 指定 ID のチェックリスト項目が(そのタスクに)存在しない。
+    #[error("チェックリスト項目が見つかりません: {0}")]
+    ChecklistItemNotFound(ChecklistItemId),
+
     /// タイトルが空。
     #[error("タイトルは空にできません")]
     EmptyTitle,
+
+    /// チェックリスト項目の本文が空。
+    #[error("チェックリスト項目の本文は空にできません")]
+    EmptyChecklistBody,
 
     /// インスタントタスクでないものを昇格しようとした。
     #[error("インスタントタスクではありません: {0}")]

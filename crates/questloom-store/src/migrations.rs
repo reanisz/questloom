@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{StoreError, StoreResult};
 
 /// このバイナリが対応するスキーマバージョン。
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 /// 1 段階のマイグレーション。
 struct Migration {
@@ -80,6 +80,22 @@ const V2: &str = r"
 ALTER TABLE tasks ADD COLUMN deleted_at TEXT;
 ";
 
+/// v3: タスク内チェックリスト (`task_checklist_items`)。
+///
+/// 新しいテーブルを足すだけなので、既存行の書き換えは不要
+/// (チェックリストを持たないタスクは 0 件のまま)。
+const V3: &str = r"
+CREATE TABLE task_checklist_items (
+    id          TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    checked     INTEGER NOT NULL DEFAULT 0,
+    sort_order  TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_checklist_task ON task_checklist_items(task_id);
+";
+
 const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -88,6 +104,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         sql: V2,
+    },
+    Migration {
+        version: 3,
+        sql: V3,
     },
 ];
 
@@ -193,24 +213,48 @@ mod tests {
         assert_eq!(migrate(&mut conn).unwrap(), CURRENT_SCHEMA_VERSION);
     }
 
-    /// v1 のまま置かれていた DB を開いても、行を失わずに v2 へ上がること。
-    #[test]
-    fn a_v1_database_is_upgraded_to_v2_without_losing_rows() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        // v1 だけを適用した状態を作る。
-        conn.execute_batch(V1).unwrap();
+    /// 途中バージョンの DB を、そのバージョンだけ適用した状態として用意する。
+    fn database_at(version: i64) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS.iter().filter(|m| m.version <= version) {
+            conn.execute_batch(migration.sql).unwrap();
+        }
         conn.execute_batch("CREATE TABLE schema_version (version INTEGER NOT NULL);")
             .unwrap();
-        conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [version],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tasks (id, title, status, sort_order, created_at, updated_at)
              VALUES ('t1', '既存タスク', 'new', 'a0', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
+        conn
+    }
 
-        assert_eq!(migrate(&mut conn).unwrap(), 2);
+    /// テーブルが存在するか。
+    fn has_table(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    /// v1 のまま置かれていた DB を開いても、行を失わずに現行バージョンまで上がること。
+    ///
+    /// v1 → v2(`deleted_at`)→ v3(`task_checklist_items`)を一気に通す。
+    #[test]
+    fn a_v1_database_is_upgraded_to_the_current_version_without_losing_rows() {
+        let mut conn = database_at(1);
+        assert!(!has_table(&conn, "task_checklist_items"));
+
+        assert_eq!(migrate(&mut conn).unwrap(), CURRENT_SCHEMA_VERSION);
 
         // 既存行は残り、deleted_at は NULL(= 生存)になる。
         let (title, deleted_at) = conn
@@ -223,8 +267,46 @@ mod tests {
         assert_eq!(title, "既存タスク");
         assert_eq!(deleted_at, None);
 
+        // チェックリストのテーブルが増え、既存タスクは 0 件で始まる。
+        assert!(has_table(&conn, "task_checklist_items"));
+        let items: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_checklist_items WHERE task_id = 't1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(items, 0);
+
         // 上げ直しても壊れない。
         assert_eq!(migrate(&mut conn).unwrap(), CURRENT_SCHEMA_VERSION);
+    }
+
+    /// v2 の DB(= ソフトデリートまで入った既存ユーザー)も v3 へ上がること。
+    #[test]
+    fn a_v2_database_gains_the_checklist_table() {
+        let mut conn = database_at(2);
+        assert!(!has_table(&conn, "task_checklist_items"));
+
+        assert_eq!(migrate(&mut conn).unwrap(), 3);
+        assert!(has_table(&conn, "task_checklist_items"));
+
+        // タスクを消すと、そのチェックリストも一緒に消える (ON DELETE CASCADE)。
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        conn.execute(
+            "INSERT INTO task_checklist_items (id, task_id, body, checked, sort_order, created_at)
+             VALUES ('c1', 't1', '項目', 0, 'a0', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM tasks WHERE id = 't1'", [])
+            .unwrap();
+        let items: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_checklist_items", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(items, 0, "タスクの物理削除でカスケードする");
     }
 
     #[test]

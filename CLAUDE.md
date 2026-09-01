@@ -208,9 +208,13 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 - **起床ルール**: ユーザー以外の origin(`mcp` / `ai` / `plugin:*` / `system`)による変化を
   受けると、サービス層が `status` を `new` へ戻し(予定は保持、New 列の末尾)、
   `TaskWoken` + `TaskMoved` を発行する。起床すればオーバーレイも既存経路で出る。
-- 起床の**トリガーは 2 つだけ**。どちらも呼び出し元の origin が API に載っている操作。
+- 起床の**トリガーは 4 つだけ**。いずれも呼び出し元の origin が API に載っている操作。
   1. `add_task_update`(origin が非 User)
   2. `create_task`(origin が非 User)で `parent_id` が Watching のタスク → 親を起こす
+  3. `add_checklist_item`(origin が非 User)
+  4. `update_checklist_item`(origin が非 User)— **チェック・本文のどちらの変更でも**
+- チェックリストの `remove_checklist_item` / `reorder_checklist_item` は**トリガーにしない**。
+  「消えた」「並びが変わった」は待っていた変化ではないため(reorder はそもそも origin を取らない)。
 - `add_resource` / `remove_resource` は**トリガーにしない**。これらの API は origin を
   受け取っておらず、渡せるようにしても「メインウィンドウの手動追加」と「プラグインの追加」を
   区別できない(呼び出し側の自己申告になる)。実用シナリオは履歴追記と子タスク作成でほぼ
@@ -246,6 +250,45 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   完了済みを全部見たい呼び出し側は `TaskService::full_board()` を使う。使っているのは
   MCP の `list_tasks` だけで、AI には従来どおり全件を見せる。
 - `list_archived_done` command は **main ウィンドウだけ**に配る(削除・復元と同じ扱い)。
+
+## タスク内チェックリスト
+
+「子タスクにするほどではない項目」の置き場。スキーマは `task_checklist_items`
+(**マイグレーション v3**)で、仕様の確定版は `docs/data-model.md`。
+
+- モデルは `ChecklistItem { id, task_id, body, checked, sort_order, created_at }`。
+  `id` は `ChecklistItemId`(UUID v7 の newtype)。並びは他と同じ fractional key。
+- `TaskDetail` に `checklist: Vec<ChecklistItem>`(`sort_order` 昇順)、`TaskCard` に
+  `checklistDone` / `checklistTotal`。**ボードの集計は 1 クエリ**
+  (`list_all_checklist_items` → `HashMap` で数える。リソースの `resource_index` と同じ形)。
+  削除済みタスクの項目は集計から落ちる。
+- **チェックが全部埋まってもタスクは自動完了しない。** 進捗の表示だけ。
+- サービス層の 4 つはすべて task の `updated_at` を進め、`TaskChecklistChanged` を発行する。
+  削除済み・存在しないタスクへの操作は既存どおり拒否。
+
+  | メソッド | origin | 起床 |
+  |---|---|---|
+  | `add_checklist_item(task_id, body, origin)` | 取る | **する**(非 User) |
+  | `update_checklist_item(task_id, item_id, body?, checked?, origin)` | 取る | **する**(非 User。チェック・本文どちらでも) |
+  | `remove_checklist_item(task_id, item_id, origin)` | 取る | しない |
+  | `reorder_checklist_item(task_id, item_id, prev_id?, next_id?)` | 取らない | しない |
+
+- 項目 id は**タスクをまたげない**。別タスクの `item_id` を渡すと
+  `ChecklistItemNotFound` で弾く(`require_checklist_item`)。
+- 削除は冪等では**ない**(無ければ `ChecklistItemNotFound`)。タスクと違いソフトデリートもしない。
+- `TaskChecklistChanged` はオーバーレイの `affects_visibility` に**入れない**。New の件数を
+  動かさないため。起床した場合は直後に New 列への `TaskMoved` が続くのでそちらで拾われる。
+- Tauri command(`add_` / `update_` / `remove_` / `reorder_checklist_item`)は
+  **origin を `User` に固定**し、**main ウィンドウだけ**に配る。プラグイン・AI が触る道は
+  MCP のツール(origin は `Mcp`)で、そちらは起床する。
+- UI はドロワーの「チェックリスト」節(`components/ChecklistSection.tsx`。リソースと親タスクの間)。
+  ヘッダに進捗 `2/5`、各行はチェックボックス + 本文(クリックでインライン編集、Enter/blur で確定、
+  Esc で取り消し)+ 削除 ✕、下部に常設の追加入力欄(Enter で連続追加)。
+  カードには `checklistTotal > 0` のとき `☑ 2/5` バッジ。
+  **並び替えの UI はまだ無い**(`reorder_checklist_item` command と `api.reorderChecklistItem`
+  は用意済み。ドラッグ&ドロップは後日)。
+- `ChecklistSection` は**バックエンドに触らない表示専用**にしてある(書き込みは TaskDrawer が
+  `api` + `mutate` で行う)。おかげで Tauri の invoke 抜きに vitest で回せる。
 
 ## 内蔵 MCP サーバー
 
@@ -292,7 +335,11 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 | `promote_task` | `task_id`, `column?` | インスタントタスクを通常タスクへ昇格(既定 `today`) |
 | `add_task_update` | `task_id`, `body` | アップデート履歴を追記(対象が `watching` なら New へ起床させる) |
 | `add_resource` | `task_id`, `kind`, `value`, `label?`, `is_primary?` | 関連リソース(`url` / `file`)を追加 |
+| `add_checklist_item` | `task_id`, `body` | チェックリストの末尾へ項目を追加(空白のみは拒否。対象が `watching` なら New へ起床させる) |
+| `set_checklist_item` | `task_id`, `item_id`, `checked?`, `body?` | チェックリスト項目のチェック・本文を変更(同上。省略した項目は変えない) |
+| `remove_checklist_item` | `task_id`, `item_id` | チェックリスト項目を削除(**起床させない**。冪等ではない) |
 
+`item_id` は `get_task` の返り値 `checklist[]` から取る。
 MCP 経由で作られたタスク・履歴の `origin` は `mcp` になる。
 `deadline` は RFC 3339 文字列(例 `2026-09-30T09:00:00Z`)。
 
@@ -846,14 +893,18 @@ CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-
 
 | webview | 許可 |
 |---|---|
-| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、過去の完了 (`list_archived_done`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`) は**ここだけ** |
+| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、過去の完了 (`list_archived_done`)、チェックリスト (`add_checklist_item` / `update_checklist_item` / `remove_checklist_item` / `reorder_checklist_item`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
 | `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings`、設定画面専用の `plugin_directory` / `plugin_list_loaded` / `plugin_secret_set` / `plugin_secret_status` を除く)+ シークレットの読み出し `plugin_secret_get` + `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
 | `browser-pane` | **`browser_pane_escape` だけ**(`capabilities/browser-pane.json`)。外部ページが載るので、ここに 2 つ目を足さないこと |
 
 plugin-host では第三者のプラグインコードが動くので、`get_settings` / `set_settings` /
 `get_runtime_status`(MCP の URL が載る)/ `get_mcp_token_status` / `set_mcp_token` /
-`ai_*` / `browser_pane_*` / タスクの削除・復元 / `list_archived_done` は**渡さない**。許可されていない
+`ai_*` / `browser_pane_*` / タスクの削除・復元 / `list_archived_done` /
+チェックリストの `*_checklist_item` は**渡さない**。
+チェックリストの command は origin を `User` に固定しているので、plugin-host に配ると
+**プラグインが「利用者の操作」を騙れる**(= 監視中タスクを起こさずに中身を書き換えられる)。
+プラグイン・AI がチェックリストを触る道は MCP のツール(origin は `Mcp`)。許可されていない
 command を invoke すると Tauri が拒否する。command を足したら `APP_COMMANDS` と
 `capabilities/default.json` の両方に足すこと(食い違いは `src-tauri/src/lib.rs` の
 テストが検出する)。

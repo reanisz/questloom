@@ -2,8 +2,9 @@
 
 use questloom_core::model::TaskStatus;
 use questloom_mcp::tools::{
-    AddResourceArgs, AddTaskUpdateArgs, ColumnArg, CreateTaskArgs, ListTasksArgs, MoveTaskArgs,
-    PromoteTaskArgs, ResourceArg, ResourceKindArg, StatusArg, TaskIdArgs, UpdateTaskArgs,
+    AddChecklistItemArgs, AddResourceArgs, AddTaskUpdateArgs, ColumnArg, CreateTaskArgs,
+    ListTasksArgs, MoveTaskArgs, PromoteTaskArgs, RemoveChecklistItemArgs, ResourceArg,
+    ResourceKindArg, SetChecklistItemArgs, StatusArg, TaskIdArgs, UpdateTaskArgs,
 };
 use questloom_mcp::QuestloomTools;
 use rmcp::handler::server::wrapper::Parameters;
@@ -357,6 +358,272 @@ fn delete_hides_a_task_until_it_is_restored() {
         )["title"],
         "消して戻す"
     );
+}
+
+/// 追加 → チェック → `get_task` で見える → 削除、の一連。
+#[test]
+fn checklist_items_are_added_ticked_and_removed() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::Today),
+            ..new_task("引っ越し")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+
+    let first = json(
+        &tools
+            .add_checklist_item(Parameters(AddChecklistItemArgs {
+                task_id: task_id.clone(),
+                body: "住所変更".to_owned(),
+            }))
+            .expect("add_checklist_item"),
+    );
+    let item_id = first["id"].as_str().expect("id が返る").to_owned();
+    assert_eq!(first["body"], "住所変更");
+    assert_eq!(first["checked"], false);
+    assert_eq!(first["taskId"], task_id.as_str());
+
+    json(
+        &tools
+            .add_checklist_item(Parameters(AddChecklistItemArgs {
+                task_id: task_id.clone(),
+                body: "電気の停止".to_owned(),
+            }))
+            .expect("add_checklist_item"),
+    );
+
+    // チェックを付ける。
+    let ticked = json(
+        &tools
+            .set_checklist_item(Parameters(SetChecklistItemArgs {
+                task_id: task_id.clone(),
+                item_id: item_id.clone(),
+                checked: Some(true),
+                body: None,
+            }))
+            .expect("set_checklist_item"),
+    );
+    assert_eq!(ticked["checked"], true);
+    assert_eq!(ticked["body"], "住所変更", "本文は据え置き");
+
+    // get_task に checklist と進捗が出る。
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("get_task"),
+    );
+    let checklist = detail["checklist"].as_array().expect("checklist は配列");
+    assert_eq!(checklist.len(), 2);
+    assert_eq!(checklist[0]["body"], "住所変更");
+    assert_eq!(checklist[0]["checked"], true);
+    assert_eq!(checklist[1]["body"], "電気の停止");
+    assert_eq!(detail["checklistDone"], 1);
+    assert_eq!(detail["checklistTotal"], 2);
+
+    // 本文の書き換え。
+    let renamed = json(
+        &tools
+            .set_checklist_item(Parameters(SetChecklistItemArgs {
+                task_id: task_id.clone(),
+                item_id: item_id.clone(),
+                checked: None,
+                body: Some("住民票を移す".to_owned()),
+            }))
+            .expect("set_checklist_item"),
+    );
+    assert_eq!(renamed["body"], "住民票を移す");
+    assert_eq!(renamed["checked"], true, "チェックは据え置き");
+
+    // 削除。2 回目は冪等ではないのでツールレベルのエラー。
+    let removed = json(
+        &tools
+            .remove_checklist_item(Parameters(RemoveChecklistItemArgs {
+                task_id: task_id.clone(),
+                item_id: item_id.clone(),
+            }))
+            .expect("remove_checklist_item"),
+    );
+    assert_eq!(removed["removed"], true);
+    let again = tools
+        .remove_checklist_item(Parameters(RemoveChecklistItemArgs {
+            task_id: task_id.clone(),
+            item_id,
+        }))
+        .expect("Err にはならない");
+    assert_eq!(again.is_error, Some(true));
+
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs { task_id }))
+            .expect("get_task"),
+    );
+    assert_eq!(detail["checklist"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["checklistTotal"], 1);
+    assert_eq!(detail["checklistDone"], 0);
+}
+
+/// 監視中のタスクへ MCP からチェックリストを足すと起床する。
+#[test]
+fn a_checklist_addition_wakes_a_watching_task() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::Watching),
+            ..new_task("外の作業待ち")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["status"], "watching");
+
+    json(
+        &tools
+            .add_checklist_item(Parameters(AddChecklistItemArgs {
+                task_id: task_id.clone(),
+                body: "先方の確認".to_owned(),
+            }))
+            .expect("add_checklist_item"),
+    );
+
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: Some(ColumnArg::New),
+            status: None,
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["tasks"][0]["id"], task_id.as_str());
+    assert_eq!(listed["tasks"][0]["status"], "new");
+}
+
+/// チェックだけでも起きる。逆に削除では起きない。
+#[test]
+fn ticking_wakes_but_removing_does_not() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::Watching),
+            ..new_task("チェック待ち")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+
+    // 起床させずに項目だけ用意したいので、まず MCP で足して起きた分を監視へ戻す。
+    let item = json(
+        &tools
+            .add_checklist_item(Parameters(AddChecklistItemArgs {
+                task_id: task_id.clone(),
+                body: "項目".to_owned(),
+            }))
+            .expect("add_checklist_item"),
+    );
+    let item_id = item["id"].as_str().unwrap().to_owned();
+    let extra = json(
+        &tools
+            .add_checklist_item(Parameters(AddChecklistItemArgs {
+                task_id: task_id.clone(),
+                body: "消す項目".to_owned(),
+            }))
+            .expect("add_checklist_item"),
+    );
+    let extra_id = extra["id"].as_str().unwrap().to_owned();
+    let park = |tools: &QuestloomTools| {
+        json(
+            &tools
+                .move_task(Parameters(MoveTaskArgs {
+                    task_id: task_id.clone(),
+                    column: ColumnArg::Watching,
+                }))
+                .expect("move_task"),
+        )
+    };
+    assert_eq!(park(&tools)["status"], "watching");
+
+    // 削除では起きない。
+    json(
+        &tools
+            .remove_checklist_item(Parameters(RemoveChecklistItemArgs {
+                task_id: task_id.clone(),
+                item_id: extra_id,
+            }))
+            .expect("remove_checklist_item"),
+    );
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("get_task"),
+    );
+    assert_eq!(detail["status"], "watching", "削除では起きない");
+
+    // チェックでは起きる。
+    json(
+        &tools
+            .set_checklist_item(Parameters(SetChecklistItemArgs {
+                task_id: task_id.clone(),
+                item_id,
+                checked: Some(true),
+                body: None,
+            }))
+            .expect("set_checklist_item"),
+    );
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs { task_id }))
+            .expect("get_task"),
+    );
+    assert_eq!(detail["status"], "new", "チェックでは起床する");
+    assert_eq!(
+        detail["checklistDone"], 1,
+        "チェックが全部埋まってもタスクは完了しない"
+    );
+    assert_ne!(detail["status"], "done");
+}
+
+#[test]
+fn invalid_checklist_arguments_are_reported() {
+    let tools = tools();
+    let created = create(&tools, new_task("引数"));
+    let task_id = created["id"].as_str().unwrap().to_owned();
+
+    // UUID として読めない item_id はプロトコルエラー。
+    let error = tools
+        .set_checklist_item(Parameters(SetChecklistItemArgs {
+            task_id: task_id.clone(),
+            item_id: "not-a-uuid".to_owned(),
+            checked: Some(true),
+            body: None,
+        }))
+        .expect_err("invalid_params になる");
+    assert!(error.message.contains("invalid item_id"), "{error:?}");
+
+    // 空白のみの本文はツールレベルのエラー。
+    let blank = tools
+        .add_checklist_item(Parameters(AddChecklistItemArgs {
+            task_id: task_id.clone(),
+            body: "   ".to_owned(),
+        }))
+        .expect("Err にはならない");
+    assert_eq!(blank.is_error, Some(true));
+
+    // 存在しない項目もツールレベルのエラー。
+    let missing = tools
+        .set_checklist_item(Parameters(SetChecklistItemArgs {
+            task_id,
+            item_id: questloom_core::model::ChecklistItemId::new().to_string(),
+            checked: Some(true),
+            body: None,
+        }))
+        .expect("Err にはならない");
+    assert_eq!(missing.is_error, Some(true));
 }
 
 #[test]

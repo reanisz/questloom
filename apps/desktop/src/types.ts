@@ -16,6 +16,8 @@ export type TaskId = string;
 export type ResourceId = string;
 /** アップデート履歴の識別子 (UUID v7)。 */
 export type UpdateId = string;
+/** チェックリスト項目の識別子 (UUID v7)。 */
+export type ChecklistItemId = string;
 
 /**
  * タスクの状態。
@@ -98,6 +100,21 @@ export interface TaskResource {
   createdAt: string;
 }
 
+/**
+ * タスク内チェックリストの項目 1 件。
+ *
+ * 「子タスクにするほどではない項目」の置き場。チェックが全部埋まっても
+ * タスクは自動完了しない。
+ */
+export interface ChecklistItem {
+  id: ChecklistItemId;
+  taskId: TaskId;
+  body: string;
+  checked: boolean;
+  sortOrder: string;
+  createdAt: string;
+}
+
 /** 状態アップデートのヒストリー 1 件。 */
 export interface TaskUpdateEntry {
   id: UpdateId;
@@ -114,6 +131,10 @@ export interface TaskCard extends Task {
   childCount: number;
   resourceCount: number;
   primaryResource: TaskResource | null;
+  /** チェック済みのチェックリスト項目数。 */
+  checklistDone: number;
+  /** チェックリスト項目の総数。0 ならチェックリストを持たない。 */
+  checklistTotal: number;
 }
 
 /** 列ごとのカード配列。各列は sortOrder 昇順。 */
@@ -147,6 +168,8 @@ export interface ArchivedDone {
 /** タスク詳細。TaskCard を平坦化して関連情報を足したもの。 */
 export interface TaskDetail extends TaskCard {
   resources: TaskResource[];
+  /** チェックリスト項目。`sortOrder` 昇順。 */
+  checklist: ChecklistItem[];
   /** 古い順。 */
   updates: TaskUpdateEntry[];
   parent: TaskCard | null;

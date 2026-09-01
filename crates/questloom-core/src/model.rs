@@ -62,6 +62,10 @@ macro_rules! define_id {
 define_id!(TaskId, "タスクの識別子 (UUID v7)。");
 define_id!(ResourceId, "関連リソースの識別子 (UUID v7)。");
 define_id!(UpdateId, "アップデート履歴の識別子 (UUID v7)。");
+define_id!(
+    ChecklistItemId,
+    "タスク内チェックリスト項目の識別子 (UUID v7)。"
+);
 
 /// タスクの状態。DB の `tasks.status` に対応する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -439,6 +443,27 @@ pub struct TaskResource {
     /// 主リソース(オーバーレイのワンクリック起動対象)。
     pub is_primary: bool,
     /// 並び順 (fractional key)。
+    pub sort_order: String,
+    /// 作成時刻 (UTC)。
+    pub created_at: DateTime<Utc>,
+}
+
+/// タスク内チェックリストの項目 1 件。
+///
+/// 「子タスクにするほどではない項目」の置き場。子タスクと違って状態も予定も持たず、
+/// チェックが全部埋まってもタスクは自動完了**しない**(docs/data-model.md)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistItem {
+    /// 識別子。
+    pub id: ChecklistItemId,
+    /// 所属タスク。
+    pub task_id: TaskId,
+    /// 本文。
+    pub body: String,
+    /// チェック済みか。
+    pub checked: bool,
+    /// タスク内の並び順 (fractional key)。
     pub sort_order: String,
     /// 作成時刻 (UTC)。
     pub created_at: DateTime<Utc>,

@@ -5,7 +5,10 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-use crate::model::{ResourceId, Task, TaskId, TaskResource, TaskStatus, TaskUpdateEntry};
+use crate::model::{
+    ChecklistItem, ChecklistItemId, ResourceId, Task, TaskId, TaskResource, TaskStatus,
+    TaskUpdateEntry,
+};
 
 /// リポジトリ操作の `Result` 別名。
 pub type RepoResult<T> = Result<T, RepositoryError>;
@@ -178,4 +181,40 @@ pub trait TaskRepository: Send + Sync + 'static {
     /// # Errors
     /// 永続化に失敗した場合。
     fn list_updates(&self, task_id: TaskId) -> RepoResult<Vec<TaskUpdateEntry>>;
+
+    /// タスクのチェックリスト項目を `sort_order` 昇順で返す。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn list_checklist_items(&self, task_id: TaskId) -> RepoResult<Vec<ChecklistItem>>;
+
+    /// 削除済みでないタスクのチェックリスト項目を `(task_id, sort_order)` 昇順で返す
+    /// (ボードの進捗集計用)。
+    ///
+    /// [`list_all_resources`](Self::list_all_resources) と同じく、ボード 1 枚ぶんの
+    /// 集計を 1 クエリで済ませるための入口。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn list_all_checklist_items(&self) -> RepoResult<Vec<ChecklistItem>>;
+
+    /// チェックリスト項目を 1 件挿入する。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn insert_checklist_item(&self, item: &ChecklistItem) -> RepoResult<()>;
+
+    /// チェックリスト項目を 1 件更新する。存在しない場合は `Ok(false)`。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn update_checklist_item(&self, item: &ChecklistItem) -> RepoResult<bool>;
+
+    /// チェックリスト項目を 1 件削除する。存在しない場合は `Ok(false)`。
+    ///
+    /// タスクと違ってソフトデリートはしない(復元する価値のある単位ではないため)。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn delete_checklist_item(&self, id: ChecklistItemId) -> RepoResult<bool>;
 }

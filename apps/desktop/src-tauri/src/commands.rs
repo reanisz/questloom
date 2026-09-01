@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use questloom_core::bucket::BoardColumn;
-use questloom_core::model::{Origin, ResourceId, Task, TaskId, TaskResource, TaskUpdateEntry};
+use questloom_core::model::{
+    ChecklistItem, ChecklistItemId, Origin, ResourceId, Task, TaskId, TaskResource, TaskUpdateEntry,
+};
 use questloom_core::service::{
     ArchivedDone, Board, MoveRequest, NewResource, NewTask, TaskCard, TaskDetail, TaskPatch,
 };
@@ -118,6 +120,68 @@ pub fn remove_resource(
     state
         .service
         .remove_resource(task_id, resource_id)
+        .map_err(fail)
+}
+
+/*
+ * チェックリストの origin は `User` 固定にする。これらの command は main ウィンドウ
+ * (ボード・ドロワー)にしか配らないので、呼び出しは必ず利用者の操作
+ * (= 監視中タスクを起こしてはいけない)。外部からの変化は MCP のツールが担う。
+ */
+
+/// チェックリスト項目を末尾に追加する。
+#[tauri::command]
+pub fn add_checklist_item(
+    state: State<'_, AppState>,
+    task_id: TaskId,
+    body: String,
+) -> CommandResult<ChecklistItem> {
+    state
+        .service
+        .add_checklist_item(task_id, body, Origin::User)
+        .map_err(fail)
+}
+
+/// チェックリスト項目の本文・チェック状態を変更する(`None` の項目は変えない)。
+#[tauri::command]
+pub fn update_checklist_item(
+    state: State<'_, AppState>,
+    task_id: TaskId,
+    item_id: ChecklistItemId,
+    body: Option<String>,
+    checked: Option<bool>,
+) -> CommandResult<ChecklistItem> {
+    state
+        .service
+        .update_checklist_item(task_id, item_id, body, checked, Origin::User)
+        .map_err(fail)
+}
+
+/// チェックリスト項目を削除する。
+#[tauri::command]
+pub fn remove_checklist_item(
+    state: State<'_, AppState>,
+    task_id: TaskId,
+    item_id: ChecklistItemId,
+) -> CommandResult<()> {
+    state
+        .service
+        .remove_checklist_item(task_id, item_id, Origin::User)
+        .map_err(fail)
+}
+
+/// チェックリスト項目を `prevId` と `nextId` の間へ動かす(両方省略なら末尾)。
+#[tauri::command]
+pub fn reorder_checklist_item(
+    state: State<'_, AppState>,
+    task_id: TaskId,
+    item_id: ChecklistItemId,
+    prev_id: Option<ChecklistItemId>,
+    next_id: Option<ChecklistItemId>,
+) -> CommandResult<ChecklistItem> {
+    state
+        .service
+        .reorder_checklist_item(task_id, item_id, prev_id, next_id)
         .map_err(fail)
 }
 

@@ -1,14 +1,18 @@
 //! [`TaskRepository`] の SQLite 実装。書き込みはすべてトランザクション内で行う。
 
 use chrono::{DateTime, Utc};
-use questloom_core::model::{ResourceId, Task, TaskId, TaskResource, TaskStatus, TaskUpdateEntry};
+use questloom_core::model::{
+    ChecklistItem, ChecklistItemId, ResourceId, Task, TaskId, TaskResource, TaskStatus,
+    TaskUpdateEntry,
+};
 use questloom_core::repository::{RepoResult, TaskRepository};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 
 use crate::error::StoreResult;
 use crate::mapping::{
-    resource_from_row, resource_params, task_from_row, task_params, time_to_sql, update_from_row,
-    update_params, RESOURCE_COLUMNS, TASK_COLUMNS, UPDATE_COLUMNS,
+    checklist_from_row, checklist_params, resource_from_row, resource_params, task_from_row,
+    task_params, time_to_sql, update_from_row, update_params, CHECKLIST_COLUMNS, RESOURCE_COLUMNS,
+    TASK_COLUMNS, UPDATE_COLUMNS,
 };
 use crate::SqliteStore;
 
@@ -31,6 +35,17 @@ const INSERT_RESOURCE: &str =
 
 const INSERT_UPDATE: &str = "INSERT INTO task_updates (id, task_id, body, origin, created_at)
      VALUES (?1, ?2, ?3, ?4, ?5)";
+
+const INSERT_CHECKLIST: &str =
+    "INSERT INTO task_checklist_items (id, task_id, body, checked, sort_order, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+
+/// `task_id` と `created_at` も書き戻すが、値は変わらない
+/// (`checklist_params` の並びを INSERT と共有するため)。
+const UPDATE_CHECKLIST: &str =
+    "UPDATE task_checklist_items SET task_id = ?2, body = ?3, checked = ?4, sort_order = ?5,
+         created_at = ?6
+     WHERE id = ?1";
 
 /// 生存しているタスクだけを対象にする条件(ソフトデリートの除外)。
 ///
@@ -257,6 +272,59 @@ impl TaskRepository for SqliteStore {
             query_all(&conn, &sql, [task_id.to_string()], update_from_row)
         })
     }
+
+    fn list_checklist_items(&self, task_id: TaskId) -> RepoResult<Vec<ChecklistItem>> {
+        repo(|| {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT {CHECKLIST_COLUMNS} FROM task_checklist_items WHERE task_id = ?1
+                 ORDER BY sort_order, created_at"
+            );
+            query_all(&conn, &sql, [task_id.to_string()], checklist_from_row)
+        })
+    }
+
+    fn list_all_checklist_items(&self) -> RepoResult<Vec<ChecklistItem>> {
+        repo(|| {
+            let conn = self.conn();
+            // ボードの集計に使うので、削除済みタスクの項目は混ぜない
+            // (list_all_resources と同じ条件)。
+            let sql = format!(
+                "SELECT {CHECKLIST_COLUMNS} FROM task_checklist_items c
+                 WHERE EXISTS (SELECT 1 FROM tasks t WHERE t.id = c.task_id AND t.{ALIVE})
+                 ORDER BY task_id, sort_order, created_at"
+            );
+            query_all(&conn, &sql, [], checklist_from_row)
+        })
+    }
+
+    fn insert_checklist_item(&self, item: &ChecklistItem) -> RepoResult<()> {
+        repo(|| {
+            self.write(|tx| {
+                tx.execute(INSERT_CHECKLIST, params_from_iter(checklist_params(item)))?;
+                Ok(())
+            })
+        })
+    }
+
+    fn update_checklist_item(&self, item: &ChecklistItem) -> RepoResult<bool> {
+        repo(|| {
+            self.write(|tx| tx.execute(UPDATE_CHECKLIST, params_from_iter(checklist_params(item))))
+                .map(|affected| affected > 0)
+        })
+    }
+
+    fn delete_checklist_item(&self, id: ChecklistItemId) -> RepoResult<bool> {
+        repo(|| {
+            self.write(|tx| {
+                tx.execute(
+                    "DELETE FROM task_checklist_items WHERE id = ?1",
+                    [id.to_string()],
+                )
+            })
+            .map(|affected| affected > 0)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +506,91 @@ mod tests {
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].id, newer.id);
         assert!(store.list_done_before(cutoff, 0).unwrap().is_empty());
+    }
+
+    fn checklist_item(task_id: TaskId, body: &str, sort_order: &str) -> ChecklistItem {
+        ChecklistItem {
+            id: ChecklistItemId::new(),
+            task_id,
+            body: body.to_owned(),
+            checked: false,
+            sort_order: sort_order.to_owned(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// 挿入 → 一覧(並び順)→ 更新 → 削除の一連。
+    #[test]
+    fn checklist_items_round_trip_in_sort_order() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = task();
+        store.insert_task_with_resources(&task, &[]).unwrap();
+
+        // わざと並び順の逆に入れて、一覧が sort_order 昇順で返ることを見る。
+        let second = checklist_item(task.id, "2 番目", "a1");
+        let first = checklist_item(task.id, "1 番目", "a0");
+        store.insert_checklist_item(&second).unwrap();
+        store.insert_checklist_item(&first).unwrap();
+
+        let listed = store.list_checklist_items(task.id).unwrap();
+        assert_eq!(
+            listed.iter().map(|i| i.body.as_str()).collect::<Vec<_>>(),
+            ["1 番目", "2 番目"]
+        );
+        assert!(listed.iter().all(|item| !item.checked));
+
+        // 更新(チェックと本文と並び順)。
+        let updated = ChecklistItem {
+            checked: true,
+            body: "書き換えた".to_owned(),
+            sort_order: "a2".to_owned(),
+            ..first.clone()
+        };
+        assert!(store.update_checklist_item(&updated).unwrap());
+        let listed = store.list_checklist_items(task.id).unwrap();
+        assert_eq!(
+            listed.iter().map(|i| i.body.as_str()).collect::<Vec<_>>(),
+            ["2 番目", "書き換えた"]
+        );
+        assert!(listed[1].checked);
+
+        // 存在しない項目の更新・削除は false。
+        let missing = checklist_item(task.id, "無い", "a9");
+        assert!(!store.update_checklist_item(&missing).unwrap());
+        assert!(!store.delete_checklist_item(missing.id).unwrap());
+
+        assert!(store.delete_checklist_item(first.id).unwrap());
+        assert_eq!(store.list_checklist_items(task.id).unwrap().len(), 1);
+    }
+
+    /// 全件取得はタスクごとにまとまり、削除済みタスクの項目は落ちる。
+    #[test]
+    fn all_checklist_items_skip_deleted_tasks() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let kept = task();
+        let removed = task();
+        store.insert_task_with_resources(&kept, &[]).unwrap();
+        store.insert_task_with_resources(&removed, &[]).unwrap();
+        store
+            .insert_checklist_item(&checklist_item(kept.id, "残る", "a0"))
+            .unwrap();
+        store
+            .insert_checklist_item(&checklist_item(removed.id, "消える", "a0"))
+            .unwrap();
+        assert_eq!(store.list_all_checklist_items().unwrap().len(), 2);
+
+        store
+            .update_task(&Task {
+                deleted_at: Some(chrono::Utc::now()),
+                ..removed.clone()
+            })
+            .unwrap();
+
+        let listed = store.list_all_checklist_items().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].task_id, kept.id);
+        // 個別取得は残る(復元すれば戻るため)。
+        assert_eq!(store.list_checklist_items(removed.id).unwrap().len(), 1);
     }
 
     #[test]

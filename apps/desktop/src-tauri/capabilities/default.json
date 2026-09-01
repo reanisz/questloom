@@ -24,6 +24,11 @@
     "allow-remove-resource",
     "allow-set-parent",
 
+    "allow-add-checklist-item",
+    "allow-update-checklist-item",
+    "allow-remove-checklist-item",
+    "allow-reorder-checklist-item",
+
     "allow-delete-task",
     "allow-restore-task",
     "allow-list-deleted-tasks",

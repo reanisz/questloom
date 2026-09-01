@@ -70,6 +70,25 @@ export function formatScheduled(scheduled: Scheduled): string {
   }
 }
 
+/**
+ * チェックリストの進捗表記 (`2/5`)。
+ *
+ * カードのバッジとドロワーのヘッダで同じ表記を使うため、ここに置く。
+ * バックエンドは常に `done <= total` を返すが、壊れた値でも表示だけは
+ * 破綻させない(負や超過はそのまま出す)。
+ */
+export function formatChecklist(progress: { checklistDone: number; checklistTotal: number }): string {
+  return `${progress.checklistDone}/${progress.checklistTotal}`;
+}
+
+/** チェックリストが全部埋まっているか。項目が 0 件なら偽。 */
+export function isChecklistComplete(progress: {
+  checklistDone: number;
+  checklistTotal: number;
+}): boolean {
+  return progress.checklistTotal > 0 && progress.checklistDone >= progress.checklistTotal;
+}
+
 const STATUS_LABELS: Record<TaskStatus, string> = {
   new: "New",
   todo: "Todo",

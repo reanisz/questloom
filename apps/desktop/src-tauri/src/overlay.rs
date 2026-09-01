@@ -183,6 +183,9 @@ mod tests {
             DomainEvent::TaskUpdated { task_id: id },
             DomainEvent::TaskUpdateAdded { task_id: id },
             DomainEvent::TaskResourcesChanged { task_id: id },
+            // チェックリストは New の件数を動かさない(全部チェックしても
+            // タスクは自動完了しない)。起床した場合だけ TaskMoved が続く。
+            DomainEvent::TaskChecklistChanged { task_id: id },
             DomainEvent::TaskParentChanged {
                 task_id: id,
                 parent_id: None,

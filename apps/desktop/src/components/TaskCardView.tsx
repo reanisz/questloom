@@ -5,7 +5,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { useRef } from "react";
 
 import * as api from "../api";
-import { formatDeadline, isOverdue } from "../format";
+import { formatChecklist, formatDeadline, isChecklistComplete, isOverdue } from "../format";
 import { useBoardStore } from "../store";
 import type { BoardColumnKey, TaskCard } from "../types";
 import { PromoteMenu } from "./PromoteMenu";
@@ -29,7 +29,10 @@ export function CardBody({ card, dragging }: { card: TaskCard; dragging?: boolea
         <span>{card.title}</span>
       </div>
 
-      {(card.deadline || card.childCount > 0 || card.resourceCount > 0) && (
+      {(card.deadline ||
+        card.childCount > 0 ||
+        card.resourceCount > 0 ||
+        card.checklistTotal > 0) && (
         <div className="card-meta">
           {card.deadline && (
             <span className={overdue ? "badge badge-overdue" : "badge"} title="締切">
@@ -44,6 +47,15 @@ export function CardBody({ card, dragging }: { card: TaskCard; dragging?: boolea
           {card.resourceCount > 0 && (
             <span className="badge" title="関連リソース数">
               🔗 {card.resourceCount}
+            </span>
+          )}
+          {card.checklistTotal > 0 && (
+            <span
+              className={isChecklistComplete(card) ? "badge badge-checklist-done" : "badge"}
+              data-testid="checklist-badge"
+              title="チェックリストの進捗"
+            >
+              ☑ {formatChecklist(card)}
             </span>
           )}
         </div>

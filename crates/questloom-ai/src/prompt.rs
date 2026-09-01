@@ -239,6 +239,8 @@ mod tests {
             child_count: 0,
             resource_count: 0,
             primary_resource: None,
+            checklist_done: 0,
+            checklist_total: 0,
         }
     }
 
@@ -324,6 +326,7 @@ mod tests {
         let detail = TaskDetail {
             card: parent,
             resources: Vec::new(),
+            checklist: Vec::new(),
             updates: vec![TaskUpdateEntry {
                 id: UpdateId::new(),
                 task_id: parent_id,

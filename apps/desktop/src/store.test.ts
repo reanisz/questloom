@@ -39,6 +39,8 @@ function card(id: TaskId): TaskCard {
     childCount: 0,
     resourceCount: 0,
     primaryResource: null,
+    checklistDone: 0,
+    checklistTotal: 0,
   };
 }
 
@@ -206,7 +208,7 @@ describe("refresh の世代ガード", () => {
   });
 
   it("開いているタスクがあれば詳細も一緒に取り直す", async () => {
-    const detail = { ...card("a"), resources: [], updates: [], parent: null, children: [] };
+    const detail = { ...card("a"), resources: [], checklist: [], updates: [], parent: null, children: [] };
     reset({ selectedId: "a" });
     vi.mocked(api.getBoard).mockResolvedValue(board({ today: ["a"] }));
     vi.mocked(api.getTask).mockResolvedValue(detail as TaskDetail);
@@ -233,7 +235,7 @@ describe("refresh の世代ガード", () => {
     vi.mocked(api.getTask).mockImplementation(async (taskId) => {
       // 応答を待っている間にユーザーが別のタスクを開いた。
       useBoardStore.setState({ selectedId: "b" });
-      return { ...card(taskId), resources: [], updates: [], parent: null, children: [] };
+      return { ...card(taskId), resources: [], checklist: [], updates: [], parent: null, children: [] };
     });
 
     await useBoardStore.getState().refresh();
@@ -281,6 +283,7 @@ describe("openTask / closeTask", () => {
     vi.mocked(api.getTask).mockResolvedValue({
       ...card("a"),
       resources: [],
+      checklist: [],
       updates: [],
       parent: null,
       children: [],

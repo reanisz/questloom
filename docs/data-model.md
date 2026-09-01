@@ -16,9 +16,10 @@
 タスクの状態 (`status`) は 5 つ: `new` / `todo` / `doing` / `done` / `watching`。
 
 `watching` は「即座に作業があるわけではないが、外部の変化を待っている」状態。
-**ユーザー以外の origin**(`mcp` / `ai` / `plugin:*`)による変化——履歴追記・内容更新・
-リソース追加・子タスク作成——を受けると、サービス層が自動的に `new` へ移動する(起床)。
-起床時も `scheduled` は保持する。ユーザー自身の編集では起床しない。
+**ユーザー以外の origin**(`mcp` / `ai` / `plugin:*`)による変化——履歴追記・子タスク作成・
+チェックリストの追加/変更——を受けると、サービス層が自動的に `new` へ移動する(起床)。
+起床時も `scheduled` は保持する。ユーザー自身の編集では起床しない
+(リソース追加と `update_task` は origin を持たないため起床対象外)。
 
 Todo 内の時間バケット (Today/Tomorrow/ThisWeek/NextWeek/Future) は **DB に保存せず、
 `scheduled_*` カラムから表示時に導出する**。これにより「日付や週が変わったら自動的に正しい
@@ -92,6 +93,17 @@ CREATE TABLE task_updates (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX idx_updates_task ON task_updates(task_id);
+
+-- タスク内チェックリスト(子タスクにするほどではない項目。v3 で追加)
+CREATE TABLE task_checklist_items (
+    id          TEXT PRIMARY KEY,              -- UUID v7
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    checked     INTEGER NOT NULL DEFAULT 0,
+    sort_order  TEXT NOT NULL,                 -- fractional key(タスク内の並び)
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_checklist_task ON task_checklist_items(task_id);
 
 -- 名前空間付き設定(コア: 'core'、プラグイン: 'plugin:<id>')
 CREATE TABLE settings (

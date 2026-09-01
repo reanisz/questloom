@@ -10,11 +10,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  formatChecklist,
   formatDeadline,
   formatScheduled,
   formatStatus,
   formatTimestamp,
   fromDateTimeLocal,
+  isChecklistComplete,
   isOverdue,
   toDateTimeLocal,
 } from "./format";
@@ -128,5 +130,28 @@ describe("formatStatus", () => {
 
   it("知らない状態はそのまま出す(表示を undefined にしない)", () => {
     expect(formatStatus("archived" as TaskStatus)).toBe("archived");
+  });
+});
+
+describe("formatChecklist / isChecklistComplete", () => {
+  const progress = (checklistDone: number, checklistTotal: number) => ({
+    checklistDone,
+    checklistTotal,
+  });
+
+  it("進捗を done/total で出す", () => {
+    expect(formatChecklist(progress(0, 5))).toBe("0/5");
+    expect(formatChecklist(progress(2, 5))).toBe("2/5");
+    expect(formatChecklist(progress(5, 5))).toBe("5/5");
+  });
+
+  it("全部埋まったときだけ完了とみなす", () => {
+    expect(isChecklistComplete(progress(5, 5))).toBe(true);
+    expect(isChecklistComplete(progress(4, 5))).toBe(false);
+    expect(isChecklistComplete(progress(0, 1))).toBe(false);
+  });
+
+  it("項目が 0 件なら完了ではない(バッジ自体を出さない側の判断)", () => {
+    expect(isChecklistComplete(progress(0, 0))).toBe(false);
   });
 });

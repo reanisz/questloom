@@ -82,6 +82,14 @@ pub enum DomainEvent {
         /// 対象タスク。
         task_id: TaskId,
     },
+    /// タスク内チェックリストが変わった(追加・本文/チェックの変更・削除・並び替え)。
+    ///
+    /// 何がどう変わったかは伝えない。購読側はタスクを取り直す。
+    #[serde(rename_all = "camelCase")]
+    TaskChecklistChanged {
+        /// 対象タスク。
+        task_id: TaskId,
+    },
     /// 親子リンクが変更された。
     #[serde(rename_all = "camelCase")]
     TaskParentChanged {
@@ -115,6 +123,7 @@ impl DomainEvent {
             | Self::TaskWoken { task_id }
             | Self::TaskUpdateAdded { task_id }
             | Self::TaskResourcesChanged { task_id }
+            | Self::TaskChecklistChanged { task_id }
             | Self::TaskParentChanged { task_id, .. } => Some(*task_id),
             Self::DayChanged { .. } | Self::SettingsChanged => None,
         }
@@ -158,6 +167,16 @@ mod tests {
             Some(id),
             "起床イベントも対象タスクを持つ"
         );
+    }
+
+    #[test]
+    fn checklist_changed_json_shape() {
+        let id = TaskId::new();
+        let event = DomainEvent::TaskChecklistChanged { task_id: id };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "taskChecklistChanged");
+        assert_eq!(json["taskId"], id.to_string());
+        assert_eq!(event.task_id(), Some(id));
     }
 
     #[test]
