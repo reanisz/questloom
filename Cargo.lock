@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "questloom-ai"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "questloom-core",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "questloom-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "questloom-desktop"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "keyring",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "questloom-mcp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -3254,14 +3254,14 @@ dependencies = [
 
 [[package]]
 name = "questloom-plugin-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "questloom-core",
 ]
 
 [[package]]
 name = "questloom-plugin-github"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "questloom-core",
  "questloom-plugin-api",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "questloom-store"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "questloom-core",
