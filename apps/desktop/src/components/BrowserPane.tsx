@@ -19,14 +19,24 @@
  * そのまま論理ピクセルとして渡す。main ウィンドウは `decorations: false` で
  * webview がクライアント領域いっぱいなので、両者の原点は一致する。DPI の換算は
  * Tauri が `LogicalPosition` / `LogicalSize` から行う。
+ *
+ * ## ペインの中で押された Esc
+ *
+ * 子 webview のキー入力はこちらの `document` には届かない。Rust 側がペインへ注入した
+ * スクリプトが `browser_pane_escape` を呼び、その結果が
+ * `questloom://browser-pane-escape` として届くので、それを
+ * [`dispatchEscape`](../keyboard.ts) で**キーボードの Esc と同じレイヤースタックへ**流す。
+ * ドロワーやモーダルが開いていればそちらが先に閉じ、ペインしか無ければペインを閉じる。
  */
 
 import { useEffect, useLayoutEffect, useRef } from "react";
 
 import * as api from "../api";
 import { enqueuePaneOp, openExternal } from "../browserPane";
+import { dispatchEscape } from "../keyboard";
 import { useBoardStore } from "../store";
 import { toMessage } from "../tauri";
+import { useTauriEvent } from "../useTauriEvent";
 
 interface Props {
   /**
@@ -110,6 +120,12 @@ export function BrowserPane({ occluded = false }: Props) {
     void enqueuePaneOp(() => api.setBrowserPaneVisible(!hidden));
     if (!hidden) pushBounds();
   }, [hidden]);
+
+  // ペイン内で押された Esc。まず既存のレイヤー(ドロワー・モーダル)へ配り、
+  // 配る相手がいなければペイン自身を閉じる。
+  useTauriEvent(api.listenBrowserPaneEscape, () => {
+    if (!dispatchEscape()) closePane();
+  });
 
   if (!url) return null;
 

@@ -77,11 +77,12 @@ questloom/
      状態更新ヒストリー、親子タスクへのリンク、AI ボタン(分割/詳細化)。
    - インスタントタスクはカード上で視覚的に区別(バッジ・配色)し、「昇格」操作を持つ。
    - **内蔵ブラウザペイン**: URL リソースをメインウィンドウ左側の埋め込み webview
-     (Tauri の child webview、label "browser-pane")で開ける。外部コンテンツに IPC を
-     渡さないため capability は一切割り当てない。クリック時の既定動作は設定
-     `urlOpenMode`(external / internal / internalAuto)で切り替え、internalAuto は
-     タスク詳細を開いたとき主リソース URL を自動でペインに表示する。
-     オーバーレイからの URL 起動は常に外部ブラウザ。
+     (Tauri の child webview、label "browser-pane")で開ける。外部コンテンツに許す IPC は
+     `browser_pane_escape`(Esc をレイヤースタックへ中継する通知。レートリミット付き)
+     **ただ 1 つ**で、他の command は capability 構造を監視するテストで遮断を固定している。
+     クリック時の既定動作は設定 `urlOpenMode`(external / internal / internalAuto)で
+     切り替え、internalAuto はタスク詳細を開いたとき主リソース URL を自動でペインに表示し、
+     ドロワーを閉じるとペインも一緒に閉じる。オーバーレイからの URL 起動は常に外部ブラウザ。
 2. **オーバーレイウィンドウ**: New タスク存在時のみ表示。透過・装飾なし・常に最前面・タスクバー非表示・
    フォーカスを奪わない。メインディスプレイ左上に配置。
    - インスタントタスクに主リソース URL があればワンクリックで開くボタンを表示。

@@ -23,19 +23,31 @@
 //! 論理ピクセルで [`browser_pane_set_bounds`] に送る(DPI は Tauri が
 //! [`tauri::LogicalPosition`] / [`tauri::LogicalSize`] から換算する)。
 //!
+//! ## Esc の中継
+//!
+//! 子 webview は独立した WebView2 なので、そこにフォーカスがある間のキー入力は
+//! main の `document` に届かない。ドロワーやペインを Esc で閉じられるように、
+//! ペインには [`ESCAPE_SCRIPT`] を注入して Escape の押下だけを
+//! [`browser_pane_escape`] へ中継し、main へ
+//! [`BROWSER_PANE_ESCAPE`](crate::contract::BROWSER_PANE_ESCAPE) を送る。
+//! ページ自身の Esc 処理は殺さない(capture で観測するだけで `preventDefault` しない)。
+//!
 //! ## セキュリティ
 //!
-//! ここに載るのは**第三者のコンテンツ**なので、Tauri の IPC には触らせない。
-//! 守りは 3 枚あり、どれか 1 枚が破れても IPC には届かないようにしてある。
+//! ここに載るのは**第三者のコンテンツ**なので、Tauri の IPC には
+//! [`browser_pane_escape`] 以外を触らせない。守りは 3 枚あり、
+//! どれか 1 枚が破れても他の command には届かないようにしてある。
 //!
 //! 1. **capability は webview ラベルで配る。** 子 webview は main ウィンドウの中にいるので、
 //!    capability が `"windows": ["main"]` だと**親のウィンドウラベル経由で main の全権限が
 //!    そのまま渡ってしまう**(`RuntimeAuthority::resolve_access` は webview ラベルと
 //!    ウィンドウラベルのどちらかが一致すれば通す)。そのため capability は
-//!    `"webviews": [...]` で書き、`browser-pane` はどこにも載せない。
-//! 2. **リモート生成元は capability の対象外。** 外部 URL の webview からの invoke は
-//!    `Origin::Remote` になり、`remote` 節を持たない capability(= 本アプリの全部)とは
-//!    照合されない。`remote` 節は足さないこと。
+//!    `"webviews": [...]` で書き、`browser-pane` を載せるのは
+//!    `capabilities/browser-pane.json` **1 枚だけ**にする。
+//! 2. **リモート生成元へ開けるのは 1 command だけ。** 外部 URL の webview からの invoke は
+//!    `Origin::Remote` になり、`remote` 節を持たない capability(= 他の全部)とは
+//!    照合されない。`remote` 節を持つのは `capabilities/browser-pane.json` だけで、
+//!    そこに載るのは `allow-browser-pane-escape` **のみ**。他の command を足さないこと。
 //! 3. **URL を絞る。** 受け付けるのは `http` / `https` だけで、さらに `*.localhost` を弾く。
 //!    Windows では questloom 自身が `http://tauri.localhost` から配信されるため、
 //!    そこを開くと「ローカル生成元」と見なされてしまう(1 と 2 をまとめて回避されうる)。
@@ -43,18 +55,61 @@
 //! `dangerousRemoteDomainIpcAccess` は使わない。これらの守りを一括で無効化する設定なので、
 //! 設定ごと持たない。
 
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
 use serde::Deserialize;
 use tauri::webview::WebviewBuilder;
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Rect, WebviewUrl};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Rect, WebviewUrl};
 use url::Url;
 
 use crate::commands::{fail, CommandResult};
+use crate::contract::BROWSER_PANE_ESCAPE;
 use crate::window::MAIN_WINDOW;
 
 /// 埋め込みブラウザペイン(子 webview)のラベル。
 ///
-/// **capability の `webviews` には絶対に書かないこと。**
+/// **`capabilities/browser-pane.json` 以外の capability には書かないこと。**
+/// そこに載るのは `allow-browser-pane-escape` だけで、それ以外の command を
+/// 外部ページへ渡すことになる。
 pub const BROWSER_PANE: &str = "browser-pane";
+
+/// ペインへ注入するスクリプト。Escape の押下だけを [`browser_pane_escape`] へ中継する。
+///
+/// ページのどのスクリプトよりも先に走る(Tauri の初期化スクリプトはこの後ろに
+/// 追加されるのではなく**前**に置かれるので、`__TAURI_INTERNALS__` は既にある)。
+/// そのため `invoke` の参照は最初に確保しておき、ページが後から
+/// `window.__TAURI_INTERNALS__` を触っても影響を受けないようにする。
+///
+/// - **`preventDefault` はしない。** capture フェーズで観測するだけにして、
+///   ページ自身の Esc 処理(ダイアログを閉じる等)を妨げない。
+/// - **本体側の「入力中は配らない」規則は適用しない。** あれは questloom の入力欄の話で、
+///   外部ページの入力欄に何が入っていようとここからは見えないし、見るべきでもない。
+/// - **連打の抑制はここではなく Rust 側**([`EscapeThrottle`])で行う。
+///   悪意あるページはこのスクリプトを通さず直接 `invoke` を呼べるので、
+///   JS 側のガードは防御にならない。
+const ESCAPE_SCRIPT: &str = r"
+;(function () {
+  var internals = window.__TAURI_INTERNALS__;
+  if (!internals || typeof internals.invoke !== 'function') return;
+  var invoke = internals.invoke.bind(internals);
+  window.addEventListener(
+    'keydown',
+    function (event) {
+      if (event.key !== 'Escape') return;
+      try {
+        var pending = invoke('browser_pane_escape');
+        if (pending && typeof pending.catch === 'function') {
+          pending.catch(function () {});
+        }
+      } catch (error) {
+        /* ペイン側で騒いでも直せないので握りつぶす */
+      }
+    },
+    true
+  );
+})();
+";
 
 /// 矩形の最小サイズ (論理 px)。0 サイズの webview は作れないので下限を設ける。
 const MIN_SIDE: f64 = 1.0;
@@ -201,7 +256,11 @@ pub async fn browser_pane_open(
     tracing::debug!(%target, ?bounds, "ブラウザペインを生成します");
     window
         .add_child(
-            WebviewBuilder::new(BROWSER_PANE, WebviewUrl::External(target)),
+            WebviewBuilder::new(BROWSER_PANE, WebviewUrl::External(target))
+                // Esc をメインウィンドウへ中継する(ESCAPE_SCRIPT 参照)。
+                // main frame だけに入れる。子フレームには __TAURI_INTERNALS__ が
+                // 注入されないので、入れても動かない。
+                .initialization_script(ESCAPE_SCRIPT),
             bounds.position(),
             bounds.size(),
         )
@@ -220,6 +279,63 @@ pub async fn browser_pane_close(app: AppHandle) -> CommandResult<()> {
         webview.close().map_err(fail)?;
     }
     Ok(())
+}
+
+/// [`browser_pane_escape`] を受け付ける最短間隔。
+///
+/// 人間の Esc 連打(速くても 10 回/秒程度)は素通しし、スクリプトによる連打だけを削る幅。
+const ESCAPE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// [`browser_pane_escape`] の連打を間引く。
+///
+/// この command は**外部ページから呼べる唯一の command**なので、
+/// 悪意あるページが `invoke` を回し続けてもイベントの洪水にならないようにする。
+/// 効果は「main へイベントを送るかどうか」だけで、拒否しても呼び出し側にはエラーを返さない
+/// (ページに成功・失敗の差を見せる必要が無い)。
+#[derive(Debug, Default)]
+pub struct EscapeThrottle {
+    /// 直近に通した時刻。まだ 1 度も通していなければ `None`。
+    last: Mutex<Option<Instant>>,
+}
+
+impl EscapeThrottle {
+    /// `now` の要求を通してよいかを返す。通す場合は最終時刻を更新する。
+    fn allow(&self, now: Instant) -> bool {
+        // 守っているのは Instant 1 つだけなので、毒されていてもそのまま使える。
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `now` が前回より前(手動テストの時刻巻き戻し)なら通す側に倒す。
+        let recent = last.is_some_and(|last| now.saturating_duration_since(last) < ESCAPE_INTERVAL);
+        if recent {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
+
+/// プロセス全体で 1 つ。ペインは同時に 1 枚しか無いので、State に載せる必要は無い。
+static ESCAPE_THROTTLE: LazyLock<EscapeThrottle> = LazyLock::new(EscapeThrottle::default);
+
+/// ブラウザペインの中で Esc が押されたことを main ウィンドウへ知らせる。
+///
+/// **これは外部ページ(`Origin::Remote`)から呼べる唯一の command。**
+/// 引数も戻り値も持たず、やることは
+/// [`BROWSER_PANE_ESCAPE`] を main へ emit することだけ。Esc をどう解釈するか
+/// (ドロワーを閉じる / ペインを閉じる)は、すべてフロントのレイヤースタックが決める。
+///
+/// 連打は [`EscapeThrottle`] が間引く。間引いたときも呼び出し側には成功を返す
+/// (ページに成否の差を見せない)。
+#[tauri::command]
+pub fn browser_pane_escape(app: AppHandle) {
+    if !ESCAPE_THROTTLE.allow(Instant::now()) {
+        return;
+    }
+    if let Err(error) = app.emit_to(MAIN_WINDOW, BROWSER_PANE_ESCAPE, ()) {
+        tracing::warn!(%error, "ペインの Esc をメインウィンドウへ送れませんでした");
+    }
 }
 
 /// ブラウザペインの矩形を更新する。開いていなければ何もしない。
@@ -373,6 +489,46 @@ mod tests {
         assert_eq!(bounds.y, 12.0);
         assert_eq!(bounds.width, MIN_SIDE);
         assert_eq!(bounds.height, MIN_SIDE);
+    }
+
+    /// 連打は間引くが、一定時間あけた押下は通す。
+    #[test]
+    fn the_escape_throttle_drops_bursts() {
+        let throttle = EscapeThrottle::default();
+        let start = Instant::now();
+        assert!(throttle.allow(start), "初回は通す");
+        assert!(!throttle.allow(start), "同時刻の連打は落とす");
+        assert!(
+            !throttle.allow(start + ESCAPE_INTERVAL - Duration::from_millis(1)),
+            "間隔未満は落とす"
+        );
+        assert!(
+            throttle.allow(start + ESCAPE_INTERVAL),
+            "間隔を空ければ通す"
+        );
+        assert!(
+            !throttle.allow(start + ESCAPE_INTERVAL),
+            "通した時刻が基準になる"
+        );
+    }
+
+    /// 注入スクリプトが満たすべき性質。
+    ///
+    /// - `preventDefault` しない(ページ自身の Esc 処理を妨げない)。
+    /// - Escape 以外は送らない。
+    /// - 呼ぶ command は [`browser_pane_escape`] だけ。
+    #[test]
+    fn the_injected_script_only_relays_escape() {
+        assert!(
+            !ESCAPE_SCRIPT.contains("preventDefault"),
+            "ページ自身の Esc 処理を止めないこと"
+        );
+        assert!(ESCAPE_SCRIPT.contains("'Escape'"));
+        assert!(ESCAPE_SCRIPT.contains("'browser_pane_escape'"));
+        // capture フェーズ(第 3 引数 true)で観測する。
+        assert!(ESCAPE_SCRIPT.contains("true\n  );"));
+        let invocations = ESCAPE_SCRIPT.matches("invoke(").count();
+        assert_eq!(invocations, 1, "invoke の呼び出しは 1 箇所だけ");
     }
 
     #[test]

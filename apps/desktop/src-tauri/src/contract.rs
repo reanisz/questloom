@@ -10,7 +10,7 @@
 //!
 //! | 定数 | TS 側 |
 //! |---|---|
-//! | [`TASKS_CHANGED`] / [`OPEN_TASK`] / [`AI_STATUS`] | `apps/desktop/src/api.ts` |
+//! | [`TASKS_CHANGED`] / [`OPEN_TASK`] / [`AI_STATUS`] / [`BROWSER_PANE_ESCAPE`] | `apps/desktop/src/api.ts` |
 //! | [`PLUGINS_LOADED`] / [`PLUGINS_RELOAD`] / [`PLUGIN_SETTINGS_CHANGED`] | `apps/desktop/src/plugin-host/api.ts` |
 //!
 //! アプリ独自 command の一覧は [`app_commands`](crate::app_commands) にある
@@ -30,6 +30,13 @@ pub const OPEN_TASK: &str = "questloom://open-task";
 /// AI 実行の進捗を webview へ通知するイベント名。
 pub const AI_STATUS: &str = "questloom://ai-status";
 
+/// 内蔵ブラウザペインの中で Esc が押されたことを、メインウィンドウへ知らせるイベント名。
+///
+/// 子 webview のキー入力は main の `document` には届かないので、ペインへ注入した
+/// スクリプトが [`browser_pane_escape`](crate::browser::browser_pane_escape) を呼び、
+/// その command がこのイベントを main だけへ送る。
+pub const BROWSER_PANE_ESCAPE: &str = "questloom://browser-pane-escape";
+
 /// プラグインのロード結果が更新されたことを知らせるイベント名。
 pub const PLUGINS_LOADED: &str = "questloom://plugins-loaded";
 
@@ -44,6 +51,7 @@ pub const EVENT_NAMES: &[&str] = &[
     TASKS_CHANGED,
     OPEN_TASK,
     AI_STATUS,
+    BROWSER_PANE_ESCAPE,
     PLUGINS_LOADED,
     PLUGINS_RELOAD,
     PLUGIN_SETTINGS_CHANGED,

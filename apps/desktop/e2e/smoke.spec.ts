@@ -3,15 +3,19 @@
  * 「ボードが出る → 作る → 開く → 消す → 復元する → 右クリックで消す → 復元する」を
  * 1 本で通す。
  *
- * 触るのは **main ウィンドウだけ**。overlay / plugin-host も同じバンドルを読むので
+ * 触るのは基本 **main ウィンドウだけ**。overlay / plugin-host も同じバンドルを読むので
  * ウィンドウハンドルは 3 つ返りうる。main の判別は独自タイトルバー
  * (`[data-testid="titlebar"]` は `App` にしか無い)で行う。
+ * 例外は最後の内蔵ブラウザペインの spec で、そこだけは 4 枚目の webview
+ * (外部ページ)へ切り替えて ACL と Esc の中継を確かめ、最後に main へ戻る。
  *
  * データディレクトリと MCP ポートの分離は `wdio.conf.ts` の責務。
  * ここでは「まっさらなプロファイルで起動している」前提に乗る。
  *
  * `describe` / `it` / `browser` / `$` / `$$` / `expect` は wdio が注入するグローバル。
  */
+
+import { createServer as createHttpServer } from "node:http";
 
 /** 作って消して戻すタスクのタイトル。 */
 const TITLE = "e2e smoke";
@@ -489,5 +493,156 @@ describe("questloom GUI スモーク", () => {
         timeoutMsg: "MCP サーバーが認証なしへ戻りません",
       },
     );
+  });
+
+  /**
+   * 内蔵ブラウザペイン(4 枚目の webview・外部ページ)の ACL と Esc の中継。
+   *
+   * ここだけは main 以外のハンドルへ切り替える。ページは実行ごとに立てる
+   * ローカルの HTTP サーバー(`http://127.0.0.1:<空きポート>`)で、外部ネットワークには出ない。
+   * questloom から見れば `*.localhost` ではない普通の http なので、
+   * Tauri からは**リモート生成元** (`Origin::Remote`) に見える = 本番と同じ条件になる。
+   *
+   * 見るのは 3 つ。
+   *
+   * 1. **`browser_pane_escape` 以外の command は ACL に拒まれる**
+   *    (`get_board` / `get_settings` / `browser_pane_open` / `delete_task`)。
+   * 2. `browser_pane_escape` は通り、Esc は**最前面のレイヤー**へ配られる
+   *    (モーダルを開いておくと、閉じるのはモーダルだけ)。
+   * 3. ページの中で押した Esc が main へ中継され、ドロワーとペイン(紐づき)が閉じる。
+   */
+  it("ブラウザペインは Esc だけを中継でき、他の command は ACL に拒まれる", async () => {
+    const PANE_TITLE = "e2e browser pane";
+    const server = createHttpServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>questloom e2e</title><h1>pane</h1>");
+    });
+    await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("ポートを取得できません");
+    const pageUrl = `http://127.0.0.1:${address.port}/`;
+
+    try {
+      // internalAuto: 主リソースが URL のタスクを開くと、ドロワーと一緒にペインが出る。
+      const settings = await invoke<Record<string, unknown>>("get_settings");
+      await invoke("set_settings", { settings: { ...settings, urlOpenMode: "internalAuto" } });
+      // ボード側の `urlOpenMode` は「設定画面から戻ったとき」に読み直される
+      // (設定変更の通知イベントは無い)。開いて閉じて反映させる。
+      await $('button[aria-label="設定"]').click();
+      await $(".settings-header").waitForDisplayed();
+      await browser.keys("Escape");
+      await $('[data-testid="column-new"]').waitForDisplayed();
+
+      // MCP は使わない。直前の spec がトークンを付け外ししてサーバーを張り直しており、
+      // 使い回しているセッション id が失効している。
+      const created = await invoke<{ id: string }>("create_task", {
+        input: {
+          title: PANE_TITLE,
+          resources: [{ kind: "url", value: pageUrl, label: "e2e", isPrimary: true }],
+        },
+      });
+      await waitForText(NEW_CARDS, PANE_TITLE, true, `New 列に「${PANE_TITLE}」が出ません`);
+
+      const card = await findByText(NEW_CARDS, PANE_TITLE);
+      if (!card) throw new Error(`「${PANE_TITLE}」のカードが見つかりません`);
+      await card.click();
+      await $('[data-testid="task-drawer"]').waitForDisplayed();
+      // ペインの枠(React 側)が出たら、子 webview の生成要求も飛んでいる。
+      await $('[data-testid="browser-pane"]').waitForExist({ timeout: SETTLE_TIMEOUT });
+
+      // ---- ペインの webview へ切り替える ----
+      const mainHandle = await browser.getWindowHandle();
+      let paneHandle: string | null = null;
+      await browser.waitUntil(
+        async () => {
+          for (const handle of await browser.getWindowHandles()) {
+            if (handle === mainHandle) continue;
+            await browser.switchToWindow(handle);
+            const href = await browser.execute(() => window.location.href).catch(() => "");
+            if (typeof href === "string" && href.startsWith(pageUrl)) {
+              paneHandle = handle;
+              return true;
+            }
+          }
+          return false;
+        },
+        { timeout: SETTLE_TIMEOUT, interval: 500, timeoutMsg: "ペインの webview が見つかりません" },
+      );
+      if (paneHandle === null) throw new Error("ペインの webview が見つかりません");
+
+      /**
+       * ペインの中から command を呼び、結果を `OK:<返り値>` / `ERR:<理由>` の文字列で返す。
+       *
+       * 例外を投げずに文字列へ畳むのは、`browser.execute` が返す値だけで
+       * 「通った / 拒まれた」を区別したいため。
+       */
+      const tryInvoke = (command: string) =>
+        browser.execute(
+          (name: string) =>
+            (window as any).__TAURI_INTERNALS__.invoke(name).then(
+              (value: unknown) => `OK:${JSON.stringify(value)?.slice(0, 80)}`,
+              (error: unknown) => `ERR:${String((error as { message?: string })?.message ?? error)}`,
+            ),
+          command,
+        );
+
+      // 1. Esc の中継以外は ACL に拒まれる。
+      //    (デバッグビルドの拒否理由は "<command> not allowed on window ..., webview ...")
+      for (const command of ["get_board", "get_settings", "browser_pane_open", "delete_task"]) {
+        const result = await tryInvoke(command);
+        if (typeof result !== "string" || !result.includes("not allowed")) {
+          throw new Error(`${command} はペインから拒否されるべき (返り値: ${String(result)})`);
+        }
+      }
+
+      // 2. `browser_pane_escape` は通る。
+      //    ペインを閉じずに確かめるため、main 側でモーダルを開いておく
+      //    (Esc は最前面のレイヤー = モーダルへ配られ、ドロワーとペインは残る)。
+      await browser.switchToWindow(mainHandle);
+      // ドロワーがヘッダに重なっているので、hit-test を通さず JS でクリックする。
+      await browser.execute(() =>
+        document.querySelector<HTMLButtonElement>('[data-testid="open-deleted"]')?.click(),
+      );
+      const deleted = $('div[role="dialog"][aria-label="削除済みのタスク"]');
+      await deleted.waitForDisplayed();
+
+      await browser.switchToWindow(paneHandle);
+      const escaped = await tryInvoke("browser_pane_escape");
+      if (typeof escaped !== "string" || !escaped.startsWith("OK")) {
+        throw new Error(`browser_pane_escape は通るべき (返り値: ${String(escaped)})`);
+      }
+
+      await browser.switchToWindow(mainHandle);
+      await deleted.waitForExist({ reverse: true, timeout: SETTLE_TIMEOUT });
+      // モーダルだけが閉じ、ドロワーとペインは残っている。
+      await expect($('[data-testid="task-drawer"]')).toBeExisting();
+      await expect($('[data-testid="browser-pane"]')).toBeExisting();
+
+      // 3. ページの中で押した Esc が main へ中継され、ドロワーとペイン(紐づき)が閉じる。
+      //    2 で 1 発使っているので、Rust 側の間引き (200ms) が明けるのを待つ。
+      await browser.pause(500);
+      await browser.switchToWindow(paneHandle);
+      await browser.execute(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+
+      await browser.switchToWindow(mainHandle);
+      await $('[data-testid="task-drawer"]').waitForExist({
+        reverse: true,
+        timeout: SETTLE_TIMEOUT,
+      });
+      await $('[data-testid="browser-pane"]').waitForExist({
+        reverse: true,
+        timeout: SETTLE_TIMEOUT,
+      });
+
+      // 後始末: 設定を戻し、作ったタスクを消す。
+      await invoke("set_settings", { settings });
+      await invoke("delete_task", { taskId: created.id });
+      await waitForText(NEW_CARDS, PANE_TITLE, false, `New 列から「${PANE_TITLE}」が消えません`);
+    } finally {
+      await new Promise<void>((ok) => server.close(() => ok()));
+      await switchToMainWindow();
+    }
   });
 });

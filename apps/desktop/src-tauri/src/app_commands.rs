@@ -48,6 +48,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "browser_pane_close",
     "browser_pane_set_bounds",
     "browser_pane_set_visible",
+    // ペインの中で押された Esc の中継。**外部ページから呼べる唯一の command**で、
+    // main には配らない(capabilities/browser-pane.json だけが持つ)。
+    "browser_pane_escape",
     // MCP トークン(値は返さない。main ウィンドウ専用)
     "get_mcp_token_status",
     "set_mcp_token",

@@ -19,8 +19,9 @@
 //!
 //! main ウィンドウにはもう 1 枚、内蔵ブラウザペインの子 webview([`browser`])が
 //! 重なることがある。こちらはウィンドウではなく **`Window::add_child` による子 webview** で、
-//! 開く URL が決まったときに実行時生成する。第三者のページが載るので capability は
-//! 一切割り当てない(= IPC を使えない)。
+//! 開く URL が決まったときに実行時生成する。第三者のページが載るので、渡す command は
+//! Esc の中継([`browser::browser_pane_escape`])**1 つだけ**にする
+//! (`capabilities/browser-pane.json`)。
 //!
 //! **webview ごとの command 許可**は `capabilities/*.json` で決まる。
 //! 割り当ては**ウィンドウラベルではなく webview ラベル**(`"webviews": [...]`)で書く。
@@ -170,6 +171,7 @@ pub fn run() {
             browser::browser_pane_close,
             browser::browser_pane_set_bounds,
             browser::browser_pane_set_visible,
+            browser::browser_pane_escape,
             commands::get_mcp_token_status,
             commands::set_mcp_token,
             ai::ai_create_tasks,
@@ -318,6 +320,9 @@ mod tests {
         );
     }
 
+    /// 内蔵ブラウザペインの capability。外部ページに渡してよい唯一の窓口。
+    const BROWSER_PANE_CAPABILITY: &str = "browser-pane";
+
     /// capability の割り当ては**ウィンドウラベルではなく webview ラベル**で書く。
     ///
     /// Tauri の `RuntimeAuthority::resolve_access` は「webview ラベルが一致 **または**
@@ -325,13 +330,15 @@ mod tests {
     /// 子 webview なので、`"windows": ["main"]` にすると**外部ページに main の全権限が
     /// 渡ってしまう**。`"webviews"` で配れば、ラベルが違う子 webview は構造的に外れる。
     ///
-    /// `remote` 節も持たせない。これがあると外部生成元からの invoke が capability と
-    /// 照合されるようになり、上の分離が意味を失う。
+    /// `browser-pane` の webview ラベルと `remote` 節(= 外部生成元からの invoke を
+    /// capability と照合させる指定)を持ってよいのは
+    /// [`BROWSER_PANE_CAPABILITY`] だけ。中身が Esc 1 つに閉じていることは
+    /// [`the_browser_pane_capability_grants_only_the_escape_command`] が見る。
     ///
     /// `capabilities/` を実際に走査するので、capability ファイルを足しても漏れは拾える
-    /// (走査そのものが空振りしていないことは、既知の 3 つと突き合わせて確かめる)。
+    /// (走査そのものが空振りしていないことは、既知の 4 つと突き合わせて確かめる)。
     #[test]
-    fn capabilities_are_granted_by_webview_label_and_never_to_the_browser_pane() {
+    fn capabilities_are_granted_by_webview_label() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
         let mut identifiers = BTreeSet::new();
         for entry in std::fs::read_dir(&dir).expect("capabilities/ が読める") {
@@ -346,14 +353,16 @@ mod tests {
                 .as_str()
                 .expect("identifier がある")
                 .to_owned();
+            let is_pane = identifier == BROWSER_PANE_CAPABILITY;
 
             assert!(
                 value["windows"].is_null(),
                 "{identifier} は windows ではなく webviews で割り当てること(子 webview に権限が漏れる)"
             );
-            assert!(
+            assert_eq!(
                 value["remote"].is_null(),
-                "{identifier} に remote 節を足さないこと(外部ページからの invoke が通るようになる)"
+                !is_pane,
+                "remote 節(外部ページからの invoke を通す指定)を持てるのは {BROWSER_PANE_CAPABILITY} だけ"
             );
 
             let webviews: Vec<&str> = value["webviews"]
@@ -362,16 +371,18 @@ mod tests {
                 .iter()
                 .filter_map(serde_json::Value::as_str)
                 .collect();
-            assert!(
-                !webviews.contains(&crate::browser::BROWSER_PANE),
+            assert_eq!(
+                webviews.contains(&crate::browser::BROWSER_PANE),
+                is_pane,
                 "{identifier} に browser-pane を割り当ててはいけない(外部ページに IPC を渡すことになる)"
             );
             identifiers.insert(identifier);
         }
-        let known: BTreeSet<String> = ["default", "overlay", "plugin-host"]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect();
+        let known: BTreeSet<String> =
+            ["default", "overlay", "plugin-host", BROWSER_PANE_CAPABILITY]
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect();
         assert_eq!(
             identifiers, known,
             "capability を増減したらこのテストの既知一覧も更新すること"
@@ -381,6 +392,75 @@ mod tests {
     const MAIN: &str = include_str!("../capabilities/default.json");
     const OVERLAY: &str = include_str!("../capabilities/overlay.json");
     const PLUGIN_HOST: &str = include_str!("../capabilities/plugin-host.json");
+    const BROWSER_PANE: &str = include_str!("../capabilities/browser-pane.json");
+
+    /// ブラウザペインに配ってよいのは `browser_pane_escape` **1 つだけ**。
+    ///
+    /// ここに載るものは、利用者がペインで開いた**任意のページ**が呼べるようになる。
+    /// そのため「アプリ独自 command が escape だけ」ではなく
+    /// **permissions 配列そのものが 1 要素**であることを見る
+    /// (`core:default` のようなプラグイン側の権限が紛れ込むのも防ぐ)。
+    #[test]
+    fn the_browser_pane_capability_grants_only_the_escape_command() {
+        let value: serde_json::Value =
+            serde_json::from_str(BROWSER_PANE).expect("capability は JSON として読める");
+        let permissions: Vec<&str> = value["permissions"]
+            .as_array()
+            .expect("permissions は配列")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        assert_eq!(
+            permissions,
+            vec![allow_permission("browser_pane_escape")],
+            "ペインには Esc の中継以外を渡さないこと(外部ページが呼べるようになる)"
+        );
+    }
+
+    /// ペインの `remote` に載せる URL パターンは http / https だけ。
+    ///
+    /// パターンは Tauri が起動時に `RemoteUrlPattern` として解釈するので、
+    /// ここでも同じ型で解釈して「http / https のページは一致し、
+    /// それ以外のスキームは一致しない」ことを確かめる。
+    ///
+    /// **明示ポートの URL を必ず入れておくこと。** URLPattern はポート成分を書かないと
+    /// 「スキームの既定ポートだけ」に絞られるので、`https://*` と書くと
+    /// `https://host:8443/` が静かに外れて、そのページでだけ Esc が効かなくなる。
+    #[test]
+    fn the_browser_pane_remote_urls_cover_http_and_https_only() {
+        use std::str::FromStr;
+        use tauri::utils::acl::RemoteUrlPattern;
+
+        let value: serde_json::Value =
+            serde_json::from_str(BROWSER_PANE).expect("capability は JSON として読める");
+        let patterns: Vec<RemoteUrlPattern> = value["remote"]["urls"]
+            .as_array()
+            .expect("remote.urls は配列")
+            .iter()
+            .map(|url| {
+                RemoteUrlPattern::from_str(url.as_str().expect("URL は文字列"))
+                    .expect("URLPattern として読める")
+            })
+            .collect();
+
+        let matches = |url: &str| {
+            let url = url.parse().expect("URL として読める");
+            patterns.iter().any(|pattern| pattern.test(&url))
+        };
+        for url in [
+            "https://github.com/reanisz/questloom/pull/1?tab=files#top",
+            "http://example.com/",
+            "https://sub.domain.example.co.jp/a/b",
+            // 明示ポート付き(社内サーバー・ローカルの開発サーバー)も対象。
+            "http://127.0.0.1:8123/page.html",
+            "https://example.com:8443/",
+        ] {
+            assert!(matches(url), "{url} は一致するべき");
+        }
+        for url in ["tauri://localhost/index.html", "ipc://localhost/x"] {
+            assert!(!matches(url), "{url} は一致しないべき");
+        }
+    }
 
     /// capability が参照する command permission は、必ず `APP_COMMANDS` から生成されたもの。
     ///
@@ -393,6 +473,7 @@ mod tests {
             ("default", MAIN),
             ("overlay", OVERLAY),
             ("plugin-host", PLUGIN_HOST),
+            (BROWSER_PANE_CAPABILITY, BROWSER_PANE),
         ] {
             for permission in app_permissions(capability) {
                 assert!(
@@ -409,7 +490,10 @@ mod tests {
     /// 無いと動かないので読み出しを許すが、設定画面には要らない(設定画面が扱うのは
     /// `plugin_secret_set` / `plugin_secret_status` だけで、値は一度書いたら
     /// アプリから読み出せない)。
-    const NOT_FOR_MAIN: &[&str] = &["plugin_secret_get"];
+    ///
+    /// `browser_pane_escape` はブラウザペイン専用の入口。main の中で押した Esc は
+    /// `document` のリスナが直接拾うので、main から呼ぶ道は要らない。
+    const NOT_FOR_MAIN: &[&str] = &["plugin_secret_get", "browser_pane_escape"];
 
     /// メインウィンドウ(ボード・ドロワー・設定画面)は
     /// [`NOT_FOR_MAIN`] を除く全 command を使える。
@@ -465,7 +549,7 @@ mod tests {
         );
     }
 
-    /// 管理系の command は plugin-host / overlay から絶対に見えないこと。
+    /// 管理系の command は plugin-host / overlay / browser-pane から絶対に見えないこと。
     ///
     /// タスクの削除・復元(`delete_task` / `restore_task` / `list_deleted_tasks`)も
     /// **main だけ**にする。オーバーレイは完了させるだけ、プラグインには
@@ -496,7 +580,11 @@ mod tests {
             "browser_pane_set_bounds",
             "browser_pane_set_visible",
         ]);
-        for (name, capability) in [("overlay", OVERLAY), ("plugin-host", PLUGIN_HOST)] {
+        for (name, capability) in [
+            ("overlay", OVERLAY),
+            ("plugin-host", PLUGIN_HOST),
+            (BROWSER_PANE_CAPABILITY, BROWSER_PANE),
+        ] {
             let granted = app_permissions(capability);
             for permission in &forbidden {
                 assert!(
@@ -515,7 +603,11 @@ mod tests {
     fn only_the_plugin_host_can_read_secrets() {
         let reader = allow_permission("plugin_secret_get");
         assert!(app_permissions(PLUGIN_HOST).contains(&reader));
-        for (name, capability) in [("default", MAIN), ("overlay", OVERLAY)] {
+        for (name, capability) in [
+            ("default", MAIN),
+            ("overlay", OVERLAY),
+            (BROWSER_PANE_CAPABILITY, BROWSER_PANE),
+        ] {
             assert!(
                 !app_permissions(capability).contains(&reader),
                 "{name} に {reader} を渡してはいけない"

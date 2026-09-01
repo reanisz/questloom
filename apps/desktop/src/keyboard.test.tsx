@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ESC_LAYER, onCtrlEnter, useEscapeKey } from "./keyboard";
+import { dispatchEscape, ESC_LAYER, onCtrlEnter, useEscapeKey } from "./keyboard";
 import { mount, pressKey, type Mounted } from "./test-utils";
 
 /** Esc で閉じるレイヤー 1 枚。 */
@@ -229,6 +229,38 @@ describe("useEscapeKey", () => {
       pressKey("Escape", button);
       expect(close).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("dispatchEscape(内蔵ブラウザペインから中継された Esc)", () => {
+  it("レイヤーが無ければ偽を返す(呼び出し側がペインを閉じる)", () => {
+    expect(dispatchEscape()).toBe(false);
+  });
+
+  it("最前面の 1 枚だけへ配り、真を返す", () => {
+    const drawer = vi.fn();
+    const modal = vi.fn();
+    open({ onClose: drawer, priority: ESC_LAYER.drawer });
+    const top = open({ onClose: modal, priority: ESC_LAYER.modal });
+
+    expect(dispatchEscape()).toBe(true);
+    expect(modal).toHaveBeenCalledTimes(1);
+    expect(drawer).not.toHaveBeenCalled();
+
+    top.unmount();
+    expect(dispatchEscape()).toBe(true);
+    expect(drawer).toHaveBeenCalledTimes(1);
+  });
+
+  it("questloom 側の入力欄にフォーカスが残っていても配る", () => {
+    // ペインへフォーカスが移っているので、こちらの activeElement は当てにならない。
+    // 「入力中は配らない」規則はキーボード由来の Esc だけのもの。
+    const close = vi.fn();
+    open({ onClose: close });
+    focusInput("textarea", "書きかけ");
+
+    expect(dispatchEscape()).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 });
 

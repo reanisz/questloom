@@ -46,6 +46,14 @@ export const OPEN_TASK = "questloom://open-task";
 /** AI 実行の進捗イベント名。 */
 export const AI_STATUS = "questloom://ai-status";
 
+/**
+ * 内蔵ブラウザペインの中で Esc が押されたことを知らせるイベント名。
+ *
+ * ペインは別 webview なのでキー入力が main の document に届かない。注入した
+ * スクリプトが `browser_pane_escape` を呼び、その command がこれを main へ送る。
+ */
+export const BROWSER_PANE_ESCAPE = "questloom://browser-pane-escape";
+
 /** ボード全体を、バケット導出済みの構造で取得する。 */
 export const getBoard = () => call<Board>("get_board");
 
@@ -204,6 +212,11 @@ export function listenAiStatus(handler: (status: AiStatus) => void): Promise<Unl
 /** タスク変更イベントを購読する。ペイロードは使わず再フェッチのトリガとしてのみ扱う。 */
 export function listenTasksChanged(handler: () => void): Promise<UnlistenFn> {
   return listen(TASKS_CHANGED, () => handler());
+}
+
+/** 内蔵ブラウザペインからの Esc を購読する(メインウィンドウ専用)。ペイロードは無い。 */
+export function listenBrowserPaneEscape(handler: () => void): Promise<UnlistenFn> {
+  return listen(BROWSER_PANE_ESCAPE, () => handler());
 }
 
 /** オーバーレイからのタスク詳細オープン要求を購読する(メインウィンドウ専用)。 */

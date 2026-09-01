@@ -14,6 +14,9 @@
  *   「ドロワーを開いたままモーダルを出す」ような順序の入れ替わりでも見た目と一致させる。
  * - 文字入力中(値の入った input / textarea、または select にフォーカス)の Esc は
  *   どのレイヤーへも配らない。入力途中のテキストをダイアログごと失わせないため。
+ *
+ * 内蔵ブラウザペイン(別 webview)で押された Esc はこの document には届かないので、
+ * Rust から中継されたイベントを [`dispatchEscape`] で同じスタックへ流し込む。
  */
 
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -108,9 +111,27 @@ function topLayer(): EscapeLayer | null {
 function onKeyDown(event: KeyboardEvent): void {
   if (event.key !== "Escape" || event.defaultPrevented) return;
   if (isTypingTarget(event.target)) return;
+  dispatchEscape();
+}
+
+/**
+ * 最前面のレイヤーへ Esc を配る。配る相手がいれば真、レイヤーが空なら偽を返す。
+ *
+ * キーボードから来た Esc(このモジュールの document リスナ)と、
+ * **内蔵ブラウザペインから中継された Esc** の共通の出口。ペイン側のキー入力は
+ * 別 webview なので document には届かず、Rust の `browser_pane_escape` command が
+ * `questloom://browser-pane-escape` として送り直したものを
+ * [`BrowserPane`](./components/BrowserPane.tsx) がここへ流し込む。
+ *
+ * **入力中(`isTypingTarget`)の判定はしない。** あれは「questloom の入力欄に
+ * 書きかけのテキストがある」ときの話で、フォーカスが別 webview へ移っている
+ * ペイン由来の Esc には当てはまらない(document 側のリスナは呼ぶ前に判定済み)。
+ */
+export function dispatchEscape(): boolean {
   const layer = topLayer();
-  if (!layer) return;
+  if (!layer) return false;
   layer.handler.current();
+  return true;
 }
 
 /** レイヤーが 1 つでもある間だけ document のリスナを張る。 */

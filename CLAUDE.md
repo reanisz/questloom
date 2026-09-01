@@ -576,35 +576,64 @@ skip_serializing)]` を付けてある。**読めるが二度と書き戻さな�
   (`internalAuto` の「詳細を見ながらページを見る」を殺さないため)。代わりに
   CSS 変数 `--browser-pane-width` からドロワー幅の上限を作り、重ならないようにしている。
 
-| command(いずれも main のみ・`async`) | 内容 |
-|---|---|
-| `browser_pane_open(url, bounds?)` | 生成 or URL 差し替え。`bounds` はフロントが測った矩形 |
-| `browser_pane_close()` | 子 webview を破棄(冪等) |
-| `browser_pane_set_bounds(bounds)` | 矩形を更新(論理 px。`{x, y, width, height}`) |
-| `browser_pane_set_visible(visible)` | 表示・非表示(閉じないのでページの状態は残る) |
+| command | 呼べる webview | 内容 |
+|---|---|---|
+| `browser_pane_open(url, bounds?)` (`async`) | main | 生成 or URL 差し替え。`bounds` はフロントが測った矩形 |
+| `browser_pane_close()` (`async`) | main | 子 webview を破棄(冪等) |
+| `browser_pane_set_bounds(bounds)` (`async`) | main | 矩形を更新(論理 px。`{x, y, width, height}`) |
+| `browser_pane_set_visible(visible)` (`async`) | main | 表示・非表示(閉じないのでページの状態は残る) |
+| `browser_pane_escape()` | **browser-pane のみ** | ペイン内の Esc を main へ中継(下記) |
 
 `browser_pane_open` が **`async` なのは必須**。`Window::add_child` は Windows で
 メインスレッドから呼ぶとデッドロックする(WebView2 の既知の問題)。
 
-### セキュリティ(外部ページに IPC を渡さない)
+### ペインの中で押された Esc
 
-守りは 3 枚。どれか 1 枚が破れても IPC には届かない。
+子 webview は独立した WebView2 なので、そこにフォーカスがある間のキー入力は
+main の `document` に届かない(= ドロワーが Esc で閉じない)。そこで:
+
+1. ペイン生成時に `WebviewBuilder::initialization_script` で小さな JS
+   (`browser.rs` の `ESCAPE_SCRIPT`)を注入する。capture フェーズで `keydown` を見て、
+   Escape なら `browser_pane_escape` を invoke する。
+   **`preventDefault` はしない**(ページ自身の Esc 処理を妨げない)。
+2. `browser_pane_escape` は `questloom://browser-pane-escape` を main へ emit するだけ。
+   連打は Rust 側(`EscapeThrottle`、**200ms に 1 回**)で間引く。JS 側にガードを置いても
+   悪意あるページは直接 `invoke` を呼べるので防御にならない。
+3. main では `BrowserPane` がこれを購読し、`keyboard.ts` の `dispatchEscape()` で
+   **キーボードの Esc とまったく同じレイヤースタック**へ流す。最前面のレイヤー
+   (モーダル > ドロワー)が閉じ、レイヤーが 1 つも無ければ(= ペインだけ)`closePane()`。
+
+注入スクリプトが動くのは **main frame だけ**(Tauri が `__TAURI_INTERNALS__` を
+子フレームへ注入しないため)。ページ内 iframe にフォーカスがある間の Esc は届かない。
+
+### セキュリティ(外部ページに Esc 以外を渡さない)
+
+守りは 3 枚。どれか 1 枚が破れても `browser_pane_escape` より先へは届かない。
 
 1. **capability は webview ラベルで配る。** Tauri の `resolve_access` は
    「webview ラベルが一致 **または** ウィンドウラベルが一致」で通すので、
    `"windows": ["main"]` のままだと **main ウィンドウの子 webview(外部ページ)に
-   main の全権限が渡ってしまう**。そのため capabilities は 3 つとも
-   `"webviews": [...]` に書き換えてあり、`browser-pane` はどこにも載せない。
-2. **リモート生成元は capability の対象外。** 外部 URL からの invoke は `Origin::Remote`
-   になり、`remote` 節を持たない capability とは照合されない。`remote` 節は足さないこと。
+   main の全権限が渡ってしまう**。そのため capabilities は 4 つとも
+   `"webviews": [...]` で書き、`browser-pane` を載せるのは
+   `capabilities/browser-pane.json` **1 枚だけ**にする。
+2. **リモート生成元へ開けるのは 1 command だけ。** 外部 URL からの invoke は `Origin::Remote`
+   になり、`remote` 節を持たない capability とは照合されない。`remote` 節を持つのは
+   `capabilities/browser-pane.json` だけで、その `permissions` は
+   `allow-browser-pane-escape` **のみ**。ここに 2 つ目を足さないこと(利用者がペインで
+   開いた任意のページが呼べるようになる)。
 3. **URL を絞る。** `http` / `https` のみ。加えて `*.localhost` を弾く
    (Windows では questloom 自身が `http://tauri.localhost` から配信されるため、
    そこを開くと Tauri から「ローカル生成元」に見えて 1 と 2 をまとめて回避されうる)。
 
 `dangerousRemoteDomainIpcAccess` は使わない。1〜3 を一括で無効化する設定なので持たない。
-1 と 2 は `src-tauri/src/lib.rs` の
-`capabilities_are_granted_by_webview_label_and_never_to_the_browser_pane`
+1 と 2 は `src-tauri/src/lib.rs` の `capabilities_are_granted_by_webview_label` /
+`the_browser_pane_capability_grants_only_the_escape_command` /
+`the_browser_pane_remote_urls_cover_http_and_https_only`
 (`capabilities/` を実際に走査する)、3 は `browser::tests` が見る。
+
+`remote.urls` は `["http://*:*", "https://*:*"]`。**`:*` を落とさないこと。**
+URLPattern はポート成分を書かないと「スキームの既定ポートだけ」に絞られるので、
+`https://*` と書くと `https://host:8443/` のページでだけ Esc が効かなくなる。
 
 ### 開き方の設定
 
@@ -707,7 +736,7 @@ CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-
 | `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
 | `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings`、設定画面専用の `plugin_directory` / `plugin_list_loaded` / `plugin_secret_set` / `plugin_secret_status` を除く)+ シークレットの読み出し `plugin_secret_get` + `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
-| `browser-pane` | **無し。** どの capability にも載せない(外部ページなので IPC を一切渡さない) |
+| `browser-pane` | **`browser_pane_escape` だけ**(`capabilities/browser-pane.json`)。外部ページが載るので、ここに 2 つ目を足さないこと |
 
 plugin-host では第三者のプラグインコードが動くので、`get_settings` / `set_settings` /
 `get_runtime_status`(MCP の URL が載る)/ `get_mcp_token_status` / `set_mcp_token` /
@@ -719,7 +748,8 @@ command を invoke すると Tauri が拒否する。command を足したら `AP
 シークレットだけは許可の向きが逆で、**値を読む `plugin_secret_get` は plugin-host にしか
 渡さない**(プラグインコードは値が無いと動かない)。設定画面は書き込み
 (`plugin_secret_set`)と状態確認(`plugin_secret_status`)だけを持ち、値は読めない。
-main に配らない command は `lib.rs` の `NOT_FOR_MAIN` に列挙してある。
+main に配らない command は `lib.rs` の `NOT_FOR_MAIN`(`plugin_secret_get` と
+`browser_pane_escape`)に列挙してある。
 
 ### CSP
 

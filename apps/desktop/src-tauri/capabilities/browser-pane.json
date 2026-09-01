@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-pane",
+  "description": "Capability for the embedded browser pane (crate::browser), the one webview that shows THIRD PARTY pages. It exists so that pressing Escape inside the pane can close the task drawer / the pane itself: the injected script relays the key press through browser_pane_escape, which only emits an event to the main window. This is the only capability with a \"remote\" section and the only one that names the browser-pane webview, and it must never list a second permission - anything added here is handed to every page the user opens. In the URLs below the \":*\" is load bearing: these are URLPatterns, and a pattern with no port component only matches the scheme's default port, so \"https://*\" would silently miss https://host:8443/. The pane can only ever load http/https (crate::browser::parse_external_url), so the pair means \"every page the pane can show\". Enforced by the lib.rs tests the_browser_pane_capability_grants_only_the_escape_command, the_browser_pane_remote_urls_cover_http_and_https_only and capabilities_are_granted_by_webview_label.",
+  "webviews": ["browser-pane"],
+  "remote": {
+    "urls": ["http://*:*", "https://*:*"]
+  },
+  "permissions": ["allow-browser-pane-escape"]
+}
