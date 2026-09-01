@@ -8,9 +8,10 @@
  *   ├ グローバル defineQuestloomPlugin を用意
  *   ├ questloom://plugins-reload / plugin-settings-changed を購読
  *   └ load()
- *       1. plugin_list_sources() でソースを列挙
+ *       1. plugin_list_sources() でソースを列挙(ユーザー配置が先、アプリ同梱が後)
  *       2. ソースごとに: トランスパイル → Blob URL → import() → default export を検証
- *          (id が重複したら後から来た方を拒否する)
+ *          (id が重複したら後から来た方を拒否する。ユーザー版が同梱版を隠した場合は
+ *           エラーではなく shadowsBuiltin として記録する。./claim.ts 参照)
  *       3. 生き残った各プラグインの activate(ctx) を呼ぶ
  *       4. plugin_publish_loaded() で結果を公開(設定画面が読む)
  * reloadPlugins()  ← questloom://plugins-reload
@@ -25,6 +26,7 @@
 import * as api from "../api";
 import type { LoadedPlugin, PluginSourceFile, TaskCard } from "../types";
 import * as papi from "./api";
+import { claimPluginId } from "./claim";
 import {
   defineQuestloomPlugin,
   mergeSettings,
@@ -322,34 +324,47 @@ async function load(): Promise<void> {
   }
 
   const results: LoadedPlugin[] = [];
-  const claimed = new Set<string>();
+  /** id → その id を確保しているロード結果(results に載せているのと同じオブジェクト)。 */
+  const claimed = new Map<string, LoadedPlugin>();
+  /** 結果 1 件の骨格。置き場の区別は最後まで持ち回る。 */
+  const base = (source: PluginSourceFile) => ({
+    fileName: source.fileName,
+    builtin: source.builtin,
+    shadowsBuiltin: false,
+  });
 
   for (const source of sources) {
     let imported: { plugin: QuestloomPlugin; objectUrl: string };
     try {
       imported = await importPlugin(source.fileName, source.source);
     } catch (error) {
-      results.push({
-        fileName: source.fileName,
-        manifest: null,
-        active: false,
-        error: describeError(error),
-      });
+      results.push({ ...base(source), manifest: null, active: false, error: describeError(error) });
       continue;
     }
 
     const manifest = imported.plugin.manifest;
-    if (claimed.has(manifest.id)) {
+    const claim = claimPluginId(claimed, manifest.id, source);
+    if (claim !== "claimed") {
       URL.revokeObjectURL(imported.objectUrl);
+      if (claim === "shadowed") {
+        // 利用者がカスタマイズ版を置いた状態。エラーにはせず、一覧にも並べない
+        // (勝った側のカードに「同梱版を上書きしています」と出る)。
+        hostLog(
+          "info",
+          `同梱プラグイン "${manifest.id}" は、プラグインフォルダの ${
+            claimed.get(manifest.id)?.fileName ?? "同 id のファイル"
+          } に置き換えられています。`,
+        );
+        continue;
+      }
       results.push({
-        fileName: source.fileName,
+        ...base(source),
         manifest,
         active: false,
         error: `プラグイン id "${manifest.id}" が重複しています(先に読み込まれた方を使います)。`,
       });
       continue;
     }
-    claimed.add(manifest.id);
 
     const entry: ActivePlugin = {
       fileName: source.fileName,
@@ -361,17 +376,18 @@ async function load(): Promise<void> {
     // activate が途中で失敗しても登録済みのものを片付けられるよう、先に積んでおく。
     active.push(entry);
 
+    // 先に一覧へ載せてから claimed へ入れる(隠された同梱版が
+    // shadowsBuiltin を立てられるよう、同じオブジェクトを共有させるため)。
+    const result: LoadedPlugin = { ...base(source), manifest, active: false, error: null };
+    results.push(result);
+    claimed.set(manifest.id, result);
+
     try {
       const dispose = await imported.plugin.activate(createContext(entry));
       if (typeof dispose === "function") entry.cleanups.push(dispose);
-      results.push({ fileName: source.fileName, manifest, active: true, error: null });
+      result.active = true;
     } catch (error) {
-      results.push({
-        fileName: source.fileName,
-        manifest,
-        active: false,
-        error: describeError(error),
-      });
+      result.error = describeError(error);
     }
   }
 

@@ -240,6 +240,7 @@ function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
           <h3>
             {manifest?.name ?? plugin.fileName}
             {manifest?.version && <span className="muted"> v{manifest.version}</span>}
+            <span className="plugin-badge">{plugin.builtin ? "標準" : "ユーザー"}</span>
           </h3>
           <p className="settings-hint">
             <code>{plugin.fileName}</code>
@@ -250,6 +251,19 @@ function PluginCard({ plugin }: { plugin: LoadedPlugin }) {
           {plugin.active ? "● 有効" : "● 無効"}
         </span>
       </header>
+
+      {plugin.builtin && (
+        <p className="settings-hint muted">
+          アプリに同梱されている標準プラグインです。更新するとこの版も更新されます。
+        </p>
+      )}
+
+      {plugin.shadowsBuiltin && (
+        <p className="settings-hint">
+          標準版(アプリ同梱)を上書きしています。
+          プラグインフォルダの <code>{plugin.fileName}</code> を削除すると同梱版に戻ります。
+        </p>
+      )}
 
       {manifest?.description && <p className="settings-lead muted">{manifest.description}</p>}
 
@@ -383,8 +397,10 @@ export function PluginSettingsSection() {
     <section className="settings-section">
       <h2>プラグイン</h2>
       <p className="settings-lead muted">
-        下のフォルダに <code>.ts</code> / <code>.js</code> を置くと、起動時と「再読み込み」で
-        自動的に読み込まれます。プラグインは questloom が起動している間だけ動きます。
+        「標準」プラグインはアプリに同梱されていて、そのまま使えます。加えて、下のフォルダに{" "}
+        <code>.ts</code> / <code>.js</code> を置くと、起動時と「再読み込み」で自動的に
+        読み込まれます(同じ id なら置いた方が優先されます)。
+        プラグインは questloom が起動している間だけ動きます。
       </p>
 
       <div className="settings-field">
@@ -418,8 +434,12 @@ export function PluginSettingsSection() {
         </p>
       ) : (
         <div className="plugin-list">
+          {/* 同梱版と同名のユーザー版が並びうるので、key には置き場も混ぜる。 */}
           {plugins.map((plugin) => (
-            <PluginCard key={plugin.fileName} plugin={plugin} />
+            <PluginCard
+              key={`${plugin.builtin ? "builtin" : "user"}:${plugin.fileName}`}
+              plugin={plugin}
+            />
           ))}
         </div>
       )}

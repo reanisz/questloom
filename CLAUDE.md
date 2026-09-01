@@ -177,7 +177,10 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   このディレクトリを使う。DB・バックアップだけでなく **`plugins/` の探索先もここに従う**
   (`plugin_host::plugins_dir` は `AppState::data_dir` を基準にする)。
   `app_data_dir()` を直接引くと、一時プロファイルのはずのテストが利用者の本物の
-  プラグインを読み込んでしまう。
+  プラグインを読み込んでしまう。**ただしアプリ同梱の標準プラグインは
+  `<resource_dir>/plugins` にあるので、これを指定しても読み込まれる**
+  (シークレットが見えなければ何もしないので、`QUESTLOOM_KEYRING_SERVICE` を
+  併せて渡していれば無害)。
 - `QUESTLOOM_MCP_PORT` — コア設定の `mcpPort` を無視してこのポートで待ち受ける
   (本物の 39150 と衝突させないため)。`u16` として読めない値は無視して設定値に落ちる。
 - `QUESTLOOM_KEYRING_SERVICE` — シークレットの service 名(既定 `questloom`)を差し替える。
@@ -356,7 +359,9 @@ State の取り出し・`questloom://ai-status` の emit・エラーの文字列
 
 ## TypeScript プラグイン
 
-`%APPDATA%\dev.reanisz.questloom\plugins\` に `*.ts` / `*.js` を置くだけで読み込まれる軽量プラグイン層
+アプリ同梱の**標準プラグイン**(`<resource_dir>\plugins\`)と、
+`%APPDATA%\dev.reanisz.questloom\plugins\` に `*.ts` / `*.js` を置くだけで読み込まれる
+**利用者配置**のプラグインからなる軽量プラグイン層
 (Phase 6a の基盤。GitHub 統合は Phase 6b)。実行場所は**非表示の `plugin-host` webview ウィンドウ**で、
 プラグインのライフサイクルはすべてホスト JS が持つ(Rust 側はファイル列挙・永続化・ログ転送のみ)。
 
@@ -364,9 +369,34 @@ State の取り出し・`questloom://ai-status` の emit・エラーの文字列
 |---|---|
 | Tauri command(列挙・KV・設定・リソース・ログ・ドメイン判定・レジストリ) | `apps/desktop/src-tauri/src/plugin_host.rs` |
 | ホスト(ロード・activate・dispose・リロード) | `apps/desktop/src/plugin-host/host.ts` |
+| id の重複裁定(標準 / ユーザーの優先規則) | `apps/desktop/src/plugin-host/claim.ts` |
 | **SDK の型定義(プラグイン作者向けリファレンス)** | `apps/desktop/src/plugin-host/sdk.ts` |
 | トランスパイル (esbuild-wasm) | `apps/desktop/src/plugin-host/transpile.ts` |
-| サンプル | `examples/plugins/hello.ts`(最小)、`examples/plugins/github.ts`(実用例) |
+| サンプル | `examples/plugins/hello.ts`(最小)、`examples/plugins/github.ts`(実用例 = 標準プラグイン) |
+
+### 標準プラグイン(アプリ同梱)
+
+**GitHub 統合 (`examples/plugins/github.ts`) はアプリに同梱される。** インストール直後から
+設定画面に「標準」として並び、PAT を入れるだけで動く。プラグインフォルダへのコピーは不要
+(コピー方式はプロファイル側の版が古いまま滞留するのでやめた)。
+
+- **実体は `examples/plugins/github.ts` ただ 1 つ。** `tauri.conf.json` の
+  `bundle.resources` が `"../../../examples/plugins/github.ts": "plugins/github.ts"` と
+  マッピングしてそのまま配るので、コピーも同期処理も無い。同梱するファイルを増やすときも
+  ここへ足す(`src-tauri/resources/` は**作らない**。`lib.rs` の
+  `builtin_plugins_are_bundled_straight_from_examples` が見ている)。`hello.ts` は同梱しない。
+- 読み込み元は `<resource_dir>/plugins`。**`npm run tauri dev` でも読める**
+  (`tauri-build` が `bundle.resources` を cargo の出力ディレクトリ = exe の隣にも
+  コピーし、Windows の `resource_dir` は exe のあるディレクトリを指すため)。
+  したがって dev 専用のフォールバックは持たない。
+- **同じ id なら利用者配置が勝つ。** `plugin_list_sources` はユーザー配置 → 同梱の順で
+  返し、ホストは先に来た方に id を確保させる(`claim.ts`)。隠された同梱版は
+  エラーにも一覧にもせず読み飛ばし、勝ったユーザー版に `shadowsBuiltin` を立てる。
+  設定画面はそのカードに「標準版(アプリ同梱)を上書きしています」と出す。
+  ファイルを消せば同梱版に戻る。
+- 設定・KV・シークレットの名前空間は id ベース (`plugin:<id>`) なので、
+  標準版とユーザー版のどちらでロードされても引き継がれる。
+- ファイル名の検証・トラバーサル対策 (`is_plugin_file_name`) は同梱側にも同じく効く。
 
 ### プラグインの形
 
@@ -438,11 +468,14 @@ export default defineQuestloomPlugin({
 
 #### 導入
 
-1. `examples/plugins/github.ts` を `%APPDATA%\dev.reanisz.questloom\plugins\` へコピーする。
-2. 設定画面の「プラグイン」節で「プラグインを再読み込み」を押す。
-3. 同じ節に生えるフォームで **Personal Access Token** を入れて保存する
-   (PAT 未設定のうちは PR の監視は「PAT が未設定のためスキップします」とログに出るだけで
-   何もしない。description の自動記入は PAT 無しでも public な PR に対して動く)。
+**アプリ同梱の標準プラグインなので、コピーは要らない。** 設定画面の「プラグイン」節に
+「標準」バッジ付きで並んでいるので、そこに生えるフォームで **Personal Access Token** を
+入れて保存するだけでよい(PAT 未設定のうちは PR の監視は「PAT が未設定のためスキップします」
+とログに出るだけで何もしない。description の自動記入は PAT 無しでも public な PR に対して動く)。
+
+手を入れたい場合は `examples/plugins/github.ts` をプラグインフォルダへコピーして編集する。
+同じ id なので同梱版を隠して読み込まれ、カードに「標準版を上書きしています」と出る。
+書き換えたら「プラグインを再読み込み」を押す。ファイルを消せば同梱版に戻る。
 
 | 設定 | 既定 | 内容 |
 |---|---|---|
@@ -734,7 +767,9 @@ URLPattern はポート成分を書かないと「スキームの既定ポート
 Esc / 閉じるでボードへ戻る)。節は 一般 / ショートカットとオーバーレイ / MCP サーバー / AI / プラグイン の 5 つ。
 プラグイン節(`components/PluginSettingsSection.tsx`)だけはコア設定と独立で、
 manifest の `settingsSchema` からフォームを自動生成し、プラグインごとの保存ボタンで
-`plugin_set_settings` を呼ぶ(下記の一括「保存」は使わない)。
+`plugin_set_settings` を呼ぶ(下記の一括「保存」は使わない)。カードには出所の
+「標準」/「ユーザー」バッジが付き、ユーザー版が標準版を隠している場合は
+「標準版(アプリ同梱)を上書きしています」という注記が出る。
 自動保存はせず「保存」ボタンで `set_settings` を一括呼び出しする(未保存のまま閉じるときは確認)。
 
 **シークレットはどちらの「保存」にも載らない**(値は資格情報マネージャーにあり、

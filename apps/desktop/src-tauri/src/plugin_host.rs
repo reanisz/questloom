@@ -12,8 +12,15 @@
 //!
 //! の 6 点だけである。
 //!
+//! プラグインの置き場は 2 つある。**アプリ同梱(標準)**の
+//! `<resource_dir>/plugins`(`tauri.conf.json` の `bundle.resources` が
+//! `examples/plugins/*.ts` をそのまま配る)と、**利用者配置**の
+//! `<app_data_dir>/plugins`。[`plugin_list_sources`] は両方を返し、同じ id が
+//! 両方にあった場合は**ユーザー側を勝たせる**(ロード順で表現する。[`merge_sources`])。
+//!
 //! セキュリティ上の注意: [`plugin_list_sources`] が読むのはプラグインディレクトリ
 //! **直下**のファイルのみで、区切り文字を含む名前は [`is_plugin_file_name`] が拒否する。
+//! この規則は同梱側にも同じように効かせる。
 //! fetch 先の判定は [`is_fetch_allowed`] に置き、ホスト JS から
 //! [`plugin_fetch_allowed`] 経由で使わせる(判定ロジックを 1 箇所に保つため)。
 //!
@@ -30,7 +37,8 @@ use questloom_core::model::TaskId;
 use questloom_core::repository::TaskRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::path::BaseDirectory;
+use tauri::{AppHandle, Emitter, Manager, State};
 use url::{Host, Url};
 
 use crate::commands::{fail, CommandResult};
@@ -39,7 +47,10 @@ use crate::state::AppState;
 
 pub use crate::contract::{PLUGINS_LOADED, PLUGINS_RELOAD, PLUGIN_SETTINGS_CHANGED};
 
-/// プラグインファイルを置くディレクトリ名(`<app_data_dir>` からの相対)。
+/// プラグインファイルを置くディレクトリ名。
+///
+/// 利用者配置は `<app_data_dir>/plugins`、アプリ同梱(標準)は
+/// `<resource_dir>/plugins`。どちらも同じ名前を使う。
 pub const PLUGINS_DIR: &str = "plugins";
 
 /// プラグイン設定の名前空間の接頭辞。`settings` テーブルのキーは `plugin:<id>`。
@@ -136,6 +147,29 @@ fn ensure_dir(dir: &Path) -> Result<(), String> {
     })
 }
 
+/// アプリ同梱(標準)プラグインのディレクトリを解決する。作成はしない。
+///
+/// 実体は `tauri.conf.json` の `bundle.resources` が配る `<resource_dir>/plugins`。
+///
+/// **`npm run tauri dev` でも読める。** `tauri-build` はビルドスクリプトの時点で
+/// `bundle.resources` を cargo の出力ディレクトリ(= exe の隣)へコピーし、
+/// Windows の `resource_dir` は exe のあるディレクトリを指すため、
+/// dev 実行でも同じパスに同梱プラグインが居る。したがって
+/// 「dev のときだけリポジトリの examples を読む」ようなフォールバックは持たない
+/// (持つと、リポジトリの外へ置いた debug ビルドで挙動が変わる)。
+///
+/// 解決できない・存在しない場合は `None`。同梱プラグインが 1 件も無いだけで、
+/// 利用者配置のプラグインは通常どおり動く。
+fn builtin_plugins_dir(app: &AppHandle) -> Option<PathBuf> {
+    match app.path().resolve(PLUGINS_DIR, BaseDirectory::Resource) {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            tracing::warn!(%error, "同梱プラグインのディレクトリを解決できませんでした");
+            None
+        }
+    }
+}
+
 /// プラグインソース 1 件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +180,8 @@ pub struct PluginSource {
     pub source: String,
     /// 最終更新時刻 (RFC 3339 / UTC)。取得できない場合は `None`。
     pub modified_at: Option<DateTime<Utc>>,
+    /// アプリ同梱(標準)プラグインか。偽なら利用者がプラグインフォルダに置いたもの。
+    pub builtin: bool,
 }
 
 /// 設定スキーマの項目 1 件。設定画面のフォームはこれから自動生成される。
@@ -204,6 +240,14 @@ pub struct LoadedPlugin {
     /// 失敗した場合のメッセージ。
     #[serde(default)]
     pub error: Option<String>,
+    /// アプリ同梱(標準)プラグインとして読み込まれたか。
+    #[serde(default)]
+    pub builtin: bool,
+    /// 同じ id の同梱プラグインを隠して読み込まれた利用者配置版か。
+    ///
+    /// 真なら設定画面に「同梱版を上書きしている」旨を出す(消せば同梱版に戻る)。
+    #[serde(default)]
+    pub shadows_builtin: bool,
 }
 
 /// ホストが公開したロード結果を保持するレジストリ。
@@ -249,19 +293,19 @@ pub fn plugin_directory(state: State<'_, AppState>) -> CommandResult<String> {
         .map_err(fail)
 }
 
-/// プラグインディレクトリ直下の `*.ts` / `*.js` を列挙して読み込む。
+/// ディレクトリ直下の `*.ts` / `*.js` を列挙して読み込む。
 ///
-/// ディレクトリが無ければ作成し、空配列を返す。読めなかったファイルは
-/// 警告ログを出して読み飛ばす(1 つの壊れたファイルで全体を止めないため)。
-#[tauri::command]
-pub fn plugin_list_sources(state: State<'_, AppState>) -> CommandResult<Vec<PluginSource>> {
-    let dir = plugins_dir(&state.data_dir).map_err(fail)?;
-    let entries = std::fs::read_dir(&dir).map_err(|error| {
-        fail(format!(
-            "プラグインを列挙できません ({}): {error}",
-            dir.display()
-        ))
-    })?;
+/// ディレクトリが存在しない場合は空配列(同梱プラグインを持たないビルドでも
+/// 利用者配置のプラグインは動かしたいため、エラーにはしない)。読めなかった
+/// ファイルは警告ログを出して読み飛ばす(1 つの壊れたファイルで全体を止めないため)。
+///
+/// 並びはファイル名昇順。
+fn read_sources(dir: &Path, builtin: bool) -> Result<Vec<PluginSource>, String> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("プラグインを列挙できません ({}): {error}", dir.display()))?;
 
     let mut sources = Vec::new();
     for entry in entries {
@@ -302,12 +346,63 @@ pub fn plugin_list_sources(state: State<'_, AppState>) -> CommandResult<Vec<Plug
             file_name,
             source,
             modified_at,
+            builtin,
         });
     }
     // ロード順を安定させる(ファイル名昇順)。
     sources.sort_by(|a, b| a.file_name.cmp(&b.file_name));
-    tracing::debug!(count = sources.len(), dir = %dir.display(), "プラグインを列挙しました");
     Ok(sources)
+}
+
+/// 利用者配置と同梱のソースを、ホストがロードする順に並べる。
+///
+/// **ユーザー配置が先。** ホスト (`plugin-host/host.ts`) は先に来た方に
+/// プラグイン id を確保させるので、この順序がそのまま
+/// 「同じ id なら利用者のカスタマイズ版が勝つ」という規則になる
+/// (同梱版を丸ごと差し替えたいときに、ファイルを置くだけで済ませるため)。
+///
+/// ファイル名の重複はここでは落とさない。名前が同じでも id が違えば別物なので、
+/// 実際に隠すかどうかは manifest を読めるホスト側が決める。
+#[must_use]
+pub fn merge_sources(
+    mut user: Vec<PluginSource>,
+    mut builtin: Vec<PluginSource>,
+) -> Vec<PluginSource> {
+    user.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    builtin.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    user.append(&mut builtin);
+    user
+}
+
+/// アプリ同梱(標準)と利用者配置のプラグインソースを列挙して読み込む。
+///
+/// 利用者のプラグインディレクトリは無ければ作成する。同梱側は読めなくても
+/// 警告を出すだけで、利用者配置のプラグインのロードは続ける。
+#[tauri::command]
+pub fn plugin_list_sources(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<PluginSource>> {
+    let user_dir = plugins_dir(&state.data_dir).map_err(fail)?;
+    let user = read_sources(&user_dir, false).map_err(fail)?;
+
+    let builtin_dir = builtin_plugins_dir(&app);
+    let builtin = match &builtin_dir {
+        Some(dir) => read_sources(dir, true).unwrap_or_else(|error| {
+            tracing::warn!(%error, "同梱プラグインを列挙できませんでした");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+
+    tracing::debug!(
+        user = user.len(),
+        builtin = builtin.len(),
+        user_dir = %user_dir.display(),
+        builtin_dir = %builtin_dir.as_deref().map_or_else(String::new, |dir| dir.display().to_string()),
+        "プラグインを列挙しました"
+    );
+    Ok(merge_sources(user, builtin))
 }
 
 /// プラグイン専用 KV の値を読む。未保存なら `None`。
@@ -623,6 +718,8 @@ pub fn plugin_publish_loaded(
                     id = %manifest.id,
                     version = %manifest.version,
                     active = plugin.active,
+                    builtin = plugin.builtin,
+                    shadows_builtin = plugin.shadows_builtin,
                     "プラグインをロードしました"
                 );
             }
@@ -735,6 +832,8 @@ mod tests {
             manifest: None,
             active: false,
             error: Some("失敗".to_owned()),
+            builtin: false,
+            shadows_builtin: false,
         }]);
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.len(), 1);
@@ -787,21 +886,123 @@ mod tests {
             file_name: "hello.ts".to_owned(),
             source: "export default {}".to_owned(),
             modified_at: Some(modified),
+            builtin: true,
         })
         .unwrap();
         assert_eq!(json["fileName"], "hello.ts");
         assert_eq!(json["source"], "export default {}");
         assert_eq!(json["modifiedAt"], "2026-08-31T01:02:03Z");
-        assert_eq!(json.as_object().map(serde_json::Map::len), Some(3));
+        assert_eq!(json["builtin"], true);
+        assert_eq!(json.as_object().map(serde_json::Map::len), Some(4));
 
         // 更新時刻が取れなかったファイルは null(JS 側は省略扱いにする)。
         let json = serde_json::to_value(PluginSource {
             file_name: "hello.ts".to_owned(),
             source: String::new(),
             modified_at: None,
+            builtin: false,
         })
         .unwrap();
         assert!(json["modifiedAt"].is_null());
+        assert_eq!(json["builtin"], false);
+    }
+
+    /// ロード結果の形も camelCase。JS 側の [`LoadedPlugin`] と往復できること。
+    #[test]
+    fn loaded_plugin_json_is_camel_case() {
+        let plugin = LoadedPlugin {
+            file_name: "github.ts".to_owned(),
+            manifest: None,
+            active: true,
+            error: None,
+            builtin: false,
+            shadows_builtin: true,
+        };
+        let json = serde_json::to_value(&plugin).unwrap();
+        assert_eq!(json["fileName"], "github.ts");
+        assert_eq!(json["builtin"], false);
+        assert_eq!(json["shadowsBuiltin"], true);
+        assert_eq!(
+            serde_json::from_value::<LoadedPlugin>(json).unwrap(),
+            plugin
+        );
+
+        // 旧いホスト(フィールドを送ってこない)からの入力も読める。
+        let old: LoadedPlugin =
+            serde_json::from_str(r#"{"fileName":"hello.ts","active":true}"#).expect("読める");
+        assert!(!old.builtin);
+        assert!(!old.shadows_builtin);
+    }
+
+    // ---- ソースの列挙とマージ ----
+
+    fn write_plugin(dir: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    fn names(sources: &[PluginSource]) -> Vec<(String, bool)> {
+        sources
+            .iter()
+            .map(|source| (source.file_name.clone(), source.builtin))
+            .collect()
+    }
+
+    #[test]
+    fn read_sources_reads_plain_files_and_tags_them() {
+        let dir = tempfile::tempdir().unwrap();
+        write_plugin(dir.path(), "b.ts", "// b");
+        write_plugin(dir.path(), "a.js", "// a");
+        // 拡張子・隠しファイル・型定義は対象外(is_plugin_file_name と同じ規則)。
+        write_plugin(dir.path(), "readme.md", "no");
+        write_plugin(dir.path(), ".hidden.ts", "no");
+        write_plugin(dir.path(), "questloom.d.ts", "no");
+        // サブディレクトリは辿らない。
+        write_plugin(&dir.path().join("nested"), "deep.ts", "no");
+
+        let sources = read_sources(dir.path(), true).expect("読める");
+        assert_eq!(
+            names(&sources),
+            vec![("a.js".to_owned(), true), ("b.ts".to_owned(), true)],
+            "ファイル名昇順で、同梱フラグが付く"
+        );
+        assert_eq!(sources[0].source, "// a");
+    }
+
+    /// 同梱プラグインを持たないビルドでもエラーにしない。
+    #[test]
+    fn read_sources_treats_a_missing_directory_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(read_sources(&missing, true)
+            .expect("エラーにしない")
+            .is_empty());
+    }
+
+    /// ロード順 = 優先順。ユーザー配置が同梱より先に来る。
+    #[test]
+    fn merge_sources_puts_user_plugins_first() {
+        let source = |name: &str, builtin: bool| PluginSource {
+            file_name: name.to_owned(),
+            source: String::new(),
+            modified_at: None,
+            builtin,
+        };
+        let merged = merge_sources(
+            vec![source("z-user.ts", false), source("github.ts", false)],
+            vec![source("github.ts", true), source("a-builtin.ts", true)],
+        );
+        assert_eq!(
+            names(&merged),
+            vec![
+                // ユーザー配置(ファイル名昇順)。
+                ("github.ts".to_owned(), false),
+                ("z-user.ts".to_owned(), false),
+                // 同梱(ファイル名昇順)。同名でも落とさない: id が同じかはホストが判断する。
+                ("a-builtin.ts".to_owned(), true),
+                ("github.ts".to_owned(), true),
+            ]
+        );
     }
 
     /// 設定変更通知のペイロードも camelCase。

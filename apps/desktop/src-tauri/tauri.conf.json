@@ -64,6 +64,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": {
+      "../../../examples/plugins/github.ts": "plugins/github.ts"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

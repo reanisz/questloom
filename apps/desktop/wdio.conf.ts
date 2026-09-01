@@ -69,8 +69,12 @@ const appEnv = {
  * シークレット移送の spec が使う最小プラグイン。
  *
  * プラグインは**起動時に読み込まれる**ので、spec が動き出してからでは間に合わない。
- * 一時プロファイルの `plugins/` へ先に置いておく(プラグインディレクトリも
+ * 一時プロファイルの `plugins/` へ先に置いておく(利用者配置のプラグインディレクトリは
  * `QUESTLOOM_DATA_DIR` に従うので、利用者の本物のプラグインは読み込まれない)。
+ *
+ * なお**アプリ同梱の標準プラグイン(GitHub 連携)はこの実行でも読み込まれる**。
+ * ただしシークレットは `QUESTLOOM_KEYRING_SERVICE` で切り離してあり PAT が
+ * 見えないため、ログを出すだけで外部 API は叩かない。
  */
 const SECRET_PLUGIN_ID = "e2esecret";
 const SECRET_PLUGIN_SOURCE = `

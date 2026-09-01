@@ -294,6 +294,60 @@ mod tests {
         }
     }
 
+    /// 標準プラグインは **`examples/plugins/` を正として直接同梱する**。
+    ///
+    /// `src-tauri/resources/` へコピーを置くと二重管理になり、片方だけ古いまま
+    /// 配られる。`bundle.resources` のマッピングでリポジトリ内の実体をそのまま
+    /// 配れば、examples を直すだけで同梱版も追随する
+    /// (`tauri-build` が `bundle.resources` を cargo の出力ディレクトリへも
+    /// コピーするので、`npm run tauri dev` でも同じ内容が読まれる)。
+    ///
+    /// 配り先は `plugins/` 直下でなければならない。
+    /// [`crate::plugin_host::plugin_list_sources`] が読むのは
+    /// `<resource_dir>/plugins` **直下**だけなので。
+    #[test]
+    fn builtin_plugins_are_bundled_straight_from_examples() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let value: serde_json::Value =
+            serde_json::from_str(CONFIG).expect("tauri.conf.json は JSON として読める");
+        let resources = value["bundle"]["resources"]
+            .as_object()
+            .expect("bundle.resources はマッピング(配列ではなく src -> dest の対応)");
+
+        let mut targets = BTreeSet::new();
+        for (source, target) in resources {
+            let path = manifest_dir.join(source);
+            assert!(
+                path.is_file(),
+                "同梱リソース {source} が見つからない ({})",
+                path.display()
+            );
+            assert!(
+                source.starts_with("../../../examples/plugins/"),
+                "標準プラグインの実体は examples/plugins/ に置くこと: {source}"
+            );
+            let target = target.as_str().expect("配り先は文字列");
+            assert_eq!(
+                std::path::Path::new(target).parent(),
+                Some(std::path::Path::new(crate::plugin_host::PLUGINS_DIR)),
+                "配り先は plugins/ 直下にすること: {target}"
+            );
+            targets.insert(target.to_owned());
+        }
+
+        // 標準プラグインは GitHub 連携だけ。hello.ts はリポジトリ内のサンプルに留める。
+        assert_eq!(
+            targets,
+            ["plugins/github.ts".to_owned()].into_iter().collect(),
+        );
+
+        // コピーを置かない(置くとバージョンが滞留する)。
+        assert!(
+            !manifest_dir.join("resources").exists(),
+            "src-tauri/resources/ は作らないこと。examples/plugins/ を直接同梱する"
+        );
+    }
+
     /// 内蔵ブラウザペインは conf に定義せず、IPC の抜け道も開けない。
     ///
     /// - `app.windows` に `browser-pane` を足すと、URL の無いウィンドウが起動時に 1 枚増える

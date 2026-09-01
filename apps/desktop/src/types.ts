@@ -286,12 +286,16 @@ export interface RuntimeStatus {
 /**
  * `plugin_list_sources` が返すプラグインソース 1 件。
  * `fileName` はプラグインディレクトリ直下のファイル名(区切り文字を含むものは Rust 側が弾く)。
+ *
+ * 配列は**ロード順 = 優先順**で返る(利用者配置が先、アプリ同梱が後)。
  */
 export interface PluginSourceFile {
   fileName: string;
   source: string;
   /** 最終更新時刻 (RFC3339 / UTC)。取得できなければ null。 */
   modifiedAt: string | null;
+  /** アプリ同梱(標準)プラグインか。偽なら利用者がプラグインフォルダに置いたもの。 */
+  builtin: boolean;
 }
 
 /**
@@ -306,6 +310,10 @@ export interface LoadedPlugin {
   active: boolean;
   /** 失敗した場合のメッセージ。 */
   error: string | null;
+  /** アプリ同梱(標準)プラグインとして読み込まれたか。 */
+  builtin: boolean;
+  /** 同じ id の同梱版を隠して読み込まれた利用者配置版か。 */
+  shadowsBuiltin: boolean;
 }
 
 /** 昇格先として選べる列(New / Doing / Done は選ばせない)。 */
