@@ -472,10 +472,16 @@ mod tests {
     #[test]
     fn user_edited_codex_args_are_left_alone() {
         let mut settings = CoreSettings::default();
-        settings.ai_providers[1].args =
-            vec!["exec".to_owned(), "--json".to_owned(), "{prompt}".to_owned()];
+        settings.ai_providers[1].args = vec![
+            "exec".to_owned(),
+            "--json".to_owned(),
+            "{prompt}".to_owned(),
+        ];
         assert!(!upgrade_stale_defaults(&mut settings));
-        assert_eq!(settings.ai_providers[1].args, ["exec", "--json", "{prompt}"]);
+        assert_eq!(
+            settings.ai_providers[1].args,
+            ["exec", "--json", "{prompt}"]
+        );
     }
 
     #[test]
