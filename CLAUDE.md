@@ -138,7 +138,9 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
     Windows の `msedgedriver` は WebView2 の版に合わせてサービスが自動 DL する。
   - **本物のデータは触らない。** `wdio.conf.ts` が実行ごとに一時ディレクトリ・空きポート・
     資格情報 service 名を取り、`QUESTLOOM_DATA_DIR` / `QUESTLOOM_MCP_PORT` /
-    `QUESTLOOM_KEYRING_SERVICE` として渡す(下記参照)。
+    `QUESTLOOM_KEYRING_SERVICE` として渡す(下記参照)。**WebView2 のプロファイル
+    (localStorage)も `QUESTLOOM_DATA_DIR` に従う**ので、`questloom.board.expanded` /
+    `questloom.overlay.collapsed` を書き換える spec も利用者の実プロファイルには届かない。
     終了時に一時ディレクトリと、居残った `tauri-driver` / `msedgedriver` /
     `questloom-desktop` を片付ける(**起動前から居たプロセスには手を出さない**)。
     **資格情報エントリだけは spec 側で消す**(Node からは消せないので、シークレットを
@@ -177,13 +179,25 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
 (`apps/desktop/src-tauri/src/env_override.rs`)。どちらも未設定なら従来どおり。
 
 - `QUESTLOOM_DATA_DIR` — `app_data_dir()`(`%APPDATA%\dev.reanisz.questloom`)の代わりに
-  このディレクトリを使う。DB・バックアップだけでなく **`plugins/` の探索先もここに従う**
-  (`plugin_host::plugins_dir` は `AppState::data_dir` を基準にする)。
-  `app_data_dir()` を直接引くと、一時プロファイルのはずのテストが利用者の本物の
-  プラグインを読み込んでしまう。**ただしアプリ同梱の標準プラグインは
-  `<resource_dir>/plugins` にあるので、これを指定しても読み込まれる**
-  (シークレットが見えなければ何もしないので、`QUESTLOOM_KEYRING_SERVICE` を
-  併せて渡していれば無害)。
+  このディレクトリを使う。分離される範囲は **DB・バックアップ・`plugins/`・WebView2 プロファイル**。
+  - `plugins/` の探索先もここに従う(`plugin_host::plugins_dir` は `AppState::data_dir` を
+    基準にする)。`app_data_dir()` を直接引くと、一時プロファイルのはずのテストが
+    利用者の本物のプラグインを読み込んでしまう。**ただしアプリ同梱の標準プラグインは
+    `<resource_dir>/plugins` にあるので、これを指定しても読み込まれる**
+    (シークレットが見えなければ何もしないので、`QUESTLOOM_KEYRING_SERVICE` を
+    併せて渡していれば無害)。
+  - **WebView2 のユーザーデータフォルダは `<dir>\webview` になる**
+    (`env_override::webview_data_dir`)。ここに localStorage
+    (`questloom.board.expanded` / `questloom.overlay.collapsed`)・Cookie・キャッシュが入る。
+    Tauri の既定は `%LOCALAPPDATA%\dev.reanisz.questloom` で、**データディレクトリとは
+    別系統**なので、これを引き込まないとテストが利用者の実 localStorage を読み書きしてしまう。
+    渡し方は Tauri v2 の `WebviewWindowBuilder::data_directory` /
+    `WebviewBuilder::data_directory`。**webview を作る箇所すべて**
+    (`lib.rs::create_windows` の main / overlay / plugin-host と、
+    `browser.rs::browser_pane_open` の browser-pane)で渡すこと。渡し忘れた webview だけが
+    実プロファイルに残る。`WEBVIEW2_USER_DATA_FOLDER` 環境変数は効かない
+    (Tauri が Windows では必ずフォルダを明示するので、WebView2 ローダーは env を見ない)。
+    未設定なら `data_directory` を一切呼ばず、従来どおり Tauri の既定に落ちる。
 - `QUESTLOOM_MCP_PORT` — コア設定の `mcpPort` を無視してこのポートで待ち受ける
   (本物の 39150 と衝突させないため)。`u16` として読めない値は無視して設定値に落ちる。
 - `QUESTLOOM_KEYRING_SERVICE` — シークレットの service 名(既定 `questloom`)を差し替える。

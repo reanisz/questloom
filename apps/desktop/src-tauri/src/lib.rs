@@ -216,18 +216,35 @@ pub fn run() {
 /// ここでは定義をそのまま [`tauri::WebviewWindowBuilder::from_config`] に渡すだけで、
 /// サイズ・可視性・フォーカス等の属性は conf 側の記述がそのまま効く。
 ///
+/// 唯一の上乗せが **WebView2 プロファイルの差し替え**
+/// ([`env_override::webview_data_dir`])。`QUESTLOOM_DATA_DIR` を指定した起動では
+/// localStorage・Cookie・キャッシュも一時ディレクトリへ寄せる。未指定なら何も渡さず、
+/// Tauri の既定(`%LOCALAPPDATA%\dev.reanisz.questloom`)のままにする。
+///
 /// 内蔵ブラウザペイン([`browser`])はこの対象ではない。ウィンドウではなく main の
 /// 子 webview で、開く URL が実行時にしか決まらないので、
-/// [`browser::browser_pane_open`] が呼ばれたときに生成する。
+/// [`browser::browser_pane_open`] が呼ばれたときに生成する
+/// (**プロファイルの差し替えは向こうにも同じものが要る**)。
 ///
 /// # Errors
 /// ウィンドウの生成に失敗した場合。
 fn create_windows(app: &tauri::App) -> tauri::Result<()> {
     // build() が app を借りるので、定義は先に取り出しておく。
     let windows = app.config().app.windows.clone();
+    let webview_data_dir = env_override::webview_data_dir();
+    if let Some(dir) = &webview_data_dir {
+        tracing::info!(
+            path = %dir.display(),
+            "WebView2 のプロファイルを一時ディレクトリへ寄せます"
+        );
+    }
     for config in &windows {
         tracing::debug!(label = %config.label, "ウィンドウを生成します");
-        tauri::WebviewWindowBuilder::from_config(app.handle(), config)?.build()?;
+        let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), config)?;
+        if let Some(dir) = &webview_data_dir {
+            builder = builder.data_directory(dir.clone());
+        }
+        builder.build()?;
     }
     Ok(())
 }

@@ -254,16 +254,19 @@ pub async fn browser_pane_open(
         .map_err(fail)?;
     let bounds = bounds.unwrap_or_else(|| fallback_bounds(&app)).sanitized();
     tracing::debug!(%target, ?bounds, "ブラウザペインを生成します");
+    let mut builder = WebviewBuilder::new(BROWSER_PANE, WebviewUrl::External(target))
+        // Esc をメインウィンドウへ中継する(ESCAPE_SCRIPT 参照)。
+        // main frame だけに入れる。子フレームには __TAURI_INTERNALS__ が
+        // 注入されないので、入れても動かない。
+        .initialization_script(ESCAPE_SCRIPT);
+    // テスト起動(QUESTLOOM_DATA_DIR)では WebView2 のプロファイルも一時ディレクトリへ。
+    // ここを忘れると、ペインで開いた外部ページの Cookie・キャッシュだけが
+    // 利用者の実プロファイルに残る(crate::lib の create_windows と対で必要)。
+    if let Some(dir) = crate::env_override::webview_data_dir() {
+        builder = builder.data_directory(dir);
+    }
     window
-        .add_child(
-            WebviewBuilder::new(BROWSER_PANE, WebviewUrl::External(target))
-                // Esc をメインウィンドウへ中継する(ESCAPE_SCRIPT 参照)。
-                // main frame だけに入れる。子フレームには __TAURI_INTERNALS__ が
-                // 注入されないので、入れても動かない。
-                .initialization_script(ESCAPE_SCRIPT),
-            bounds.position(),
-            bounds.size(),
-        )
+        .add_child(builder, bounds.position(), bounds.size())
         .map_err(fail)?;
     Ok(())
 }
