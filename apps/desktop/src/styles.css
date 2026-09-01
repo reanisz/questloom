@@ -2001,11 +2001,40 @@ body.main-body {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 0 0 1px var(--border-strong);
 }
 
+/* ヘッダはまるごと折りたたみトグル(押せることが分かるよう hover を付ける)。 */
 .overlay-head {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 0 2px;
+  width: 100%;
+  padding: 2px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.overlay-head:hover,
+.overlay-head:focus-visible {
+  background: var(--surface-2);
+  outline: none;
+}
+
+.overlay-chevron {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1;
+  transition: color 0.12s ease;
+}
+
+.overlay-head:hover .overlay-chevron,
+.overlay-head:focus-visible .overlay-chevron {
+  color: var(--text);
 }
 
 .overlay-dot {
@@ -2124,4 +2153,57 @@ body.main-body {
 .overlay-more:hover {
   color: var(--text-muted);
   text-decoration: underline;
+}
+
+/*
+ * 折りたたみ中のインジケータ。ウィンドウはこのピルの実寸まで縮むので、
+ * inline-flex(= 中身なりの幅)であることが効いている。
+ */
+.overlay-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(21, 24, 31, 0.86);
+  backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45), inset 0 0 0 1px var(--border-strong);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, color 0.12s ease;
+}
+
+.overlay-indicator:hover,
+.overlay-indicator:focus-visible {
+  color: var(--text);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45), inset 0 0 0 1px var(--accent);
+  outline: none;
+}
+
+.overlay-indicator-count {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 件数が増えたときだけ(key の付け替えで)再生される。 */
+.overlay-indicator-count.is-pulse {
+  animation: overlay-pulse 0.45s ease-out;
+}
+
+@keyframes overlay-pulse {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.35);
+    color: var(--accent);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
