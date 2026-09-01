@@ -93,6 +93,15 @@ export const addResource = (taskId: TaskId, resource: NewResource) =>
 export const removeResource = (taskId: TaskId, resourceId: ResourceId) =>
   call<void>("remove_resource", { taskId, resourceId });
 
+/**
+ * 既存の関連リソースを主リソースにする / 主リソースを解除する。
+ *
+ * 主リソースは 1 タスクに 1 つ。`isPrimary` が真なら既存の主リソースは外れ、
+ * 偽なら主リソースの無い状態になる。どちらも冪等。
+ */
+export const setPrimaryResource = (taskId: TaskId, resourceId: ResourceId, isPrimary: boolean) =>
+  call<TaskResource>("set_primary_resource", { taskId, resourceId, isPrimary });
+
 /** 親タスクを設定・解除する(循環は禁止)。 */
 export const setParent = (taskId: TaskId, parentId: TaskId | null) =>
   call<Task>("set_parent", { taskId, parentId });

@@ -868,6 +868,45 @@ impl TaskService {
         Ok(resource)
     }
 
+    /// 既存の関連リソースを主リソースにする / 主リソースを解除する。
+    ///
+    /// `is_primary` が真なら、そのタスクの既存の主リソースは解除される
+    /// (主リソースは 1 タスクに 1 つという [`add_resource`](Self::add_resource) と同じ不変条件)。
+    /// 偽なら主リソースの無い状態になる(空を許す)。どちらも冪等で、既にその状態でも成功する。
+    ///
+    /// 「どれを代表にするか」は表示上の都合なので、origin を取らず**起床もしない**
+    /// ([`remove_checklist_item`](Self::remove_checklist_item) と同じ扱い)。
+    ///
+    /// # Errors
+    /// タスクが存在しない・削除済み、リソースが存在しない、リソースが別タスクに属する、
+    /// または永続化層のエラー。
+    pub fn set_primary_resource(
+        &self,
+        id: TaskId,
+        resource_id: ResourceId,
+        is_primary: bool,
+    ) -> CoreResult<TaskResource> {
+        let _guard = self.lock_writes();
+        let mut task = self.require_task(id)?;
+        let mut resource = self
+            .repo
+            .list_resources(id)?
+            .into_iter()
+            .find(|r| r.id == resource_id)
+            .ok_or(CoreError::ResourceNotFound(resource_id))?;
+
+        // 既存の主リソースの解除と、こちらを立てるのは原子的に行う。
+        if !self.repo.set_primary(id, resource_id, is_primary)? {
+            return Err(CoreError::ResourceNotFound(resource_id));
+        }
+        resource.is_primary = is_primary;
+
+        task.updated_at = self.clock.now();
+        self.persist(&task)?;
+        self.emit(DomainEvent::TaskResourcesChanged { task_id: id });
+        Ok(resource)
+    }
+
     /// 関連リソースを削除する。
     ///
     /// # Errors
@@ -1475,6 +1514,27 @@ mod tests {
             Ok(())
         }
 
+        fn set_primary(
+            &self,
+            task_id: TaskId,
+            id: ResourceId,
+            is_primary: bool,
+        ) -> RepoResult<bool> {
+            let mut resources = Self::lock(&self.resources);
+            if !resources.iter().any(|r| r.id == id && r.task_id == task_id) {
+                return Ok(false);
+            }
+            for resource in resources.iter_mut().filter(|r| r.task_id == task_id) {
+                if resource.id == id {
+                    resource.is_primary = is_primary;
+                } else if is_primary {
+                    // 主リソースは 1 タスクに 1 つ。
+                    resource.is_primary = false;
+                }
+            }
+            Ok(true)
+        }
+
         fn delete_resource(&self, id: ResourceId) -> RepoResult<bool> {
             let mut resources = Self::lock(&self.resources);
             let before = resources.len();
@@ -1829,6 +1889,130 @@ mod tests {
             service.remove_resource(task.id, first.id),
             Err(CoreError::ResourceNotFound(_))
         ));
+    }
+
+    /// 主リソースは後から付け替えられる。付け替えでは前の主が外れ、
+    /// `false` を渡すと「主リソースなし」にできる。どちらも冪等。
+    #[test]
+    fn set_primary_resource_moves_and_clears_the_star() {
+        let service = service();
+        let task = service.create_task(new_task("資料")).unwrap();
+        let first = add_url(&service, task.id, "https://example.com/a");
+        let second = add_url(&service, task.id, "https://example.com/b");
+        // 最初のリソースが主リソース。あとから足したものは主にならない。
+        assert!(first.is_primary);
+        assert!(!second.is_primary);
+
+        // 付け替えると前の主が外れる。
+        let promoted = service
+            .set_primary_resource(task.id, second.id, true)
+            .unwrap();
+        assert!(promoted.is_primary);
+        let detail = service.task_detail(task.id).unwrap();
+        let primaries: Vec<_> = detail.resources.iter().filter(|r| r.is_primary).collect();
+        assert_eq!(primaries.len(), 1);
+        assert_eq!(primaries[0].id, second.id);
+        assert_eq!(detail.card.primary_resource.as_ref().unwrap().id, second.id);
+
+        // 既に主でも冪等に成功し、主リソースは 1 つのまま。
+        assert!(
+            service
+                .set_primary_resource(task.id, second.id, true)
+                .unwrap()
+                .is_primary
+        );
+        let detail = service.task_detail(task.id).unwrap();
+        assert_eq!(detail.resources.iter().filter(|r| r.is_primary).count(), 1);
+
+        // 解除すると主リソースの無い状態になる(空を許す)。
+        let cleared = service
+            .set_primary_resource(task.id, second.id, false)
+            .unwrap();
+        assert!(!cleared.is_primary);
+        let detail = service.task_detail(task.id).unwrap();
+        assert_eq!(detail.resources.iter().filter(|r| r.is_primary).count(), 0);
+        assert!(detail.card.primary_resource.is_none());
+
+        // 解除も冪等。
+        assert!(
+            !service
+                .set_primary_resource(task.id, second.id, false)
+                .unwrap()
+                .is_primary
+        );
+        let detail = service.task_detail(task.id).unwrap();
+        assert_eq!(detail.resources.iter().filter(|r| r.is_primary).count(), 0);
+    }
+
+    /// 別タスクのリソース id は弾く(タスクをまたいだ書き換えを通さない)。
+    /// 弾いたときは**どちらのタスクの主リソースも動かさない**。
+    #[test]
+    fn set_primary_resource_rejects_a_resource_from_another_task() {
+        let service = service();
+        let mine = service.create_task(new_task("こちら")).unwrap();
+        let theirs = service.create_task(new_task("あちら")).unwrap();
+        let my_resource = add_url(&service, mine.id, "https://example.com/mine");
+        let their_resource = add_url(&service, theirs.id, "https://example.com/theirs");
+
+        assert!(matches!(
+            service.set_primary_resource(mine.id, their_resource.id, true),
+            Err(CoreError::ResourceNotFound(_))
+        ));
+        assert!(matches!(
+            service.set_primary_resource(mine.id, ResourceId::new(), true),
+            Err(CoreError::ResourceNotFound(_))
+        ));
+
+        // 拒否されたぶんで、既存の主リソースが落ちていないこと。
+        for (task_id, resource_id) in [(mine.id, my_resource.id), (theirs.id, their_resource.id)] {
+            let detail = service.task_detail(task_id).unwrap();
+            assert_eq!(detail.card.primary_resource.unwrap().id, resource_id);
+        }
+    }
+
+    /// 主リソースの付け替えは `TaskResourcesChanged` を出し、タスクの更新時刻を進める。
+    /// 表示上の都合なので**監視中タスクは起こさない**。
+    #[tokio::test]
+    async fn set_primary_resource_emits_and_does_not_wake() {
+        let service = service();
+        let task = service.create_task(new_task("監視")).unwrap();
+        let first = add_url(&service, task.id, "https://example.com/a");
+        let second = add_url(&service, task.id, "https://example.com/b");
+        assert!(first.is_primary);
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Watching))
+            .unwrap();
+        let before = service.task_detail(task.id).unwrap().card.task.updated_at;
+
+        let mut rx = service.subscribe();
+        service
+            .set_primary_resource(task.id, second.id, true)
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskResourcesChanged { task_id: task.id }
+        );
+        // 起床していれば TaskMoved が続く。リソース操作では起こさない。
+        assert!(rx.try_recv().is_err());
+
+        let detail = service.task_detail(task.id).unwrap();
+        assert_eq!(detail.card.task.status, TaskStatus::Watching);
+        assert!(detail.card.task.updated_at >= before);
+    }
+
+    /// リソースを 1 件足すヘルパ。最初の 1 件は自動的に主リソースになる。
+    fn add_url(service: &TaskService, task_id: TaskId, value: &str) -> TaskResource {
+        service
+            .add_resource(
+                task_id,
+                NewResource {
+                    kind: ResourceKind::Url,
+                    value: value.to_owned(),
+                    label: String::new(),
+                    is_primary: false,
+                },
+            )
+            .unwrap()
     }
 
     #[test]
@@ -2246,6 +2430,11 @@ mod tests {
                 label: String::new(),
                 is_primary: false,
             }
+        )));
+        assert!(deleted(service.set_primary_resource(
+            task.id,
+            ResourceId::new(),
+            true
         )));
         assert!(deleted(service.set_parent(task.id, None)));
 

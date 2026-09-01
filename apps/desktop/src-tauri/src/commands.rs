@@ -110,6 +110,23 @@ pub fn add_resource(
     state.service.add_resource(task_id, resource).map_err(fail)
 }
 
+/// 既存の関連リソースを主リソースにする / 主リソースを解除する。
+///
+/// 主リソースは 1 タスクに 1 つ。`is_primary` が真なら既存の主リソースは解除され、
+/// 偽なら主リソースの無い状態になる。
+#[tauri::command]
+pub fn set_primary_resource(
+    state: State<'_, AppState>,
+    task_id: TaskId,
+    resource_id: ResourceId,
+    is_primary: bool,
+) -> CommandResult<TaskResource> {
+    state
+        .service
+        .set_primary_resource(task_id, resource_id, is_primary)
+        .map_err(fail)
+}
+
 /// 関連リソースを削除する。
 #[tauri::command]
 pub fn remove_resource(

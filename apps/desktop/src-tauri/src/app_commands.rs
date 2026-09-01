@@ -32,6 +32,9 @@ pub const APP_COMMANDS: &[&str] = &[
     "add_task_update",
     "add_resource",
     "remove_resource",
+    // 主リソースの付け替え(main ウィンドウ専用)。プラグインは `add_resource` の
+    // `is_primary` で足すときに指定できるので、あとからの付け替えは配らない。
+    "set_primary_resource",
     "set_parent",
     // タスク内チェックリスト(main ウィンドウ専用。origin は User 固定)
     "add_checklist_item",

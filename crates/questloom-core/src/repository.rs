@@ -152,6 +152,19 @@ pub trait TaskRepository: Send + Sync + 'static {
     /// 永続化に失敗した場合。
     fn replace_primary_and_insert(&self, resource: &TaskResource) -> RepoResult<()>;
 
+    /// 既存のリソース 1 件の主フラグを設定する。
+    ///
+    /// `is_primary` が真なら、同じタスクの既存の主リソースを解除してから立てる
+    /// (解除と設定は原子的に行い、主リソースが 2 つある瞬間を作らない)。
+    /// 偽ならそのリソースの主フラグを落とすだけで、タスクは主リソースの無い状態になる。
+    ///
+    /// `task_id` に属さない・存在しない `id` の場合は何も書かずに `Ok(false)`。
+    /// 既に指定どおりの状態でも `Ok(true)`(冪等)。
+    ///
+    /// # Errors
+    /// 永続化に失敗した場合。
+    fn set_primary(&self, task_id: TaskId, id: ResourceId, is_primary: bool) -> RepoResult<bool>;
+
     /// リソースを 1 件削除する。存在しない場合は `Ok(false)`。
     ///
     /// # Errors

@@ -335,6 +335,7 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 | `promote_task` | `task_id`, `column?` | インスタントタスクを通常タスクへ昇格(既定 `today`) |
 | `add_task_update` | `task_id`, `body` | アップデート履歴を追記(対象が `watching` なら New へ起床させる) |
 | `add_resource` | `task_id`, `kind`, `value`, `label?`, `is_primary?` | 関連リソース(`url` / `file`)を追加 |
+| `set_primary_resource` | `task_id`, `resource_id`, `is_primary?` | 既存リソースを主リソースにする(既定 true)/ 解除する。主は 1 タスクに 1 つで、付け替えると前の主は外れる。冪等 |
 | `add_checklist_item` | `task_id`, `body` | チェックリストの末尾へ項目を追加(空白のみは拒否。対象が `watching` なら New へ起床させる) |
 | `set_checklist_item` | `task_id`, `item_id`, `checked?`, `body?` | チェックリスト項目のチェック・本文を変更(同上。省略した項目は変えない) |
 | `remove_checklist_item` | `task_id`, `item_id` | チェックリスト項目を削除(**起床させない**。冪等ではない) |
@@ -893,7 +894,7 @@ CSS 側は `styles.css` の `--app-tint` を body の地色に敷き、`prefers-
 
 | webview | 許可 |
 |---|---|
-| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、過去の完了 (`list_archived_done`)、チェックリスト (`add_checklist_item` / `update_checklist_item` / `remove_checklist_item` / `reorder_checklist_item`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`) は**ここだけ** |
+| `main` | `plugin_secret_get` 以外の全 command(ボード・ドロワー・設定画面・AI・プラグイン設定)。タスクの削除・復元 (`delete_task` / `restore_task` / `list_deleted_tasks`)、過去の完了 (`list_archived_done`)、チェックリスト (`add_checklist_item` / `update_checklist_item` / `remove_checklist_item` / `reorder_checklist_item`)、MCP トークン (`get_mcp_token_status` / `set_mcp_token`)、内蔵ブラウザ (`browser_pane_*`)、主リソースの付け替え (`set_primary_resource`) は**ここだけ** |
 | `overlay` | `get_board` / `complete_task` / `show_main_window` のみ |
 | `plugin-host` | `plugin_*`(設定書き込み `plugin_set_settings`、設定画面専用の `plugin_directory` / `plugin_list_loaded` / `plugin_secret_set` / `plugin_secret_status` を除く)+ シークレットの読み出し `plugin_secret_get` + `ctx.tasks` が使うタスク操作(`get_board` / `get_task` / `create_task` / `update_task` / `move_task` / `complete_task` / `add_task_update` / `add_resource`) |
 | `browser-pane` | **`browser_pane_escape` だけ**(`capabilities/browser-pane.json`)。外部ページが載るので、ここに 2 つ目を足さないこと |

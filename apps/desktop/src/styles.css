@@ -1055,8 +1055,20 @@ textarea {
   background: var(--surface-2);
 }
 
+/* 主リソースのトグル。表示(★/☆)とボタンを兼ねるので、見た目は素のままにする。 */
 .star {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: none;
   color: var(--text-faint);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.star:hover {
+  color: var(--instant);
 }
 
 .star-on {

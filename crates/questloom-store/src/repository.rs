@@ -63,6 +63,11 @@ const DONE_BEFORE: &str =
 const CLEAR_PRIMARY: &str =
     "UPDATE task_resources SET is_primary = 0 WHERE task_id = ?1 AND is_primary <> 0";
 
+/// 既存リソース 1 件の主フラグを設定する。`task_id` も条件に入れて、
+/// 別タスクのリソース id を渡されても書き換わらないようにする。
+const SET_PRIMARY: &str =
+    "UPDATE task_resources SET is_primary = ?3 WHERE id = ?1 AND task_id = ?2";
+
 /// ストア層の処理を実行し、エラーをリポジトリ層のエラーへ移す。
 ///
 /// `TaskRepository` の各メソッドはこれで包むだけで、実装本体は trait impl に直接書く
@@ -219,6 +224,32 @@ impl TaskRepository for SqliteStore {
                 tx.execute(INSERT_RESOURCE, params_from_iter(resource_params(resource)))?;
                 Ok(())
             })
+        })
+    }
+
+    fn set_primary(&self, task_id: TaskId, id: ResourceId, is_primary: bool) -> RepoResult<bool> {
+        repo(|| {
+            self.write(|tx| {
+                if is_primary {
+                    // 対象が別タスクのものだった場合に既存の主リソースだけ落ちるのを避けるため、
+                    // 先に対象の存在を確かめてから解除する(同じトランザクションなので原子的)。
+                    let exists: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM task_resources WHERE id = ?1 AND task_id = ?2)",
+                        params![id.to_string(), task_id.to_string()],
+                        |row| row.get::<_, i64>(0).map(|found| found != 0),
+                    )?;
+                    if !exists {
+                        return Ok(0);
+                    }
+                    // 主リソースは 1 タスクに 1 つ。解除と設定を同じトランザクションで行う。
+                    tx.execute(CLEAR_PRIMARY, [task_id.to_string()])?;
+                }
+                tx.execute(
+                    SET_PRIMARY,
+                    params![id.to_string(), task_id.to_string(), is_primary],
+                )
+            })
+            .map(|affected| affected > 0)
         })
     }
 
@@ -628,5 +659,58 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// 既存リソースの主フラグの付け替え。付け替えは前の主の解除と原子的に行い、
+    /// 別タスクのリソース id では**何も書き換わらない**こと。
+    #[test]
+    fn set_primary_moves_the_flag_within_one_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let owner = task();
+        let other = task();
+        let first = resource(owner.id, "https://example.com/a", true);
+        let second = resource(owner.id, "https://example.com/b", false);
+        store
+            .insert_task_with_resources(&owner, &[first.clone(), second.clone()])
+            .unwrap();
+        store
+            .insert_task_with_resources(
+                &other,
+                &[resource(other.id, "https://example.com/x", true)],
+            )
+            .unwrap();
+
+        let primaries = |store: &SqliteStore, task_id: TaskId| -> Vec<String> {
+            store
+                .list_resources(task_id)
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.is_primary)
+                .map(|r| r.value)
+                .collect()
+        };
+
+        // 付け替え: 前の主が外れて 1 つだけになる。
+        assert!(store.set_primary(owner.id, second.id, true).unwrap());
+        assert_eq!(primaries(&store, owner.id), ["https://example.com/b"]);
+        // 冪等。
+        assert!(store.set_primary(owner.id, second.id, true).unwrap());
+        assert_eq!(primaries(&store, owner.id), ["https://example.com/b"]);
+
+        // 解除すると主リソースが 0 件になる(空を許す)。
+        assert!(store.set_primary(owner.id, second.id, false).unwrap());
+        assert!(primaries(&store, owner.id).is_empty());
+        assert!(store.set_primary(owner.id, second.id, false).unwrap());
+        assert!(primaries(&store, owner.id).is_empty());
+
+        // 別タスクのリソース id / 存在しない id では書き換わらない。
+        assert!(store.set_primary(owner.id, first.id, true).unwrap());
+        assert!(!store.set_primary(other.id, first.id, true).unwrap());
+        assert!(!store
+            .set_primary(other.id, ResourceId::new(), true)
+            .unwrap());
+        // 巻き添えで既存の主リソースが落ちていないこと(解除と設定が原子的である証拠)。
+        assert_eq!(primaries(&store, other.id), ["https://example.com/x"]);
+        assert_eq!(primaries(&store, owner.id), ["https://example.com/a"]);
     }
 }

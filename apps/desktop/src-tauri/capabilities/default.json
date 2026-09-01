@@ -22,6 +22,7 @@
     "allow-add-task-update",
     "allow-add-resource",
     "allow-remove-resource",
+    "allow-set-primary-resource",
     "allow-set-parent",
 
     "allow-add-checklist-item",

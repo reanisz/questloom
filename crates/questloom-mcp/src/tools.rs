@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use questloom_core::bucket::{bucket_for, BoardColumn, Bucket};
 use questloom_core::error::{CoreError, CoreResult};
 use questloom_core::model::{
-    ChecklistItemId, Origin, ResourceKind, Scheduled, Task, TaskId, TaskStatus,
+    ChecklistItemId, Origin, ResourceId, ResourceKind, Scheduled, Task, TaskId, TaskStatus,
 };
 use questloom_core::service::{MoveRequest, NewResource, NewTask, TaskPatch, TaskService};
 use questloom_core::settings::WeekStart;
@@ -260,6 +260,18 @@ pub struct AddResourceArgs {
     #[serde(default)]
     pub label: Option<String>,
     /// Make this the primary resource. The first resource always becomes primary.
+    #[serde(default)]
+    pub is_primary: Option<bool>,
+}
+
+/// `set_primary_resource` の引数。
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct SetPrimaryResourceArgs {
+    /// The task id (UUID).
+    pub task_id: String,
+    /// The resource id (UUID), from `get_task`.
+    pub resource_id: String,
+    /// Make it primary (default) or clear the primary flag.
     #[serde(default)]
     pub is_primary: Option<bool>,
 }
@@ -579,6 +591,23 @@ impl QuestloomTools {
         respond(self.service.add_resource(id, input))
     }
 
+    #[tool(
+        description = "Make one existing resource the task's primary resource, or clear that flag. \
+                       Resource ids come from `get_task`. A task has at most one primary resource: \
+                       setting a new one clears the old. Idempotent."
+    )]
+    pub fn set_primary_resource(
+        &self,
+        Parameters(args): Parameters<SetPrimaryResourceArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = parse_task_id(&args.task_id)?;
+        let resource_id = parse_resource_id(&args.resource_id)?;
+        respond(
+            self.service
+                .set_primary_resource(id, resource_id, args.is_primary.unwrap_or(true)),
+        )
+    }
+
     /// ボードを集計し、絞り込みを適用した一覧 JSON を作る。
     ///
     /// 使うのは [`TaskService::full_board`] の方。UI のボードは Done 列に
@@ -638,6 +667,12 @@ impl ServerHandler for QuestloomTools {
 fn parse_task_id(raw: &str) -> Result<TaskId, ErrorData> {
     TaskId::from_str(raw).map_err(|error| {
         ErrorData::invalid_params(format!("invalid task_id {raw:?}: {error}"), None)
+    })
+}
+
+fn parse_resource_id(raw: &str) -> Result<ResourceId, ErrorData> {
+    ResourceId::from_str(raw).map_err(|error| {
+        ErrorData::invalid_params(format!("invalid resource_id {raw:?}: {error}"), None)
     })
 }
 

@@ -25,6 +25,7 @@ import type {
   TaskCard,
   TaskDetail,
   TaskId,
+  TaskResource,
   UrlOpenMode,
 } from "../types";
 import { AiSplitDialog } from "./AiSplitDialog";
@@ -46,6 +47,113 @@ function openResource(kind: ResourceKind, value: string, mode: UrlOpenMode) {
       useBoardStore.getState().setError(toMessage(error)),
     );
   }
+}
+
+/**
+ * 主リソースのトグル(★/☆)の見た目。
+ *
+ * ★ は「これが主リソース」の表示であると同時に、押すと解除するボタンでもある。
+ * 主リソースはタスクにつき最大 1 つで、☆ を押すと前の主は自動的に外れる
+ * (不変条件はバックエンド側が守る)。主リソースが 1 つも無い状態も許す。
+ */
+export function primaryToggle(isPrimary: boolean) {
+  return {
+    symbol: isPrimary ? "★" : "☆",
+    className: isPrimary ? "star star-on" : "star",
+    label: isPrimary ? "主リソースを解除" : "主リソースにする",
+    /** 押したときに送る値。 */
+    next: !isPrimary,
+  };
+}
+
+/**
+ * 関連リソースの一覧。
+ *
+ * ドロワー本体から切り出してあるのは、テストからバックエンド抜きで
+ * 描画・操作できるようにするため(操作はすべて props のコールバックへ出す)。
+ */
+export function ResourceList({
+  resources,
+  urlOpenMode,
+  onOpenPane,
+  onSetPrimary,
+  onRemove,
+}: {
+  resources: TaskResource[];
+  urlOpenMode: UrlOpenMode;
+  onOpenPane: (url: string) => void;
+  onSetPrimary: (resource: TaskResource, isPrimary: boolean) => void;
+  onRemove: (resource: TaskResource) => void;
+}) {
+  return (
+    <ul className="resource-list">
+      {resources.map((resource) => {
+        const star = primaryToggle(resource.isPrimary);
+        return (
+          <li key={resource.id} className="resource">
+            <button
+              type="button"
+              className={star.className}
+              data-testid="resource-primary-toggle"
+              aria-label={star.label}
+              aria-pressed={resource.isPrimary}
+              title={star.label}
+              onClick={() => onSetPrimary(resource, star.next)}
+            >
+              {star.symbol}
+            </button>
+            <button
+              type="button"
+              className="resource-open"
+              title={
+                resource.kind === "url"
+                  ? `${resource.value}\n${
+                      urlOpenMode === "external" ? "既定のブラウザで開く" : "内蔵ブラウザで開く"
+                    } (設定の「URL リソースの開き方」)`
+                  : `${resource.value}\nエクスプローラで場所を表示する`
+              }
+              onClick={() => openResource(resource.kind, resource.value, urlOpenMode)}
+            >
+              {resource.label || resource.value}
+            </button>
+            <span className="badge">{resource.kind === "url" ? "URL" : "ファイル"}</span>
+            {resource.kind === "url" && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  data-testid="resource-open-external"
+                  aria-label="既定のブラウザで開く"
+                  title={`${resource.value}\n既定のブラウザで開く`}
+                  onClick={() => openExternal(resource.value)}
+                >
+                  ↗
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  data-testid="resource-open-internal"
+                  aria-label="内蔵ブラウザで開く"
+                  title={`${resource.value}\nquestloom の内蔵ブラウザペインで開く`}
+                  onClick={() => onOpenPane(resource.value)}
+                >
+                  🌐
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              aria-label="リソースを削除"
+              onClick={() => onRemove(resource)}
+            >
+              ✕
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 /** 親・子タスクへのリンク行。 */
@@ -247,67 +355,15 @@ function DrawerBody({
       <section className="drawer-section">
         <h3>関連リソース</h3>
         {detail.resources.length === 0 && <p className="muted">まだありません。</p>}
-        <ul className="resource-list">
-          {detail.resources.map((resource) => (
-            <li key={resource.id} className="resource">
-              <span
-                className={resource.isPrimary ? "star star-on" : "star"}
-                title={resource.isPrimary ? "主リソース" : undefined}
-              >
-                {resource.isPrimary ? "★" : "☆"}
-              </span>
-              <button
-                type="button"
-                className="resource-open"
-                title={
-                  resource.kind === "url"
-                    ? `${resource.value}\n${
-                        urlOpenMode === "external"
-                          ? "既定のブラウザで開く"
-                          : "内蔵ブラウザで開く"
-                      } (設定の「URL リソースの開き方」)`
-                    : `${resource.value}\nエクスプローラで場所を表示する`
-                }
-                onClick={() => openResource(resource.kind, resource.value, urlOpenMode)}
-              >
-                {resource.label || resource.value}
-              </button>
-              <span className="badge">{resource.kind === "url" ? "URL" : "ファイル"}</span>
-              {resource.kind === "url" && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    data-testid="resource-open-external"
-                    aria-label="既定のブラウザで開く"
-                    title={`${resource.value}\n既定のブラウザで開く`}
-                    onClick={() => openExternal(resource.value)}
-                  >
-                    ↗
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    data-testid="resource-open-internal"
-                    aria-label="内蔵ブラウザで開く"
-                    title={`${resource.value}\nquestloom の内蔵ブラウザペインで開く`}
-                    onClick={() => openPane(resource.value)}
-                  >
-                    🌐
-                  </button>
-                </>
-              )}
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                aria-label="リソースを削除"
-                onClick={() => void mutate(() => api.removeResource(detail.id, resource.id))}
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
+        <ResourceList
+          resources={detail.resources}
+          urlOpenMode={urlOpenMode}
+          onOpenPane={openPane}
+          onSetPrimary={(resource, isPrimary) =>
+            void mutate(() => api.setPrimaryResource(detail.id, resource.id, isPrimary))
+          }
+          onRemove={(resource) => void mutate(() => api.removeResource(detail.id, resource.id))}
+        />
         <form
           className="resource-form"
           onSubmit={(event) => {

@@ -158,6 +158,7 @@ pub fn run() {
             commands::add_task_update,
             commands::add_resource,
             commands::remove_resource,
+            commands::set_primary_resource,
             commands::set_parent,
             commands::add_checklist_item,
             commands::update_checklist_item,

@@ -4,7 +4,8 @@ use questloom_core::model::TaskStatus;
 use questloom_mcp::tools::{
     AddChecklistItemArgs, AddResourceArgs, AddTaskUpdateArgs, ColumnArg, CreateTaskArgs,
     ListTasksArgs, MoveTaskArgs, PromoteTaskArgs, RemoveChecklistItemArgs, ResourceArg,
-    ResourceKindArg, SetChecklistItemArgs, StatusArg, TaskIdArgs, UpdateTaskArgs,
+    ResourceKindArg, SetChecklistItemArgs, SetPrimaryResourceArgs, StatusArg, TaskIdArgs,
+    UpdateTaskArgs,
 };
 use questloom_mcp::QuestloomTools;
 use rmcp::handler::server::wrapper::Parameters;
@@ -229,6 +230,97 @@ fn update_get_and_history() {
     assert_eq!(detail["updates"].as_array().unwrap().len(), 1);
     assert_eq!(detail["updates"][0]["origin"], "mcp");
     assert_eq!(detail["primaryResource"]["value"], "C:/tmp/memo.txt");
+}
+
+/// 主リソースは後から付け替えられる / 外せる。反映は `get_task` から見える。
+#[test]
+fn set_primary_resource_moves_the_star() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            resources: Some(vec![
+                ResourceArg {
+                    kind: ResourceKindArg::Url,
+                    value: "https://example.com/a".to_owned(),
+                    label: None,
+                    is_primary: None,
+                },
+                ResourceArg {
+                    kind: ResourceKindArg::Url,
+                    value: "https://example.com/b".to_owned(),
+                    label: None,
+                    is_primary: None,
+                },
+            ]),
+            ..new_task("リンクを整理")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("get_task"),
+    );
+    // 最初のリソースが主リソース。
+    assert_eq!(detail["primaryResource"]["value"], "https://example.com/a");
+    let second_id = detail["resources"][1]["id"].as_str().unwrap().to_owned();
+
+    // 既定は true。付け替えると前の主が外れる。
+    let moved = json(
+        &tools
+            .set_primary_resource(Parameters(SetPrimaryResourceArgs {
+                task_id: task_id.clone(),
+                resource_id: second_id.clone(),
+                is_primary: None,
+            }))
+            .expect("set_primary_resource"),
+    );
+    assert_eq!(moved["isPrimary"], true);
+
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("get_task"),
+    );
+    assert_eq!(detail["primaryResource"]["value"], "https://example.com/b");
+    assert_eq!(detail["resources"][0]["isPrimary"], false);
+    assert_eq!(detail["resources"][1]["isPrimary"], true);
+
+    // false で主リソースの無い状態にできる。
+    json(
+        &tools
+            .set_primary_resource(Parameters(SetPrimaryResourceArgs {
+                task_id: task_id.clone(),
+                resource_id: second_id,
+                is_primary: Some(false),
+            }))
+            .expect("set_primary_resource"),
+    );
+    let detail = json(
+        &tools
+            .get_task(Parameters(TaskIdArgs {
+                task_id: task_id.clone(),
+            }))
+            .expect("get_task"),
+    );
+    assert!(detail["primaryResource"].is_null());
+
+    // 別タスクのリソース id はツールレベルのエラーになる。
+    let other = create(&tools, new_task("別のタスク"));
+    let refused = tools
+        .set_primary_resource(Parameters(SetPrimaryResourceArgs {
+            task_id: other["id"].as_str().unwrap().to_owned(),
+            resource_id: detail["resources"][0]["id"].as_str().unwrap().to_owned(),
+            is_primary: None,
+        }))
+        .expect("set_primary_resource は Err を返さない");
+    assert_eq!(refused.is_error, Some(true));
 }
 
 #[test]
