@@ -890,9 +890,17 @@ textarea {
 /* ---- ドロワー ---- */
 
 /* 暗幕はボードを軽くぼかして、手前のガラス板との距離を作る。 */
+/*
+ * 暗幕・ドロワーとも**タイトルバーの下**から始める。タイトルバー(z-index 70)は
+ * 常に前面なので、top: 0 にするとドロワーのヘッダ(「閉じる」等)が右上で
+ * 最小化・最大化・閉じるボタンと重なってしまう。
+ */
 .drawer-scrim {
   position: fixed;
-  inset: 0;
+  top: var(--titlebar-height);
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 50;
   background: var(--scrim);
   backdrop-filter: blur(3px);
@@ -901,7 +909,7 @@ textarea {
 .drawer {
   position: fixed;
   z-index: 51;
-  top: 0;
+  top: var(--titlebar-height);
   right: 0;
   bottom: 0;
   /*
