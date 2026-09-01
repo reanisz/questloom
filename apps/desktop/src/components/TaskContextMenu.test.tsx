@@ -106,12 +106,32 @@ describe("TaskContextMenu", () => {
     view.unmount();
   });
 
-  it("「移動」の第 2 階層に監視中が並ぶ", () => {
+  it("「移動」の第 2 階層に監視中と Icebox が並ぶ", () => {
     const view = setup();
     view.click("move");
-    expect(view.item("move-watching")).not.toBeNull();
-    expect(view.item("move-watching")?.disabled).toBe(false);
+    for (const key of ["watching", "icebox"]) {
+      expect(view.item(`move-${key}`)).not.toBeNull();
+      expect(view.item(`move-${key}`)?.disabled).toBe(false);
+    }
     view.unmount();
+  });
+
+  it("Icebox のカードでは「移動」で Icebox が無効化される", () => {
+    const mounted = mount(
+      <TaskContextMenu
+        card={card({ status: "icebox" })}
+        column="icebox"
+        anchor={{ x: 10, y: 20 }}
+        onClose={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+    const item = (action: string) =>
+      mounted.container.querySelector<HTMLButtonElement>(`[data-testid="context-${action}"]`);
+    act(() => item("move")?.click());
+    expect(item("move-icebox")?.disabled).toBe(true);
+    expect(item("move-new")?.disabled).toBe(false);
+    mounted.unmount();
   });
 
   it("監視中のカードでは「移動」で監視中が無効化される", () => {
@@ -132,7 +152,7 @@ describe("TaskContextMenu", () => {
     mounted.unmount();
   });
 
-  it("「昇格」の第 2 階層は New / Watching / Doing / Done を出さない", () => {
+  it("「昇格」の第 2 階層は New / Watching / Icebox / Doing / Done を出さない", () => {
     const view = setup(card({ isInstant: true }));
     view.click("promote");
 
@@ -140,6 +160,7 @@ describe("TaskContextMenu", () => {
     expect(view.item("promote-future")).not.toBeNull();
     expect(view.item("promote-new")).toBeNull();
     expect(view.item("promote-watching")).toBeNull();
+    expect(view.item("promote-icebox")).toBeNull();
     expect(view.item("promote-done")).toBeNull();
     view.unmount();
   });

@@ -86,6 +86,13 @@ pub enum TaskStatus {
     /// 自動的に [`New`](Self::New) へ戻す(起床)。詳しくは
     /// [`TaskService::add_task_update`](crate::service::TaskService::add_task_update) を参照。
     Watching,
+    /// 棚上げ(いつやるかの判断ごと後回し)。
+    ///
+    /// Future(Todo の「いつか」)と違い Todo ですらなく、
+    /// [`Watching`](Self::Watching) と違い**外部の変化でも自動では動かない**。
+    /// 出すのは常に手動または MCP / AI の明示的な move。
+    /// 出し入れで `scheduled` は保持する。
+    Icebox,
 }
 
 impl TaskStatus {
@@ -98,6 +105,7 @@ impl TaskStatus {
             Self::Doing => "doing",
             Self::Done => "done",
             Self::Watching => "watching",
+            Self::Icebox => "icebox",
         }
     }
 }
@@ -137,6 +145,7 @@ impl FromStr for TaskStatus {
             "doing" => Ok(Self::Doing),
             "done" => Ok(Self::Done),
             "watching" => Ok(Self::Watching),
+            "icebox" => Ok(Self::Icebox),
             other => Err(ParseDomainError::new("TaskStatus", other)),
         }
     }
@@ -497,6 +506,7 @@ mod tests {
             TaskStatus::Doing,
             TaskStatus::Done,
             TaskStatus::Watching,
+            TaskStatus::Icebox,
         ] {
             assert_eq!(status.as_str().parse::<TaskStatus>().unwrap(), status);
         }
@@ -506,14 +516,19 @@ mod tests {
     /// serde 表現(= フロント・MCP が見る綴り)を固定する。
     #[test]
     fn task_status_serde_spelling() {
-        assert_eq!(
-            serde_json::to_value(TaskStatus::Watching).unwrap(),
-            serde_json::json!("watching")
-        );
-        assert_eq!(
-            serde_json::from_value::<TaskStatus>(serde_json::json!("watching")).unwrap(),
-            TaskStatus::Watching
-        );
+        for (status, spelling) in [
+            (TaskStatus::Watching, "watching"),
+            (TaskStatus::Icebox, "icebox"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(spelling)
+            );
+            assert_eq!(
+                serde_json::from_value::<TaskStatus>(serde_json::json!(spelling)).unwrap(),
+                status
+            );
+        }
     }
 
     #[test]

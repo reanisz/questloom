@@ -64,7 +64,7 @@ interface MenuState {
 
 interface Props {
   board: Board;
-  /** 全 8 列を列として表示するか。false なら 4 列 + 先送りレール。 */
+  /** 全 10 列を列として表示するか。false なら 4 列 + 先送りレール。 */
   expanded: boolean;
   /** レールのバケットが選ばれたときに展開表示へ切り替える。 */
   onExpand: () => void;

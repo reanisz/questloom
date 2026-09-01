@@ -70,13 +70,13 @@
   /*
    * 通常表示 / 展開表示それぞれの列の下限幅。ここを超えて初めて横スクロールが出る。
    *
-   * 展開表示は 9 列(New / Today / Tomorrow / This Week / Next Week / Future /
-   * 監視中 / Doing / Done)。1280px 幅で横スクロールを出さないため、
-   * 9 * 128 + gap 8 * 8 + padding 20 = 1236px に収まる値にしてある。
+   * 展開表示は 10 列(Icebox / New / Today / Tomorrow / This Week / Next Week /
+   * Future / 監視中 / Doing / Done)。1280px 幅で横スクロールを出さないため、
+   * 10 * 114 + gap 9 * 8 + padding 20 = 1232px に収まる値にしてある。
    * 列を足すときはこの計算をやり直すこと。
    */
   --column-min: 220px;
-  --column-min-expanded: 128px;
+  --column-min-expanded: 114px;
   --titlebar-height: 32px;
 
   /*
@@ -355,7 +355,7 @@ h3 {
   overflow-y: hidden;
 }
 
-/* 展開表示は 9 列を敷き詰めるため、余白と列幅を詰める。 */
+/* 展開表示は 10 列を敷き詰めるため、余白と列幅を詰める。 */
 .board-expanded {
   gap: 8px;
   padding: 4px 10px 16px;
@@ -375,6 +375,24 @@ h3 {
 
 .board-expanded .column {
   min-width: var(--column-min-expanded);
+}
+
+/*
+ * 10 列だと 1 列あたり 120px を切るので、ヘッダの余白・字間・件数バッジも切り詰める。
+ * ここを削らないと一番長い「TOMORROW」が省略記号に落ちる。
+ */
+.board-expanded .column-header {
+  padding: 12px 9px 8px;
+}
+
+.board-expanded .column-header h2 {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.board-expanded .column-count {
+  min-width: 18px;
+  padding: 1px 5px;
 }
 
 .column-over {

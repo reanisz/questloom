@@ -1,7 +1,8 @@
 /**
- * 先送りバケット (Tomorrow / This Week / Next Week / Future / 監視中) の細いサイドレール。
+ * 先送りバケット (Tomorrow / This Week / Next Week / Future / Icebox / 監視中) の
+ * 細いサイドレール。
  *
- * 通常表示ではこの 5 つを列として展開せず、ラベル + 件数だけのドロップボックスにする。
+ * 通常表示ではこの 6 つを列として展開せず、ラベル + 件数だけのドロップボックスにする。
  * ボックスは列と同じ droppable id (`column:<key>`) を持つので、BoardView の onDragEnd は
  * 列へのドロップと同じ経路で処理でき、ドロップ位置はバケット末尾になる。
  * クリックすると全列展開表示へ切り替え、そのバケットの列を強調する。
@@ -18,11 +19,16 @@ import {
 } from "../types";
 import { COLUMN_DROPPABLE_PREFIX } from "./Column";
 
-/** ボックスの説明文。監視中だけは「先送り」ではないので言い回しを変える。 */
+/** ドロップの意味を説明する語。時間バケット以外は「先送り」ではないので言い回しを変える。 */
+const DROP_HINTS: Partial<Record<BoardColumnKey, string>> = {
+  watching: "外部の変化待ちにもできます",
+  icebox: "棚上げもできます",
+};
+
+/** ボックスの説明文。 */
 function boxTitle(columnKey: BoardColumnKey, label: string): string {
-  return columnKey === "watching"
-    ? `${label} を展開表示で開く(ドラッグして外部の変化待ちにもできます)`
-    : `${label} を展開表示で開く(ドラッグして先送りもできます)`;
+  const hint = DROP_HINTS[columnKey] ?? "先送りもできます";
+  return `${label} を展開表示で開く(ドラッグして${hint})`;
 }
 
 interface BoxProps {

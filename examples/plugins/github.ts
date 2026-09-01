@@ -344,6 +344,10 @@ interface TargetResourceLike {
  * 全タスクの関連リソースから、監視対象の PR を組み立てる。
  *
  * - **Done のタスクは対象外**(片付いた PR を見張り続けない)。
+ * - **Icebox のタスクも対象外**(「判断ごと後回し」の間は煩わせない。
+ *   変化を知りたい場合は Watching を使う、という住み分け)。
+ *   なお受信箱(メンション等)の抑制判定は Icebox の参照も「トラック済み」として
+ *   残すので、Icebox 化した PR がメンション経由で通知され直すことはない。
  * - このプラグインが作った通知タスク (`origin === pluginOrigin`) も対象外。
  *   通知タスク自身が PR URL を主リソースに持つので、除かないと自己増殖の元になる。
  * - 同じ PR を複数のタスクが参照していても 1 件にまとめ、タスク id 昇順の先頭を親に使う。
@@ -355,7 +359,7 @@ function collectPullRequestTargets(
 ): PullRequestTarget[] {
   const watched = new Set<string>();
   for (const task of tasks) {
-    if (task.status === "done") continue;
+    if (task.status === "done" || task.status === "icebox") continue;
     if (task.origin === pluginOrigin) continue;
     watched.add(task.id);
   }

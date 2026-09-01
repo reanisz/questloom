@@ -18,6 +18,7 @@ const card = (id: string) => ({ id }) as TaskCard;
 /** 指定した列だけカードを持つボードの columns。 */
 function columns(filled: Partial<Record<BoardColumnKey, string[]>>): Board["columns"] {
   const all: Board["columns"] = {
+    icebox: [],
     new: [],
     today: [],
     tomorrow: [],
@@ -72,6 +73,11 @@ describe("columnOf", () => {
     expect(columnOf(board, columnId("watching"))).toBe("watching");
     expect(locate(columns({ watching: ["w"] }), "w")).toBe("watching");
   });
+
+  it("Icebox も他の列と同じ droppable として扱える", () => {
+    expect(columnOf(board, columnId("icebox"))).toBe("icebox");
+    expect(locate(columns({ icebox: ["i"] }), "i")).toBe("icebox");
+  });
 });
 
 describe("resolveDropPosition — 列へ落とす", () => {
@@ -124,6 +130,22 @@ describe("resolveDropPosition — 列へ落とす", () => {
   it("監視中から New へ戻すのも通常の移動として扱う", () => {
     const board = columns({ new: ["n"], watching: ["w"] });
     expect(resolveDropPosition(board, "w", columnId("new"), rect(0), rect(0))).toEqual({
+      column: "new",
+      prevId: "n",
+      nextId: null,
+    });
+  });
+
+  /** Icebox のボックスも同じ経路。出すのは常に手動なので、戻す側も普通の移動。 */
+  it("Icebox のボックスへ落とし、New へ戻すのも通常の移動として扱う", () => {
+    const board = columns({ today: ["a"], icebox: ["i1", "i2"] });
+    expect(resolveDropPosition(board, "a", columnId("icebox"), rect(0), rect(0))).toEqual({
+      column: "icebox",
+      prevId: "i2",
+      nextId: null,
+    });
+    const back = columns({ new: ["n"], icebox: ["i"] });
+    expect(resolveDropPosition(back, "i", columnId("new"), rect(0), rect(0))).toEqual({
       column: "new",
       prevId: "n",
       nextId: null,

@@ -24,14 +24,22 @@ export type ChecklistItemId = string;
  *
  * `watching` は「外部の変化待ち」。ユーザー以外の origin(mcp / ai / plugin:*)による
  * 履歴追記・子タスク作成を受けると、バックエンドが自動的に `new` へ戻す(起床)。
+ *
+ * `icebox` は「いつやるかの判断ごと後回し」。`watching` と違い**自動では起きない**ので、
+ * 出すのは常に手動または MCP / AI の明示的な move。
  */
-export type TaskStatus = "new" | "todo" | "doing" | "done" | "watching";
+export type TaskStatus = "new" | "todo" | "doing" | "done" | "watching" | "icebox";
 
 /** Todo タスクの表示バケット(導出値)。 */
 export type Bucket = "today" | "tomorrow" | "thisWeek" | "nextWeek" | "future";
 
-/** ボードの列。ドラッグ&ドロップ先の指定に用いる。 */
+/**
+ * ボードの列。ドラッグ&ドロップ先の指定に用いる。
+ *
+ * 並びはバックエンドの `BoardColumn` / `BoardColumns` と同じ(`icebox` が先頭)。
+ */
 export type BoardColumnKey =
+  | "icebox"
   | "new"
   | "today"
   | "tomorrow"
@@ -348,8 +356,14 @@ export const PROMOTE_COLUMNS = [
   "future",
 ] as const satisfies readonly BoardColumnKey[];
 
-/** 表示順に並べた全列と日本語ラベル。 */
+/**
+ * 表示順に並べた全列と日本語ラベル。展開表示はこの順で 10 列並ぶ。
+ *
+ * `icebox` はトリアージ前の在庫という位置づけなので**一番左**(バックエンドの
+ * `BoardColumns` の並びとも一致する)。
+ */
 export const BOARD_COLUMNS: readonly { key: BoardColumnKey; label: string }[] = [
+  { key: "icebox", label: "Icebox" },
   { key: "new", label: "New" },
   { key: "today", label: "Today" },
   { key: "tomorrow", label: "Tomorrow" },
@@ -375,14 +389,19 @@ export const PRIMARY_COLUMNS = [
 /**
  * 先送りバケット。通常表示ではレールのコンパクトなドロップボックスとして表示する。
  *
- * `watching`(外部の変化待ち)は時間バケットではないが、「今すぐ気にしなくてよいことの
- * 置き場」という点は同じなのでレールに並べる。列としての展開は展開表示のときだけ。
+ * `icebox`(棚上げ)と `watching`(外部の変化待ち)は時間バケットではないが、
+ * 「今すぐ気にしなくてよいことの置き場」という点は同じなのでレールに並べる。
+ * 列としての展開は展開表示のときだけ。
+ *
+ * 展開表示では `icebox` を一番左に出す ([`BOARD_COLUMNS`]) が、レールでは
+ * 先送りの度合いが強い順に並べたいので Future の後ろに置く。
  */
 export const DEFER_COLUMNS = [
   "tomorrow",
   "thisWeek",
   "nextWeek",
   "future",
+  "icebox",
   "watching",
 ] as const satisfies readonly BoardColumnKey[];
 

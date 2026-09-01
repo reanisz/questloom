@@ -30,6 +30,11 @@ pub enum Bucket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BoardColumn {
+    /// 棚上げ。バケットは持たない。
+    ///
+    /// トリアージ前の在庫という位置づけなので、展開表示では**一番左**に置く。
+    /// 列挙順・ボード JSON 上の位置もそれに合わせて先頭にしてある。
+    Icebox,
     /// 受信箱。
     New,
     /// Todo / Today。
@@ -60,6 +65,7 @@ impl BoardColumn {
         match status {
             TaskStatus::New => Self::New,
             TaskStatus::Watching => Self::Watching,
+            TaskStatus::Icebox => Self::Icebox,
             TaskStatus::Doing => Self::Doing,
             TaskStatus::Done => Self::Done,
             TaskStatus::Todo => match bucket {
@@ -81,13 +87,13 @@ impl BoardColumn {
             Self::ThisWeek => Some(Bucket::ThisWeek),
             Self::NextWeek => Some(Bucket::NextWeek),
             Self::Future => Some(Bucket::Future),
-            Self::New | Self::Watching | Self::Doing | Self::Done => None,
+            Self::Icebox | Self::New | Self::Watching | Self::Doing | Self::Done => None,
         }
     }
 
     /// この列へドロップしたときの `(status, scheduled)` を求める。
     ///
-    /// New / Watching / Doing / Done 列は予定を変更しない意味を持たせるため、
+    /// Icebox / New / Watching / Doing / Done 列は予定を変更しない意味を持たせるため、
     /// 呼び出し側が保持したい既存の予定を `current` に渡す。
     #[must_use]
     pub fn resolve(
@@ -105,6 +111,7 @@ impl BoardColumn {
                 let status = match self {
                     Self::New => TaskStatus::New,
                     Self::Watching => TaskStatus::Watching,
+                    Self::Icebox => TaskStatus::Icebox,
                     Self::Doing => TaskStatus::Doing,
                     _ => TaskStatus::Done,
                 };
@@ -653,7 +660,7 @@ mod tests {
             BoardColumn::Today.resolve(current, today, ws),
             (TaskStatus::Todo, Scheduled::Date(today))
         );
-        // New / Watching / Doing / Done は予定を保持する。
+        // Icebox / New / Watching / Doing / Done は予定を保持する。
         assert_eq!(
             BoardColumn::New.resolve(current, today, ws),
             (TaskStatus::New, current)
@@ -661,6 +668,10 @@ mod tests {
         assert_eq!(
             BoardColumn::Watching.resolve(current, today, ws),
             (TaskStatus::Watching, current)
+        );
+        assert_eq!(
+            BoardColumn::Icebox.resolve(current, today, ws),
+            (TaskStatus::Icebox, current)
         );
         assert_eq!(
             BoardColumn::Doing.resolve(current, today, ws),
@@ -688,6 +699,7 @@ mod tests {
         for (status, column) in [
             (TaskStatus::New, BoardColumn::New),
             (TaskStatus::Watching, BoardColumn::Watching),
+            (TaskStatus::Icebox, BoardColumn::Icebox),
             (TaskStatus::Doing, BoardColumn::Doing),
             (TaskStatus::Done, BoardColumn::Done),
         ] {

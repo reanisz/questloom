@@ -198,6 +198,55 @@ fn watching_persists_across_reopen_and_wakes() {
     ));
 }
 
+/// Icebox が再オープンをまたいで残り、外部 origin の追記でも**起きない**こと。
+///
+/// Watching と同じく `status` は TEXT なのでスキーマの変更は要らないが、
+/// 「自動起床しない」という違いはここで固定する。
+#[test]
+fn icebox_persists_across_reopen_and_never_wakes() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = {
+        let service = make_service(open(&dir));
+        let task = service
+            .create_task(NewTask {
+                title: "そのうち考える".to_owned(),
+                ..NewTask::default()
+            })
+            .unwrap();
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::NextWeek))
+            .unwrap();
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Icebox))
+            .unwrap();
+        task.id
+    };
+
+    // 再オープン。icebox のまま読み戻せる。
+    let service = make_service(open(&dir));
+    let board = service.board().unwrap();
+    assert_eq!(board.columns.icebox.len(), 1);
+    assert_eq!(board.columns.icebox[0].task.id, id);
+    assert_eq!(board.columns.icebox[0].task.status, TaskStatus::Icebox);
+    assert_eq!(board.columns.icebox[0].bucket, None);
+    // 予定は保持されている。
+    assert!(matches!(
+        board.columns.icebox[0].task.scheduled,
+        Scheduled::Week(_)
+    ));
+
+    // 外部 origin の追記でも Icebox のまま。
+    service
+        .add_task_update(id, "コメントが付きました", Origin::Plugin("github".into()))
+        .unwrap();
+
+    let service = make_service(open(&dir));
+    let board = service.board().unwrap();
+    assert!(board.columns.new.is_empty());
+    assert_eq!(board.columns.icebox.len(), 1);
+    assert_eq!(board.columns.icebox[0].task.id, id);
+}
+
 /// ソフトデリートと復元が、再オープンをまたいで残ること。
 #[test]
 fn soft_delete_and_restore_persist_across_reopen() {

@@ -148,6 +148,21 @@ describe("collectPullRequestTargets", () => {
       [["w1"]],
     );
   });
+
+  it("Icebox のタスクは監視対象にしない(判断ごと後回しの間は煩わせない)", () => {
+    const tasks = [
+      { id: "i1", status: "icebox", origin: "user" },
+      { id: "t1", status: "todo", origin: "user" },
+    ];
+    const resources = [
+      { taskId: "i1", kind: "url", value: "https://github.com/o/r/pull/1" },
+      { taskId: "t1", kind: "url", value: "https://github.com/o/r/pull/2" },
+    ];
+    assert.deepEqual(
+      collectPullRequestTargets(tasks, resources, origin).map((t) => [t.ref.key, t.taskIds]),
+      [["o/r#2", ["t1"]]],
+    );
+  });
 });
 
 describe("selectNewComments", () => {

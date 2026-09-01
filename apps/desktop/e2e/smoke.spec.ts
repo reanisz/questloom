@@ -413,34 +413,49 @@ describe("questloom GUI スモーク", () => {
   });
 
   /**
-   * 展開表示は 9 列(監視中を含む)。既定のウィンドウ幅 1280px で横スクロールを出さない
-   * ことを実寸で見る(`--column-min-expanded` の見積もりが崩れたら落ちる)。
+   * 展開表示は 10 列(Icebox と監視中を含む)。既定のウィンドウ幅 1280px で横スクロールを
+   * 出さないことを実寸で見る(`--column-min-expanded` の見積もりが崩れたら落ちる)。
    */
   it("全列を展開しても横スクロールが出ない", async () => {
     const toggle = $('[data-testid="toggle-expanded"]');
     await toggle.click();
     await $('[data-testid="column-watching"]').waitForDisplayed();
 
-    for (const key of ["new", "tomorrow", "thisWeek", "nextWeek", "future", "watching", "done"]) {
+    for (const key of [
+      "icebox",
+      "new",
+      "tomorrow",
+      "thisWeek",
+      "nextWeek",
+      "future",
+      "watching",
+      "done",
+    ]) {
       await expect($(`[data-testid="column-${key}"]`)).toBeExisting();
     }
 
     const overflow = await browser.execute(() => {
       const board = document.querySelector(".board");
       if (!board) return null;
+      const first = board.querySelector("section.column");
       return {
         scrollWidth: board.scrollWidth,
         clientWidth: board.clientWidth,
         columns: board.querySelectorAll("section.column").length,
+        firstColumn: first?.getAttribute("data-testid") ?? null,
       };
     });
     if (!overflow) throw new Error("ボードが見つかりません");
-    expect(overflow.columns).toBe(9);
+    expect(overflow.columns).toBe(10);
+    // Icebox は一番左。
+    expect(overflow.firstColumn).toBe("column-icebox");
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
 
     // 通常表示へ戻して次回以降に影響を残さない(表示モードは localStorage に残る)。
     await toggle.click();
     await $('[data-testid="defer-box-watching"]').waitForDisplayed();
+    // レールにも Icebox のボックスが出る。
+    await expect($('[data-testid="defer-box-icebox"]')).toBeExisting();
   });
 
   /**

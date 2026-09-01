@@ -865,3 +865,93 @@ fn creating_a_child_wakes_a_watching_parent() {
     );
     assert_eq!(detail["status"], "new", "親が New へ起きる");
 }
+
+/// エージェントが「棚上げしておく」を実行する筋書き。Watching と違い自動では起きない。
+#[test]
+fn icebox_column_shelves_a_task_and_never_wakes_it() {
+    let tools = tools();
+    let created = create(
+        &tools,
+        CreateTaskArgs {
+            column: Some(ColumnArg::NextWeek),
+            ..new_task("そのうち考える")
+        },
+    );
+    let task_id = created["id"].as_str().unwrap().to_owned();
+
+    // 棚上げへ移す。予定は保持され、バケットは持たない。
+    let shelved = json(
+        &tools
+            .move_task(Parameters(MoveTaskArgs {
+                task_id: task_id.clone(),
+                column: ColumnArg::Icebox,
+            }))
+            .expect("move_task"),
+    );
+    assert_eq!(shelved["status"], "icebox");
+    assert_eq!(shelved["column"], "icebox");
+    assert!(shelved["bucket"].is_null());
+    assert_eq!(shelved["scheduled"]["kind"], "week");
+
+    // 列・ステータスの両方で絞り込める。
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: Some(ColumnArg::Icebox),
+            status: None,
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: None,
+            status: Some(StatusArg::Icebox),
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["tasks"][0]["column"], "icebox");
+
+    // MCP からの履歴追記でも起きない(Watching との違い)。
+    json(
+        &tools
+            .add_task_update(Parameters(AddTaskUpdateArgs {
+                task_id: task_id.clone(),
+                body: "外で動きがありました".to_owned(),
+            }))
+            .expect("add_task_update"),
+    );
+
+    assert_eq!(
+        list(
+            &tools,
+            ListTasksArgs {
+                column: Some(ColumnArg::New),
+                status: None,
+            },
+        )["count"],
+        0,
+        "Icebox は外部の変化でも New へ戻らない"
+    );
+    let listed = list(
+        &tools,
+        ListTasksArgs {
+            column: Some(ColumnArg::Icebox),
+            status: None,
+        },
+    );
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["tasks"][0]["id"], task_id.as_str());
+
+    // 明示的に move すれば出せる。予定はそのまま。
+    let back = json(
+        &tools
+            .move_task(Parameters(MoveTaskArgs {
+                task_id: task_id.clone(),
+                column: ColumnArg::New,
+            }))
+            .expect("move_task"),
+    );
+    assert_eq!(back["status"], "new");
+    assert_eq!(back["scheduled"]["kind"], "week");
+}

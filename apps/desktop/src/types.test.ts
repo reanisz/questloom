@@ -29,14 +29,43 @@ describe("列の一覧", () => {
     expect(new Set(shown).size).toBe(shown.length);
   });
 
-  it("監視中は先送りレール側(通常表示では列にしない)", () => {
-    expect(DEFER_COLUMNS).toContain<BoardColumnKey>("watching");
-    expect(isPrimaryColumn("watching")).toBe(false);
+  it("監視中と Icebox は先送りレール側(通常表示では列にしない)", () => {
+    for (const key of ["watching", "icebox"] as const) {
+      expect(DEFER_COLUMNS).toContain<BoardColumnKey>(key);
+      expect(isPrimaryColumn(key)).toBe(false);
+    }
   });
 
-  it("昇格先は Todo 系だけ(New / Watching / Doing / Done は選ばせない)", () => {
+  it("レールの並びは Tomorrow / This Week / Next Week / Future / Icebox / 監視中", () => {
+    expect([...DEFER_COLUMNS]).toEqual([
+      "tomorrow",
+      "thisWeek",
+      "nextWeek",
+      "future",
+      "icebox",
+      "watching",
+    ]);
+  });
+
+  it("展開表示では Icebox が一番左(バックエンドの列順と一致)", () => {
+    expect(allKeys[0]).toBe("icebox");
+    expect(allKeys).toEqual([
+      "icebox",
+      "new",
+      "today",
+      "tomorrow",
+      "thisWeek",
+      "nextWeek",
+      "future",
+      "watching",
+      "doing",
+      "done",
+    ]);
+  });
+
+  it("昇格先は Todo 系だけ(New / Watching / Icebox / Doing / Done は選ばせない)", () => {
     expect([...PROMOTE_COLUMNS]).toEqual(["today", "tomorrow", "thisWeek", "nextWeek", "future"]);
-    for (const key of ["new", "watching", "doing", "done"] as const) {
+    for (const key of ["new", "watching", "icebox", "doing", "done"] as const) {
       expect(PROMOTE_COLUMNS).not.toContain<BoardColumnKey>(key);
     }
   });
@@ -47,6 +76,7 @@ describe("列の一覧", () => {
       expect(columnLabel(key)).not.toBe("");
     }
     expect(columnLabel("watching")).toBe("監視中");
+    expect(columnLabel("icebox")).toBe("Icebox");
   });
 
   it("記号を持つのは監視中だけ(他の列は素のラベル)", () => {

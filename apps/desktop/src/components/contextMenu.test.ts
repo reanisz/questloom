@@ -54,13 +54,15 @@ describe("contextMenuActions", () => {
     ]);
   });
 
-  it("監視中のタスクは未完了なので、通常タスクと同じ項目を出す", () => {
-    expect(contextMenuActions(target({ status: "watching" }))).toEqual([
-      "open",
-      "complete",
-      "move",
-      "delete",
-    ]);
+  it("監視中・Icebox のタスクは未完了なので、通常タスクと同じ項目を出す", () => {
+    for (const status of ["watching", "icebox"] as const) {
+      expect(contextMenuActions(target({ status }))).toEqual([
+        "open",
+        "complete",
+        "move",
+        "delete",
+      ]);
+    }
   });
 
   it("主リソースが URL のときだけ「URL を開く」と「内蔵ブラウザで開く」を出す", () => {

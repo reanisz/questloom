@@ -26,13 +26,15 @@ use serde_json::{json, Value};
 
 /// MCP クライアントへ提示する使い方の説明。
 const INSTRUCTIONS: &str = "questloom task board. Tasks live in one of the columns \
-new / today / tomorrow / thisWeek / nextWeek / future / watching / doing / done. \
+icebox / new / today / tomorrow / thisWeek / nextWeek / future / watching / doing / done. \
 Time buckets are derived from the schedule, so moving a task to a column sets its schedule. \
 Tasks created here default to instant tasks in the New column, which show up in the user's \
 overlay for one-click completion; pass `column` to create a regular task instead. \
 The `watching` column parks a task that is waiting on something external: any change you \
 make from here (add_task_update, add_checklist_item / set_checklist_item, or create_task \
 with that task as `parent_id`) wakes it back up into New so the user sees it. \
+The `icebox` column shelves a task whose timing is undecided; unlike `watching` it never \
+wakes on its own, so it only leaves when someone moves it out explicitly. \
 Tasks also carry an in-task checklist for steps too small to be child tasks; ticking every \
 item does not complete the task. \
 The user's board only shows completions from today in `done` (older ones move to a separate \
@@ -56,6 +58,8 @@ pub enum StatusArg {
     Done,
     /// 外部の変化待ち。
     Watching,
+    /// 棚上げ。
+    Icebox,
 }
 
 impl From<StatusArg> for TaskStatus {
@@ -66,6 +70,7 @@ impl From<StatusArg> for TaskStatus {
             StatusArg::Doing => Self::Doing,
             StatusArg::Done => Self::Done,
             StatusArg::Watching => Self::Watching,
+            StatusArg::Icebox => Self::Icebox,
         }
     }
 }
@@ -74,6 +79,8 @@ impl From<StatusArg> for TaskStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ColumnArg {
+    /// 棚上げ。
+    Icebox,
     /// 受信箱。
     New,
     /// 今日やる。
@@ -97,6 +104,7 @@ pub enum ColumnArg {
 impl From<ColumnArg> for BoardColumn {
     fn from(value: ColumnArg) -> Self {
         match value {
+            ColumnArg::Icebox => Self::Icebox,
             ColumnArg::New => Self::New,
             ColumnArg::Today => Self::Today,
             ColumnArg::Tomorrow => Self::Tomorrow,
@@ -160,7 +168,7 @@ impl From<ResourceArg> for NewResource {
 /// `list_tasks` の引数。
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksArgs {
-    /// Only return tasks in this status ("new", "todo", "doing", "done", "watching").
+    /// Only return tasks in this status ("new", "todo", "doing", "done", "watching", "icebox").
     #[serde(default)]
     pub status: Option<StatusArg>,
     /// Only return tasks in this board column.
@@ -437,7 +445,9 @@ impl QuestloomTools {
     #[tool(
         description = "Move a task to the end of a board column. Time-bucket columns also set the \
                        task's schedule. Use \"watching\" to park a task that is waiting on something \
-                       external; it wakes back into New on the next non-user change."
+                       external; it wakes back into New on the next non-user change. Use \"icebox\" \
+                       to shelve a task whose timing is undecided; it never wakes on its own and \
+                       has to be moved out explicitly. Both keep the task's existing schedule."
     )]
     pub fn move_task(
         &self,
@@ -751,6 +761,7 @@ mod tests {
             TaskStatus::Doing,
             TaskStatus::Done,
             TaskStatus::Watching,
+            TaskStatus::Icebox,
         ] {
             let json = serde_json::to_value(status).expect("core 型は JSON 化できる");
             let arg: StatusArg =
@@ -759,6 +770,7 @@ mod tests {
         }
 
         for column in [
+            BoardColumn::Icebox,
             BoardColumn::New,
             BoardColumn::Today,
             BoardColumn::Tomorrow,

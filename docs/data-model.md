@@ -13,7 +13,11 @@
 
 ### タスクの状態とバケットの考え方
 
-タスクの状態 (`status`) は 5 つ: `new` / `todo` / `doing` / `done` / `watching`。
+タスクの状態 (`status`) は 6 つ: `new` / `todo` / `doing` / `done` / `watching` / `icebox`。
+
+`icebox` は「いつやるかの判断ごと後回しにする」置き場。Future(Todo の「いつか」)と違い
+Todo ですらない。Watching と違い**外部の変化でも自動では動かない**(出すのは常に手動または
+MCP/AI の明示的な move)。出し入れで `scheduled` は保持する。
 
 `watching` は「即座に作業があるわけではないが、外部の変化を待っている」状態。
 **ユーザー以外の origin**(`mcp` / `ai` / `plugin:*`)による変化——履歴追記・子タスク作成・

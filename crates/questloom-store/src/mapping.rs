@@ -279,7 +279,8 @@ mod tests {
         assert_eq!(read_task(&conn).expect("読み戻せる"), task);
     }
 
-    /// どの状態も文字列として往復すること(Watching を足しても DB 側の変更は不要)。
+    /// どの状態も文字列として往復すること
+    /// (Watching / Icebox を足しても DB 側の変更は不要)。
     #[test]
     fn every_status_roundtrips() {
         for status in [
@@ -288,6 +289,7 @@ mod tests {
             TaskStatus::Doing,
             TaskStatus::Done,
             TaskStatus::Watching,
+            TaskStatus::Icebox,
         ] {
             let task = Task { status, ..sample() };
             let conn = store_task(&task);

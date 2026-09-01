@@ -4,11 +4,13 @@
 
 questloom はタスク管理・通知管理のデスクトップアプリ。当面は Windows 向けスタンドアロンだが、
 将来モバイル・Web・CLI 等へ展開する可能性を見越し、コアロジックを UI から分離した Rust workspace 構成をとる。
-UI は Trello 風のボード(New / Today / Tomorrow / ThisWeek / NextWeek / Future / Watching / Doing / Done)で、
-時間バケットは DB に保存せず `scheduled_*` から導出する。同じ考え方で **Done 列に出るのは
+UI は Trello 風のボード(Icebox / New / Today / Tomorrow / ThisWeek / NextWeek / Future /
+Watching / Doing / Done)で、時間バケットは DB に保存せず `scheduled_*` から導出する。同じ考え方で **Done 列に出るのは
 「今日完了した分」だけ**で、前日以前の完了は列フッタの「過去の完了 n 件…」から見る
 (下記「Done 列」節)。`Watching`(監視中)は「外部の変化待ち」で、
-ユーザー以外の origin による変化を受けると自動的に New へ戻る(下記「Watching」節)。加えて、内蔵 MCP サーバー経由で
+ユーザー以外の origin による変化を受けると自動的に New へ戻る(下記「Watching」節)。
+`Icebox`(棚上げ)は「いつやるかの判断ごと後回し」で、Watching と違い**自動では起きない**
+(下記「Icebox」節)。加えて、内蔵 MCP サーバー経由で
 Claude Code / Codex などの AI エージェントからタスクを操作でき、AI CLI 呼び出しやプラグイン
 (第一弾は GitHub PR 監視)による自動タスク生成を備える。
 
@@ -159,7 +161,8 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   - Watching の往復と展開表示の 2 本は、内蔵 MCP を spec から直接叩く
     (`QUESTLOOM_E2E_MCP_PORT` を読んで `http://127.0.0.1:<port>/mcp` へ JSON-RPC)。
     「UI で監視中へ移す → MCP で履歴追記 → New に戻る」を実アプリで通し、
-    展開表示では `.board` の `scrollWidth <= clientWidth` を実寸で確かめる。
+    展開表示では 10 列(Icebox が一番左)が並び、`.board` の
+    `scrollWidth <= clientWidth` であることを実寸で確かめる。
   - **利用者が questloom を起動したままだと exe を差し替えられない**
     (`tauri build` が `failed to remove file ... os error 5` で落ちる)。そのときは
     リンク済みの `target/debug/deps/questloom_desktop.exe` を別の場所へ
@@ -223,10 +226,28 @@ e2e ジョブ = windows-latest で GUI e2e。**手動 `workflow_dispatch` と週
   自分で書き換えただけで起きてしまう。
 - ユーザー操作(ドラッグ・右クリックメニューの「移動」)での出入りは通常の `move_task`。
   **昇格先 (`PROMOTE_COLUMNS`) には含めない**(昇格は Todo 系のみという現仕様を維持)。
-- UI: 通常表示では先送りレールの「監視中」ボックス(`DEFER_COLUMNS`)、展開表示では 9 列目。
+- UI: 通常表示では先送りレールの「監視中」ボックス(`DEFER_COLUMNS`)、展開表示では 8 列目。
   列ヘッダとレールのラベルに 👁 を添えるだけで、カード自体の装飾はしない。
 - DB は `status` が自由な TEXT なのでマイグレーション不要
-  (`migrations.rs` の `a_v2_database_accepts_the_watching_status_without_a_migration` が担保)。
+  (`migrations.rs` の `a_v3_database_accepts_new_statuses_without_a_migration` が担保)。
+
+## Icebox(棚上げ)
+
+`TaskStatus::Icebox` / `BoardColumn::Icebox` は「いつやるかの判断ごと後回しにする」置き場。
+仕様の確定版は `docs/data-model.md`(「タスクの状態とバケットの考え方」)。
+
+- Future(Todo の「いつか」)と違い **Todo ですらない**。時間バケットは持たず、
+  `resolve` は New / Watching / Doing / Done と同じく**予定を保持**する
+  (Icebox から出し入れしても `scheduled` は失われない)。
+- **自動起床は無い。** 外部の変化を待っているのは Watching だけで、Icebox は
+  `add_task_update` などを外部 origin で受けても動かない(`wake` は `Watching` しか見ない)。
+  出すのは常に手動、または MCP / AI の明示的な `move_task`。
+- **昇格先 (`PROMOTE_COLUMNS`) には含めない**(昇格は Todo 系のみ)。
+  右クリックメニューの「移動」からは選べる(現在列なら無効化)。
+- UI: 通常表示では先送りレールの「Icebox」ボックス(`DEFER_COLUMNS` の Future と監視中の間)、
+  展開表示では**一番左**の列。列挙順・ボード JSON 上の位置も先頭
+  (`BoardColumns::iter` / `BOARD_COLUMNS` / 契約テスト `board_json_puts_icebox_first`)。
+- DB は Watching と同じくマイグレーション不要。
 
 ## Done 列(今日の完了だけ)
 
@@ -319,8 +340,8 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 
 引数名は snake_case、返り値の JSON は questloom-core の serde 表現(camelCase、
 日付・週・時刻は文字列)に従う。`column` は
-`new` / `today` / `tomorrow` / `thisWeek` / `nextWeek` / `future` / `watching` / `doing` / `done`
-(`status` は `new` / `todo` / `doing` / `done` / `watching`)。
+`icebox` / `new` / `today` / `tomorrow` / `thisWeek` / `nextWeek` / `future` / `watching` /
+`doing` / `done`(`status` は `new` / `todo` / `doing` / `done` / `watching` / `icebox`)。
 
 | ツール | 引数 | 内容 |
 |---|---|---|
@@ -328,7 +349,7 @@ claude mcp add --transport http questloom http://127.0.0.1:39150/mcp --header "A
 | `get_task` | `task_id` | 詳細(関連リソース・アップデート履歴・親子込み) |
 | `create_task` | `title`, `description?`, `column?`, `deadline?`, `is_instant?`, `parent_id?`, `resources?` | 作成。既定は **インスタントタスクを New へ**。`column` 指定時は通常タスクとしてその列へ |
 | `update_task` | `task_id`, `title?`, `description?`, `deadline?`, `clear_deadline?` | タイトル・詳細・締切の更新 |
-| `move_task` | `task_id`, `column` | 指定列の末尾へ移動(時間バケット列は予定も設定される。`watching` で「外部の変化待ち」にできる) |
+| `move_task` | `task_id`, `column` | 指定列の末尾へ移動(時間バケット列は予定も設定される。`watching` で「外部の変化待ち」、`icebox` で「棚上げ」にできる。どちらも予定は保持) |
 | `complete_task` | `task_id` | 完了にする(冪等) |
 | `delete_task` | `task_id` | 削除する(ソフトデリート。ボードから消えるだけで復元可能。子タスクへはカスケードしない。冪等) |
 | `restore_task` | `task_id` | 削除済みタスクを復元する(現ステータス列の末尾へ。冪等) |

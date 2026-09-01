@@ -144,6 +144,8 @@ type ChecklistProgress = (usize, usize);
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoardColumns {
+    /// Icebox 列(棚上げ)。展開表示で一番左に出すので、ここでも先頭に置く。
+    pub icebox: Vec<TaskCard>,
     /// New 列。
     pub new: Vec<TaskCard>,
     /// Today 列。
@@ -168,6 +170,7 @@ impl BoardColumns {
     /// 列と、その列のタスクを左から順に列挙する。
     pub fn iter(&self) -> impl Iterator<Item = (BoardColumn, &[TaskCard])> {
         [
+            (BoardColumn::Icebox, self.icebox.as_slice()),
             (BoardColumn::New, self.new.as_slice()),
             (BoardColumn::Today, self.today.as_slice()),
             (BoardColumn::Tomorrow, self.tomorrow.as_slice()),
@@ -184,6 +187,7 @@ impl BoardColumns {
     /// 指定した列のリストを借りる。
     fn column_mut(&mut self, column: BoardColumn) -> &mut Vec<TaskCard> {
         match column {
+            BoardColumn::Icebox => &mut self.icebox,
             BoardColumn::New => &mut self.new,
             BoardColumn::Today => &mut self.today,
             BoardColumn::Tomorrow => &mut self.tomorrow,
@@ -1207,6 +1211,8 @@ impl TaskService {
     ///
     /// - 起こすのは **`status == Watching`** かつ **origin がユーザー以外**のときだけ。
     ///   ユーザー自身の編集で勝手に起きてはいけない。
+    ///   [`TaskStatus::Icebox`] は「判断ごと後回し」の置き場なので**自動起床しない**
+    ///   (外部の変化を待っているのは Watching だけ)。
     /// - **`scheduled` は保持する**(Watching へ入れる前の予定を失わない)。
     /// - 並び順は New 列の末尾。
     ///
@@ -2555,6 +2561,7 @@ mod tests {
         assert_eq!(
             columns,
             [
+                BoardColumn::Icebox,
                 BoardColumn::New,
                 BoardColumn::Today,
                 BoardColumn::Tomorrow,
@@ -2665,6 +2672,125 @@ mod tests {
         let still = service.find_task(task.id).unwrap().expect("生きている");
         assert_eq!(still.status, TaskStatus::Watching);
         assert_eq!(service.board().unwrap().columns.watching.len(), 1);
+    }
+
+    // ---- Icebox(棚上げ)----
+
+    /// 予定を持ったまま Icebox へ入れたタスクを返す。
+    fn icebox_task(service: &TaskService, title: &str) -> Task {
+        let task = service.create_task(new_task(title)).unwrap();
+        // 予定が保持されることを見たいので、一度 NextWeek に置いてから Icebox へ移す。
+        service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::NextWeek))
+            .unwrap();
+        let icebox = service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::Icebox))
+            .unwrap();
+        assert_eq!(icebox.status, TaskStatus::Icebox);
+        assert!(
+            matches!(icebox.scheduled, Scheduled::Week(_)),
+            "Icebox へ移しても予定は保持される"
+        );
+        icebox
+    }
+
+    #[test]
+    fn move_to_icebox_keeps_the_schedule_and_has_no_bucket() {
+        let service = service();
+        let task = icebox_task(&service, "いつかやるかもしれない");
+
+        let board = service.board().unwrap();
+        assert_eq!(board.columns.icebox.len(), 1);
+        assert_eq!(board.columns.icebox[0].task.id, task.id);
+        // Icebox はバケットを持たない(Todo ではないため)。
+        assert_eq!(board.columns.icebox[0].bucket, None);
+        assert!(board.columns.next_week.is_empty());
+    }
+
+    /// Icebox から出しても予定は保持される(往復で失わない)。
+    #[test]
+    fn leaving_the_icebox_keeps_the_schedule() {
+        let service = service();
+        let task = icebox_task(&service, "戻す");
+        let before = task.scheduled;
+
+        let back = service
+            .move_task(task.id, MoveRequest::to_column(BoardColumn::New))
+            .unwrap();
+
+        assert_eq!(back.status, TaskStatus::New);
+        assert_eq!(back.scheduled, before, "Icebox から出しても予定は保持する");
+    }
+
+    /// **Icebox は自動起床しない。** 外部の変化を待っているのは Watching だけ。
+    #[test]
+    fn no_non_user_origin_wakes_an_icebox_task() {
+        for origin in [
+            Origin::Mcp,
+            Origin::Ai,
+            Origin::System,
+            Origin::Plugin("github".into()),
+        ] {
+            let service = service();
+            let task = icebox_task(&service, "起きない");
+
+            service
+                .add_task_update(task.id, "外の変化", origin.clone())
+                .unwrap();
+
+            assert_eq!(
+                service.find_task(task.id).unwrap().unwrap().status,
+                TaskStatus::Icebox,
+                "{origin} でも Icebox は起きない"
+            );
+            assert_eq!(service.board().unwrap().columns.icebox.len(), 1);
+            assert!(service.board().unwrap().columns.new.is_empty());
+        }
+    }
+
+    /// チェックリスト経由でも、外部 origin の子タスク作成でも Icebox は起きない。
+    #[test]
+    fn neither_checklists_nor_child_tasks_wake_an_icebox_task() {
+        let service = service();
+        let parent = icebox_task(&service, "棚上げの親");
+
+        service
+            .add_checklist_item(parent.id, "外から足す", Origin::Mcp)
+            .unwrap();
+        service
+            .create_task(NewTask {
+                title: "外から生えた子".to_owned(),
+                origin: Origin::Plugin("github".into()),
+                parent_id: Some(parent.id),
+                is_instant: true,
+                ..NewTask::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            service.find_task(parent.id).unwrap().unwrap().status,
+            TaskStatus::Icebox
+        );
+        assert_eq!(service.board().unwrap().columns.icebox.len(), 1);
+    }
+
+    /// 起床イベント (`TaskWoken`) も出ない。
+    #[tokio::test]
+    async fn an_icebox_task_broadcasts_no_wake() {
+        let service = service();
+        let task = icebox_task(&service, "静かなまま");
+        let mut rx = service.subscribe();
+
+        service
+            .add_task_update(task.id, "外の変化", Origin::Mcp)
+            .unwrap();
+        service.notify_settings_changed();
+
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            DomainEvent::TaskUpdateAdded { task_id: task.id }
+        );
+        assert_eq!(rx.recv().await.unwrap(), DomainEvent::SettingsChanged);
     }
 
     #[test]
@@ -2834,11 +2960,13 @@ mod tests {
         assert_eq!(rx.recv().await.unwrap(), DomainEvent::SettingsChanged);
     }
 
-    /// ボードの JSON 契約に `watching` 列が含まれること(フロントの `BoardColumns` と対応)。
+    /// ボードの JSON 契約に `watching` / `icebox` 列が含まれること
+    /// (フロントの `BoardColumns` と対応)。
     #[test]
-    fn board_json_has_a_watching_column() {
+    fn board_json_has_a_watching_and_an_icebox_column() {
         let service = service();
-        let task = watching_task(&service, "契約");
+        let watching = watching_task(&service, "契約");
+        let icebox = icebox_task(&service, "棚上げの契約");
 
         let board = serde_json::to_value(service.board().unwrap()).unwrap();
         let columns = board["columns"]
@@ -2847,14 +2975,31 @@ mod tests {
         assert_eq!(
             columns.keys().map(String::as_str).collect::<HashSet<_>>(),
             HashSet::from([
-                "new", "today", "tomorrow", "thisWeek", "nextWeek", "future", "watching", "doing",
-                "done",
+                "icebox", "new", "today", "tomorrow", "thisWeek", "nextWeek", "future", "watching",
+                "doing", "done",
             ])
         );
         let card = &board["columns"]["watching"][0];
-        assert_eq!(card["id"], task.id.to_string());
+        assert_eq!(card["id"], watching.id.to_string());
         assert_eq!(card["status"], "watching");
         assert!(card["bucket"].is_null());
+
+        let card = &board["columns"]["icebox"][0];
+        assert_eq!(card["id"], icebox.id.to_string());
+        assert_eq!(card["status"], "icebox");
+        assert!(card["bucket"].is_null());
+    }
+
+    /// `icebox` は JSON でも**先頭**の列(展開表示で一番左に出すため)。
+    ///
+    /// `serde_json::Value` はキー順を保たないので、生の文字列で見る。
+    #[test]
+    fn board_json_puts_icebox_first() {
+        let service = service();
+        let json = serde_json::to_string(&service.board().unwrap()).unwrap();
+        let icebox = json.find("\"icebox\"").expect("icebox 列がある");
+        let new = json.find("\"new\"").expect("new 列がある");
+        assert!(icebox < new, "icebox は new より前に来る: {json}");
     }
 
     // ---- チェックリスト ----

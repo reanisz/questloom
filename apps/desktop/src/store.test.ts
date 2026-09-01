@@ -47,6 +47,7 @@ function card(id: TaskId): TaskCard {
 /** 指定した列だけカードを持つボード。 */
 function board(columns: Partial<Record<BoardColumnKey, string[]>>): Board {
   const empty: Record<BoardColumnKey, TaskCard[]> = {
+    icebox: [],
     new: [],
     today: [],
     tomorrow: [],

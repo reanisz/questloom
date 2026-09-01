@@ -98,7 +98,7 @@ function App() {
                     title={
                       expanded
                         ? "New / Today / Doing / Done + 先送りレールの表示に戻す"
-                        : "先送りバケット・監視中も列として展開する"
+                        : "先送りバケット・Icebox・監視中も列として展開する"
                     }
                     onClick={() => setExpanded(!expanded)}
                   >

@@ -95,6 +95,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   doing: "Doing",
   done: "Done",
   watching: "監視中",
+  icebox: "Icebox",
 };
 
 /** 状態の表示ラベル。 */
