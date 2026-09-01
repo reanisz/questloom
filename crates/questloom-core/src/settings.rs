@@ -175,7 +175,14 @@ pub fn default_ai_providers() -> Vec<AiProvider> {
             id: "codex".to_owned(),
             label: "Codex".to_owned(),
             command: "codex".to_owned(),
-            args: vec!["exec".to_owned(), "{prompt}".to_owned()],
+            // `--skip-git-repo-check`: codex exec は信頼済みディレクトリ(git リポジトリ等)の
+            // 外では実行を拒否する。questloom はアプリの作業ディレクトリから spawn するため、
+            // このフラグが無いと「Not inside a trusted directory」で失敗する。
+            args: vec![
+                "exec".to_owned(),
+                "--skip-git-repo-check".to_owned(),
+                "{prompt}".to_owned(),
+            ],
             enabled: true,
             // codex は `-c` の設定上書きで Streamable HTTP の MCP サーバーを足せる
             // (`url` を持つエントリは rmcp クライアント経由になる)。
@@ -199,6 +206,35 @@ pub fn default_ai_providers() -> Vec<AiProvider> {
             mcp_supports_token: false,
         },
     ]
+}
+
+/// 保存済み設定に残った「旧バージョンの既定値」を現行の既定値へ引き上げる。
+///
+/// 既定値の修正はフィールド既定(serde default)では既存ユーザーに届かないため、
+/// **旧既定と完全一致する場合に限って**書き換える(ユーザーが編集した値には触れない)。
+/// 変更があれば true を返す(呼び出し側が保存し直す)。
+///
+/// 現在の対象:
+/// - codex プロバイダの `args` が旧既定 `["exec", "{prompt}"]` のままなら
+///   `--skip-git-repo-check` を挿入する(codex exec は信頼済みディレクトリの外では
+///   このフラグなしに実行を拒否するため)。
+#[must_use]
+pub fn upgrade_stale_defaults(settings: &mut CoreSettings) -> bool {
+    let mut changed = false;
+    for provider in &mut settings.ai_providers {
+        if provider.id == "codex"
+            && provider.command == "codex"
+            && provider.args == ["exec", "{prompt}"]
+        {
+            provider.args = vec![
+                "exec".to_owned(),
+                "--skip-git-repo-check".to_owned(),
+                "{prompt}".to_owned(),
+            ];
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// コア設定。未知フィールドは無視し、欠けたフィールドは既定値で補う(前方互換)。
@@ -409,7 +445,7 @@ mod tests {
         assert!(claude.mcp_args.iter().any(|arg| arg == "{mcp_config}"));
 
         let codex = settings.ai_provider(Some("codex")).expect("codex は有効");
-        assert_eq!(codex.args, ["exec", "{prompt}"]);
+        assert_eq!(codex.args, ["exec", "--skip-git-repo-check", "{prompt}"]);
         assert!(!codex.mcp_supports_token);
         assert!(codex.mcp_args.iter().any(|arg| arg.contains("{mcp_url}")));
 
@@ -417,6 +453,29 @@ mod tests {
         assert!(settings.ai_provider(Some("antigravity")).is_none());
         assert_eq!(settings.enabled_ai_providers().count(), 2);
         assert!(settings.ai_provider(Some("unknown")).is_none());
+    }
+
+    #[test]
+    fn stale_codex_default_gains_skip_git_repo_check() {
+        // 旧既定のまま → フラグが挿入される。
+        let mut settings = CoreSettings::default();
+        settings.ai_providers[1].args = vec!["exec".to_owned(), "{prompt}".to_owned()];
+        assert!(upgrade_stale_defaults(&mut settings));
+        assert_eq!(
+            settings.ai_providers[1].args,
+            ["exec", "--skip-git-repo-check", "{prompt}"]
+        );
+        // 2 回目は何もしない(冪等)。
+        assert!(!upgrade_stale_defaults(&mut settings));
+    }
+
+    #[test]
+    fn user_edited_codex_args_are_left_alone() {
+        let mut settings = CoreSettings::default();
+        settings.ai_providers[1].args =
+            vec!["exec".to_owned(), "--json".to_owned(), "{prompt}".to_owned()];
+        assert!(!upgrade_stale_defaults(&mut settings));
+        assert_eq!(settings.ai_providers[1].args, ["exec", "--json", "{prompt}"]);
     }
 
     #[test]

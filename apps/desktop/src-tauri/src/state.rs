@@ -102,6 +102,14 @@ impl AppState {
 
         let mut settings: CoreSettings = store.get_settings(CORE_NAMESPACE)?;
         let mcp_token = adopt_mcp_token(&store, secrets.as_ref(), &mut settings);
+        // 保存済み設定に残った旧既定値(codex の --skip-git-repo-check 欠落など)を
+        // 現行の既定値へ引き上げる。ユーザーが編集した値には触れない。
+        if questloom_core::settings::upgrade_stale_defaults(&mut settings) {
+            match store.set_settings(CORE_NAMESPACE, &settings) {
+                Ok(()) => tracing::info!("旧既定のままだった設定値を現行の既定へ更新しました"),
+                Err(error) => tracing::error!(%error, "設定の既定値更新を保存できませんでした"),
+            }
+        }
         let backups_dir = data_dir.join(BACKUPS_DIR);
         match backup::create_backup(&store, &backups_dir, settings.backup_generations) {
             Ok(path) => tracing::info!(path = %path.display(), "起動時バックアップを作成しました"),
