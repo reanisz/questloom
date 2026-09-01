@@ -9,7 +9,7 @@
  * (ショートカット文字列のパースだけはバックエンド専任)。
  */
 
-import type { AiProvider, CoreSettings, WeekStart } from "./types";
+import type { AiProvider, CoreSettings, UrlOpenMode, WeekStart } from "./types";
 
 /**
  * 設定画面の節。
@@ -55,6 +55,7 @@ export interface SettingsDraft {
   overlayEnabled: boolean;
   globalShortcut: string;
   autostart: boolean;
+  urlOpenMode: UrlOpenMode;
   mcpEnabled: boolean;
   mcpPort: string;
   /*
@@ -146,6 +147,7 @@ export function toDraft(settings: CoreSettings): SettingsDraft {
     overlayEnabled: settings.overlayEnabled,
     globalShortcut: settings.globalShortcut,
     autostart: settings.autostart,
+    urlOpenMode: settings.urlOpenMode,
     mcpEnabled: settings.mcpEnabled,
     mcpPort: String(settings.mcpPort),
     aiProviders: settings.aiProviders.map((provider) => ({
@@ -184,6 +186,7 @@ export function fromDraft(draft: SettingsDraft): CoreSettings {
     overlayEnabled: draft.overlayEnabled,
     globalShortcut: draft.globalShortcut.trim(),
     autostart: draft.autostart,
+    urlOpenMode: draft.urlOpenMode,
     mcpEnabled: draft.mcpEnabled,
     mcpPort: Number(draft.mcpPort),
     aiProviders: providers,

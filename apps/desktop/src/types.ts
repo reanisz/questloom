@@ -55,6 +55,17 @@ export type Scheduled =
 /** 週の開始曜日。 */
 export type WeekStart = "monday" | "sunday";
 
+/**
+ * URL の関連リソースをクリックしたときの既定の開き方。
+ *
+ * - `external` — OS の既定ブラウザ(既定)
+ * - `internal` — アプリ内蔵のブラウザペイン
+ * - `internalAuto` — 内蔵ペイン + タスク詳細を開いたら主リソースを自動表示
+ *
+ * 「内蔵で開く」「外部で開く」の明示的な操作はモードに関わらず常に使える。
+ */
+export type UrlOpenMode = "external" | "internal" | "internalAuto";
+
 /** タスク本体。 */
 export interface Task {
   id: TaskId;
@@ -224,6 +235,8 @@ export interface CoreSettings {
   globalShortcut: string;
   /** OS ログイン時に自動起動するか。 */
   autostart: boolean;
+  /** URL の関連リソースをクリックしたときの既定の開き方。 */
+  urlOpenMode: UrlOpenMode;
   /** 内蔵 MCP サーバーを起動するか。 */
   mcpEnabled: boolean;
   /** MCP サーバーの待受ポート(バインドは 127.0.0.1 のみ)。 */

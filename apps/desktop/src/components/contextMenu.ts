@@ -9,7 +9,14 @@
 import type { TaskCard } from "../types";
 
 /** メニュー項目の識別子。DOM では `data-testid="context-<action>"` になる。 */
-export type ContextMenuAction = "open" | "complete" | "promote" | "move" | "url" | "delete";
+export type ContextMenuAction =
+  | "open"
+  | "complete"
+  | "promote"
+  | "move"
+  | "url"
+  | "url-internal"
+  | "delete";
 
 /** 出し分けの判断に要るカードの属性だけ。テストから作りやすくするために絞ってある。 */
 export type ContextMenuTarget = Pick<TaskCard, "status" | "isInstant" | "primaryResource">;
@@ -34,14 +41,15 @@ export const MENU_MARGIN = 8;
  *
  * - 完了済みのタスクに「完了にする」は出さない。
  * - 「昇格」はインスタントタスクだけ(通常タスクは既に列を持っている)。
- * - 「URL を開く」は主リソースが URL のときだけ(ファイルはドロワーから開く)。
+ * - 「URL を開く」(既定ブラウザ)と「内蔵ブラウザで開く」は、
+ *   主リソースが URL のときだけ(ファイルはドロワーから開く)。既定の方を先に出す。
  */
 export function contextMenuActions(card: ContextMenuTarget): ContextMenuAction[] {
   const actions: ContextMenuAction[] = ["open"];
   if (card.status !== "done") actions.push("complete");
   if (card.isInstant) actions.push("promote");
   actions.push("move");
-  if (card.primaryResource?.kind === "url") actions.push("url");
+  if (card.primaryResource?.kind === "url") actions.push("url", "url-internal");
   actions.push("delete");
   return actions;
 }

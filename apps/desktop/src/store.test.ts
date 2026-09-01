@@ -74,6 +74,9 @@ function reset(initial: Partial<ReturnType<typeof useBoardStore.getState>> = {})
     selectedId: null,
     ready: false,
     error: null,
+    paneUrl: null,
+    paneOccluders: 0,
+    urlOpenMode: "external",
     ...initial,
   });
 }
@@ -81,6 +84,7 @@ function reset(initial: Partial<ReturnType<typeof useBoardStore.getState>> = {})
 beforeEach(() => {
   vi.mocked(api.getBoard).mockReset();
   vi.mocked(api.getTask).mockReset();
+  vi.mocked(api.getSettings).mockReset();
   reset();
 });
 
@@ -295,5 +299,50 @@ describe("openTask / closeTask", () => {
     useBoardStore.getState().closeTask();
     expect(useBoardStore.getState().selectedId).toBeNull();
     expect(useBoardStore.getState().detail).toBeNull();
+  });
+});
+
+/**
+ * 内蔵ブラウザペインの状態。
+ *
+ * webview の生成そのものは `components/BrowserPane.tsx` の役目で、ストアが持つのは
+ * 「どの URL を開くか」と「いま覆われているか」だけ。
+ */
+describe("内蔵ブラウザペイン", () => {
+  it("開く / 差し替える / 閉じる", () => {
+    useBoardStore.getState().openPane("https://example.com");
+    expect(useBoardStore.getState().paneUrl).toBe("https://example.com");
+
+    useBoardStore.getState().openPane("https://example.org");
+    expect(useBoardStore.getState().paneUrl).toBe("https://example.org");
+
+    useBoardStore.getState().closePane();
+    expect(useBoardStore.getState().paneUrl).toBeNull();
+  });
+
+  it("覆う UI の数を数え、閉じ過ぎても負にしない", () => {
+    const occlude = useBoardStore.getState().occludePane;
+    occlude(1);
+    occlude(1);
+    expect(useBoardStore.getState().paneOccluders).toBe(2);
+
+    occlude(-1);
+    occlude(-1);
+    // 開閉が入れ違って余分に減っても 0 で止める(負のままだとずっと隠れる)。
+    occlude(-1);
+    expect(useBoardStore.getState().paneOccluders).toBe(0);
+  });
+
+  it("URL の開き方をコア設定から読む", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({ urlOpenMode: "internalAuto" } as never);
+    await useBoardStore.getState().loadUrlOpenMode();
+    expect(useBoardStore.getState().urlOpenMode).toBe("internalAuto");
+  });
+
+  it("設定が読めなくても既定の external のままにする", async () => {
+    vi.mocked(api.getSettings).mockRejectedValue(new Error("読めません"));
+    await useBoardStore.getState().loadUrlOpenMode();
+    expect(useBoardStore.getState().urlOpenMode).toBe("external");
+    expect(useBoardStore.getState().error).toBeNull();
   });
 });

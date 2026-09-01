@@ -20,13 +20,12 @@
  * Esc は [`ESC_LAYER.popup`] なので、後ろのドロワーやダイアログは道連れにならない。
  */
 
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import * as api from "../api";
+import { openExternal, useOccludePane } from "../browserPane";
 import { ESC_LAYER, useEscapeKey } from "../keyboard";
 import { useBoardStore } from "../store";
-import { toMessage } from "../tauri";
 import {
   BOARD_COLUMNS,
   columnLabel,
@@ -94,7 +93,10 @@ function Item({
 export function TaskContextMenu({ card, column, anchor, onClose, onDelete }: Props) {
   const mutate = useBoardStore((state) => state.mutate);
   const openTask = useBoardStore((state) => state.openTask);
-  const setError = useBoardStore((state) => state.setError);
+  const openPane = useBoardStore((state) => state.openPane);
+
+  // 内蔵ブラウザペイン(子 webview)は HTML の上に描かれるので、開いている間は隠す。
+  useOccludePane();
 
   const [level, setLevel] = useState<Level>("root");
   /** 補正後の左上座標。測るまでは null で、その間は隠しておく(ちらつき防止)。 */
@@ -172,12 +174,26 @@ export function TaskContextMenu({ card, column, anchor, onClose, onDelete }: Pro
             onSelect={() =>
               run(() => {
                 const value = card.primaryResource?.value;
-                if (!value) return;
-                openUrl(value).catch((error: unknown) => setError(toMessage(error)));
+                if (value) openExternal(value);
               })
             }
           >
             🔗 URL を開く
+          </Item>
+        );
+      case "url-internal":
+        return (
+          <Item
+            key={action}
+            action="url-internal"
+            onSelect={() =>
+              run(() => {
+                const value = card.primaryResource?.value;
+                if (value) openPane(value);
+              })
+            }
+          >
+            🌐 内蔵ブラウザで開く
           </Item>
         );
       case "delete":

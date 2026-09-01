@@ -34,6 +34,40 @@ impl WeekStart {
     }
 }
 
+/// URL の関連リソースをクリックしたときの既定の開き方。
+///
+/// 「内蔵ブラウザで開く / 既定のブラウザで開く」の**明示的な**操作は、この設定に
+/// 関わらずどちらも使える(右クリックメニューとリソース行のボタン)。ここで決めるのは
+/// あくまで**クリックしたときの既定**と、詳細を開いたときの自動表示。
+///
+/// 内蔵ブラウザの実体はシェル側(`questloom-desktop` の `browser` モジュール)にあり、
+/// コアは利用者の選択を保持するだけ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UrlOpenMode {
+    /// OS の既定ブラウザで開く(既定)。
+    #[default]
+    External,
+    /// アプリ内蔵のブラウザペインで開く。
+    Internal,
+    /// 内蔵ペインで開き、さらにタスク詳細を開いたとき主リソースが URL なら自動で表示する。
+    InternalAuto,
+}
+
+impl UrlOpenMode {
+    /// 内蔵ペインを既定の開き先にするモードか。
+    #[must_use]
+    pub const fn uses_internal_pane(self) -> bool {
+        matches!(self, Self::Internal | Self::InternalAuto)
+    }
+
+    /// タスク詳細を開いたときに主リソースを自動で表示するか。
+    #[must_use]
+    pub const fn opens_automatically(self) -> bool {
+        matches!(self, Self::InternalAuto)
+    }
+}
+
 /// ボード表示に関わる設定だけを抜き出したもの。
 ///
 /// [`TaskService`](crate::service::TaskService) が保持するのはこれだけで、
@@ -181,6 +215,8 @@ pub struct CoreSettings {
     pub global_shortcut: String,
     /// OS へのログイン時に自動起動するか。
     pub autostart: bool,
+    /// URL の関連リソースをクリックしたときの既定の開き方。
+    pub url_open_mode: UrlOpenMode,
     /// 内蔵 MCP サーバーを起動するか。
     pub mcp_enabled: bool,
     /// MCP サーバーの待受ポート(バインドは 127.0.0.1 のみ)。
@@ -213,6 +249,7 @@ impl Default for CoreSettings {
             overlay_enabled: true,
             global_shortcut: DEFAULT_GLOBAL_SHORTCUT.to_owned(),
             autostart: false,
+            url_open_mode: UrlOpenMode::External,
             mcp_enabled: true,
             mcp_port: DEFAULT_MCP_PORT,
             legacy_mcp_token: None,
@@ -347,6 +384,7 @@ mod tests {
         assert!(settings.overlay_enabled);
         assert_eq!(settings.global_shortcut, "Ctrl+Space");
         assert!(!settings.autostart);
+        assert_eq!(settings.url_open_mode, UrlOpenMode::External);
         assert!(settings.mcp_enabled);
         assert_eq!(settings.mcp_port, DEFAULT_MCP_PORT);
         assert_eq!(settings.legacy_mcp_token, None);
@@ -390,6 +428,8 @@ mod tests {
         // Phase 1 以前に保存された JSON でも、追加フィールドは既定値で補われる。
         assert!(parsed.overlay_enabled);
         assert_eq!(parsed.global_shortcut, DEFAULT_GLOBAL_SHORTCUT);
+        // 内蔵ブラウザを足す前に保存された JSON でも、既定は「外部ブラウザ」。
+        assert_eq!(parsed.url_open_mode, UrlOpenMode::External);
         assert!(parsed.mcp_enabled);
         assert_eq!(parsed.mcp_port, DEFAULT_MCP_PORT);
         // Phase 4 以前に保存された JSON でも、AI プロバイダは既定の 3 つで補われる。
@@ -425,8 +465,42 @@ mod tests {
         assert_eq!(json["overlayEnabled"], true);
         assert_eq!(json["globalShortcut"], "Ctrl+Space");
         assert_eq!(json["autostart"], false);
+        assert_eq!(json["urlOpenMode"], "external");
         assert_eq!(json["mcpEnabled"], true);
         assert_eq!(json["mcpPort"], 39150);
+    }
+
+    /// URL の開き方は camelCase の文字列で往復し、未知の値は保存を拒む。
+    #[test]
+    fn url_open_mode_round_trips_as_camel_case() {
+        for (json, mode) in [
+            ("external", UrlOpenMode::External),
+            ("internal", UrlOpenMode::Internal),
+            ("internalAuto", UrlOpenMode::InternalAuto),
+        ] {
+            let parsed: CoreSettings =
+                serde_json::from_str(&format!(r#"{{"urlOpenMode":"{json}"}}"#)).unwrap();
+            assert_eq!(parsed.url_open_mode, mode);
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap()["urlOpenMode"],
+                serde_json::Value::String(json.to_owned())
+            );
+        }
+
+        // 綴りを間違えた値は既定へ落とさず、読み込みごと失敗させる
+        // (設定ファイルを直接編集したときに気づけるように)。
+        assert!(serde_json::from_str::<CoreSettings>(r#"{"urlOpenMode":"inline"}"#).is_err());
+    }
+
+    #[test]
+    fn url_open_mode_answers_what_the_ui_asks() {
+        assert!(!UrlOpenMode::External.uses_internal_pane());
+        assert!(UrlOpenMode::Internal.uses_internal_pane());
+        assert!(UrlOpenMode::InternalAuto.uses_internal_pane());
+
+        assert!(!UrlOpenMode::External.opens_automatically());
+        assert!(!UrlOpenMode::Internal.opens_automatically());
+        assert!(UrlOpenMode::InternalAuto.opens_automatically());
     }
 
     /// MCP トークンは **設定 JSON に書き戻さない**(実体は OS の資格情報ストア)。

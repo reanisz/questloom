@@ -43,6 +43,11 @@ pub const APP_COMMANDS: &[&str] = &[
     "set_settings",
     "get_runtime_status",
     "show_main_window",
+    // 内蔵ブラウザペイン(main ウィンドウ専用)
+    "browser_pane_open",
+    "browser_pane_close",
+    "browser_pane_set_bounds",
+    "browser_pane_set_visible",
     // MCP トークン(値は返さない。main ウィンドウ専用)
     "get_mcp_token_status",
     "set_mcp_token",

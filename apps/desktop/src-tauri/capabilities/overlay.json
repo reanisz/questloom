@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay",
-  "description": "Capability for the overlay notification window. It only lists New tasks, so it may read the board, complete a task and raise the main window.",
-  "windows": ["overlay"],
+  "description": "Capability for the overlay notification window. It only lists New tasks, so it may read the board, complete a task and raise the main window. Granted by webview label (see capabilities/default.json) so that any future child webview stays outside it.",
+  "webviews": ["overlay"],
   "permissions": [
     "core:default",
     "core:window:allow-set-size",

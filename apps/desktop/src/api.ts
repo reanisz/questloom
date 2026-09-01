@@ -135,6 +135,45 @@ export const showMainWindow = (taskId?: TaskId) =>
   call<void>("show_main_window", { taskId: taskId ?? null });
 
 /**
+ * 内蔵ブラウザペインの矩形(main ウィンドウのクライアント領域基準・論理ピクセル)。
+ *
+ * 子 webview はネイティブの子ウィンドウなので、CSS では位置を決められない。
+ * React 側が実寸を測ってここへ渡す。
+ */
+export interface PaneBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * URL を内蔵ブラウザペイン(main ウィンドウの子 webview)で開く。
+ *
+ * 既に開いていれば URL を差し替える。`bounds` を渡すとその矩形に合わせる
+ * (省略時はウィンドウ左側の当て推量)。`http` / `https` 以外と、questloom 自身の
+ * 生成元 (`*.localhost`) はエラーになる。
+ */
+export const openBrowserPane = (url: string, bounds?: PaneBounds) =>
+  call<void>("browser_pane_open", { url, bounds: bounds ?? null });
+
+/** 内蔵ブラウザペインを閉じる(子 webview を破棄する。冪等)。 */
+export const closeBrowserPane = () => call<void>("browser_pane_close");
+
+/** 内蔵ブラウザペインの矩形を更新する。開いていなければ何もしない。 */
+export const setBrowserPaneBounds = (bounds: PaneBounds) =>
+  call<void>("browser_pane_set_bounds", { bounds });
+
+/**
+ * 内蔵ブラウザペインの表示・非表示を切り替える。
+ *
+ * 子 webview は HTML より必ず前面に描かれるので、ドロワーやモーダルを開く間は
+ * 隠す(閉じないのでページの状態は保たれる)。
+ */
+export const setBrowserPaneVisible = (visible: boolean) =>
+  call<void>("browser_pane_set_visible", { visible });
+
+/**
  * 文章からタスクを抽出して作成する。
  *
  * `providerId` 省略時は設定の既定プロバイダ。実行中に別の AI 実行を投げると拒否される。

@@ -3,10 +3,11 @@
  * 関連リソース、状態アップデート履歴、親子タスクを扱う。
  */
 
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 
 import * as api from "../api";
+import { openByMode, openExternal } from "../browserPane";
 import {
   formatScheduled,
   formatStatus,
@@ -18,17 +19,31 @@ import {
 import { ESC_LAYER, onCtrlEnter, useEscapeKey } from "../keyboard";
 import { useBoardStore } from "../store";
 import { toMessage } from "../tauri";
-import type { BoardColumnKey, ResourceKind, TaskCard, TaskDetail, TaskId } from "../types";
+import type {
+  BoardColumnKey,
+  ResourceKind,
+  TaskCard,
+  TaskDetail,
+  TaskId,
+  UrlOpenMode,
+} from "../types";
 import { AiSplitDialog } from "./AiSplitDialog";
 import { DeleteConfirmDialog } from "./DeleteConfirmDialog";
 import { PromoteMenu } from "./PromoteMenu";
 
-/** リソースを既定のアプリで開く。file はエクスプローラで場所を表示する。 */
-async function openResource(kind: ResourceKind, value: string) {
+/**
+ * リソース名のクリック。URL は設定 (`urlOpenMode`) に従って開き、
+ * file はエクスプローラで場所を表示する。
+ *
+ * 行の ↗ / 🌐 ボタンは設定に関わらず、それぞれ外部ブラウザ・内蔵ペインで開く。
+ */
+function openResource(kind: ResourceKind, value: string, mode: UrlOpenMode) {
   if (kind === "url") {
-    await openUrl(value);
+    openByMode(value, mode);
   } else {
-    await revealItemInDir(value);
+    revealItemInDir(value).catch((error: unknown) =>
+      useBoardStore.getState().setError(toMessage(error)),
+    );
   }
 }
 
@@ -55,6 +70,8 @@ function DrawerBody({
 }) {
   const mutate = useBoardStore((state) => state.mutate);
   const openTask = useBoardStore((state) => state.openTask);
+  const openPane = useBoardStore((state) => state.openPane);
+  const urlOpenMode = useBoardStore((state) => state.urlOpenMode);
 
   const [title, setTitle] = useState(detail.title);
   const [description, setDescription] = useState(detail.description);
@@ -63,6 +80,21 @@ function DrawerBody({
   const [resourceKind, setResourceKind] = useState<ResourceKind>("url");
   const [resourceValue, setResourceValue] = useState("");
   const [resourceLabel, setResourceLabel] = useState("");
+
+  /*
+   * `internalAuto` のときは、詳細を開いた時点で主リソース(URL)をペインに出す。
+   * このコンポーネントは `key={detail.id}` で作り直されるので、
+   * 「タスクを開いたとき 1 回」= マウント時 1 回でよい。
+   *
+   * ドロワーはペインを隠さない(隠すと自動表示の意味が無い)。重ならないことは
+   * CSS 側で担保している(`--browser-pane-width` を使ったドロワー幅の上限)。
+   */
+  const autoOpen = urlOpenMode === "internalAuto";
+  const primaryUrl = detail.primaryResource?.kind === "url" ? detail.primaryResource.value : null;
+  useEffect(() => {
+    if (autoOpen && primaryUrl) openPane(primaryUrl);
+    // 開いた瞬間の値だけを見る。以後の再フェッチでは開き直さない。
+  }, []);
 
   const saveTitle = () => {
     const next = title.trim();
@@ -226,16 +258,44 @@ function DrawerBody({
               <button
                 type="button"
                 className="resource-open"
-                title={resource.value}
-                onClick={() => {
-                  openResource(resource.kind, resource.value).catch((error: unknown) =>
-                    useBoardStore.getState().setError(toMessage(error)),
-                  );
-                }}
+                title={
+                  resource.kind === "url"
+                    ? `${resource.value}\n${
+                        urlOpenMode === "external"
+                          ? "既定のブラウザで開く"
+                          : "内蔵ブラウザで開く"
+                      } (設定の「URL リソースの開き方」)`
+                    : `${resource.value}\nエクスプローラで場所を表示する`
+                }
+                onClick={() => openResource(resource.kind, resource.value, urlOpenMode)}
               >
                 {resource.label || resource.value}
               </button>
               <span className="badge">{resource.kind === "url" ? "URL" : "ファイル"}</span>
+              {resource.kind === "url" && (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    data-testid="resource-open-external"
+                    aria-label="既定のブラウザで開く"
+                    title={`${resource.value}\n既定のブラウザで開く`}
+                    onClick={() => openExternal(resource.value)}
+                  >
+                    ↗
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    data-testid="resource-open-internal"
+                    aria-label="内蔵ブラウザで開く"
+                    title={`${resource.value}\nquestloom の内蔵ブラウザペインで開く`}
+                    onClick={() => openPane(resource.value)}
+                  >
+                    🌐
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"

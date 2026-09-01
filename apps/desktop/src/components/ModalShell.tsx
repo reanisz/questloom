@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { useOccludePane } from "../browserPane";
 import { ESC_LAYER, useEscapeKey } from "../keyboard";
 
 /** フォーカスを当てられる要素のセレクタ。 */
@@ -51,6 +52,10 @@ interface Props {
 
 export function ModalShell({ title, onClose, busy = false, className, footer, children }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  // 内蔵ブラウザペイン(子 webview)は HTML の上に描かれるので、開いている間は隠す。
+  // そうしないとダイアログがペインの後ろに回り込んで操作できなくなる。
+  useOccludePane();
 
   // 実行中は閉じない。Esc はこのレイヤーで止める(下のドロワーへ渡さない)。
   useEscapeKey(() => {

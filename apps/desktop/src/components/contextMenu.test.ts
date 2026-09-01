@@ -63,12 +63,18 @@ describe("contextMenuActions", () => {
     ]);
   });
 
-  it("主リソースが URL のときだけ「URL を開く」を出す", () => {
-    expect(contextMenuActions(target({ primaryResource: resource("url") }))).toContain("url");
+  it("主リソースが URL のときだけ「URL を開く」と「内蔵ブラウザで開く」を出す", () => {
+    const actions = contextMenuActions(target({ primaryResource: resource("url") }));
+    expect(actions).toContain("url");
+    expect(actions).toContain("url-internal");
+    // 外部ブラウザ(既定の動作)が先。
+    expect(actions.indexOf("url-internal")).toBe(actions.indexOf("url") + 1);
   });
 
-  it("主リソースがファイルなら「URL を開く」は出さない", () => {
-    expect(contextMenuActions(target({ primaryResource: resource("file") }))).not.toContain("url");
+  it("主リソースがファイルなら URL 系の項目は出さない", () => {
+    const actions = contextMenuActions(target({ primaryResource: resource("file") }));
+    expect(actions).not.toContain("url");
+    expect(actions).not.toContain("url-internal");
   });
 
   it("削除は常に最後", () => {

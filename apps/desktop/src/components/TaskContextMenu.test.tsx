@@ -65,6 +65,16 @@ describe("TaskContextMenu", () => {
     view.unmount();
   });
 
+  it("主リソースが URL なら、外部ブラウザと内蔵ブラウザの両方を描く", () => {
+    const view = setup(
+      card({
+        primaryResource: { kind: "url", value: "https://example.com" } as TaskCard["primaryResource"],
+      }),
+    );
+    expect(view.actions()).toEqual(["open", "complete", "move", "url", "url-internal", "delete"]);
+    view.unmount();
+  });
+
   it("完了済みには「完了にする」を描かない", () => {
     const view = setup(card({ status: "done" }));
     expect(view.item("complete")).toBeNull();

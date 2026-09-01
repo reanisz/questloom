@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "plugin-host",
-  "description": "Capability for the hidden TypeScript plugin host window. Third party plugin code runs here, so it only gets the plugin runtime commands plus the task operations exposed through ctx.tasks. Settings and AI commands are deliberately left out. It can read its own plugin secrets (plugin code needs the values) but never write them.",
-  "windows": ["plugin-host"],
+  "description": "Capability for the hidden TypeScript plugin host window. Third party plugin code runs here, so it only gets the plugin runtime commands plus the task operations exposed through ctx.tasks. Settings and AI commands are deliberately left out. It can read its own plugin secrets (plugin code needs the values) but never write them. Granted by webview label (see capabilities/default.json) so that any future child webview stays outside it.",
+  "webviews": ["plugin-host"],
   "permissions": [
     "core:default",
 

@@ -17,7 +17,15 @@
 //! ウィンドウの見た目・capability の対応づけは従来どおり conf と
 //! `capabilities/*.json` で決まる。
 //!
-//! **ウィンドウごとの command 許可**は `capabilities/*.json` で決まる。
+//! main ウィンドウにはもう 1 枚、内蔵ブラウザペインの子 webview([`browser`])が
+//! 重なることがある。こちらはウィンドウではなく **`Window::add_child` による子 webview** で、
+//! 開く URL が決まったときに実行時生成する。第三者のページが載るので capability は
+//! 一切割り当てない(= IPC を使えない)。
+//!
+//! **webview ごとの command 許可**は `capabilities/*.json` で決まる。
+//! 割り当ては**ウィンドウラベルではなく webview ラベル**(`"webviews": [...]`)で書く。
+//! `"windows": ["main"]` にすると、main ウィンドウの中の子 webview
+//! (= 外部ページ)にも同じ権限が渡ってしまうため([`browser`] のモジュールドキュメント参照)。
 //! アプリ独自 command の一覧は [`app_commands::APP_COMMANDS`] が唯一の定義で、
 //! `build.rs` がそこから permission を生成する。下の
 //! [`tauri::generate_handler!`] とは 1 対 1 で対応させること
@@ -31,6 +39,7 @@ pub mod ai;
 /// (`include!` される都合でモジュールドキュメントを持てないため、説明はここに置く)。
 pub mod app_commands;
 pub mod autostart;
+pub mod browser;
 pub mod commands;
 pub mod contract;
 pub mod env_override;
@@ -157,6 +166,10 @@ pub fn run() {
             commands::set_settings,
             commands::get_runtime_status,
             commands::show_main_window,
+            browser::browser_pane_open,
+            browser::browser_pane_close,
+            browser::browser_pane_set_bounds,
+            browser::browser_pane_set_visible,
             commands::get_mcp_token_status,
             commands::set_mcp_token,
             ai::ai_create_tasks,
@@ -194,6 +207,10 @@ pub fn run() {
 /// 定義はすべて `"create": false` にしてあるので、Tauri は自動生成しない。
 /// ここでは定義をそのまま [`tauri::WebviewWindowBuilder::from_config`] に渡すだけで、
 /// サイズ・可視性・フォーカス等の属性は conf 側の記述がそのまま効く。
+///
+/// 内蔵ブラウザペイン([`browser`])はこの対象ではない。ウィンドウではなく main の
+/// 子 webview で、開く URL が実行時にしか決まらないので、
+/// [`browser::browser_pane_open`] が呼ばれたときに生成する。
 ///
 /// # Errors
 /// ウィンドウの生成に失敗した場合。
@@ -272,6 +289,93 @@ mod tests {
                 window["label"]
             );
         }
+    }
+
+    /// 内蔵ブラウザペインは conf に定義せず、IPC の抜け道も開けない。
+    ///
+    /// - `app.windows` に `browser-pane` を足すと、URL の無いウィンドウが起動時に 1 枚増える
+    ///   (実体はウィンドウではなく main の子 webview で、生成は
+    ///   [`crate::browser::browser_pane_open`] が実行時に行う)。
+    /// - `dangerousRemoteDomainIpcAccess` はリモート生成元へ IPC を開ける唯一の設定なので、
+    ///   設定ごと持たない。
+    #[test]
+    fn the_browser_pane_is_not_configured() {
+        let value: serde_json::Value =
+            serde_json::from_str(CONFIG).expect("tauri.conf.json は JSON として読める");
+        let labels: Vec<&str> = value["app"]["windows"]
+            .as_array()
+            .expect("app.windows は配列")
+            .iter()
+            .filter_map(|window| window["label"].as_str())
+            .collect();
+        assert!(
+            !labels.contains(&crate::browser::BROWSER_PANE),
+            "browser-pane は conf に定義しないこと(実行時に子 webview として作る)"
+        );
+        assert!(
+            value["app"]["security"]["dangerousRemoteDomainIpcAccess"].is_null(),
+            "dangerousRemoteDomainIpcAccess は使わないこと"
+        );
+    }
+
+    /// capability の割り当ては**ウィンドウラベルではなく webview ラベル**で書く。
+    ///
+    /// Tauri の `RuntimeAuthority::resolve_access` は「webview ラベルが一致 **または**
+    /// ウィンドウラベルが一致」で通す。内蔵ブラウザペインは main ウィンドウの中の
+    /// 子 webview なので、`"windows": ["main"]` にすると**外部ページに main の全権限が
+    /// 渡ってしまう**。`"webviews"` で配れば、ラベルが違う子 webview は構造的に外れる。
+    ///
+    /// `remote` 節も持たせない。これがあると外部生成元からの invoke が capability と
+    /// 照合されるようになり、上の分離が意味を失う。
+    ///
+    /// `capabilities/` を実際に走査するので、capability ファイルを足しても漏れは拾える
+    /// (走査そのものが空振りしていないことは、既知の 3 つと突き合わせて確かめる)。
+    #[test]
+    fn capabilities_are_granted_by_webview_label_and_never_to_the_browser_pane() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut identifiers = BTreeSet::new();
+        for entry in std::fs::read_dir(&dir).expect("capabilities/ が読める") {
+            let path = entry.expect("capabilities/ のエントリが読める").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("capability が読める");
+            let value: serde_json::Value =
+                serde_json::from_str(&text).expect("capability は JSON として読める");
+            let identifier = value["identifier"]
+                .as_str()
+                .expect("identifier がある")
+                .to_owned();
+
+            assert!(
+                value["windows"].is_null(),
+                "{identifier} は windows ではなく webviews で割り当てること(子 webview に権限が漏れる)"
+            );
+            assert!(
+                value["remote"].is_null(),
+                "{identifier} に remote 節を足さないこと(外部ページからの invoke が通るようになる)"
+            );
+
+            let webviews: Vec<&str> = value["webviews"]
+                .as_array()
+                .expect("webviews は配列")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            assert!(
+                !webviews.contains(&crate::browser::BROWSER_PANE),
+                "{identifier} に browser-pane を割り当ててはいけない(外部ページに IPC を渡すことになる)"
+            );
+            identifiers.insert(identifier);
+        }
+        let known: BTreeSet<String> = ["default", "overlay", "plugin-host"]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        assert_eq!(
+            identifiers, known,
+            "capability を増減したらこのテストの既知一覧も更新すること"
+        );
     }
 
     const MAIN: &str = include_str!("../capabilities/default.json");
@@ -387,6 +491,10 @@ mod tests {
             "plugin_secret_status",
             "plugin_directory",
             "plugin_list_loaded",
+            "browser_pane_open",
+            "browser_pane_close",
+            "browser_pane_set_bounds",
+            "browser_pane_set_visible",
         ]);
         for (name, capability) in [("overlay", OVERLAY), ("plugin-host", PLUGIN_HOST)] {
             let granted = app_permissions(capability);

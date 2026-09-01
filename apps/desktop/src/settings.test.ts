@@ -41,6 +41,7 @@ function defaults(): CoreSettings {
     overlayEnabled: true,
     globalShortcut: "Ctrl+Space",
     autostart: false,
+    urlOpenMode: "external",
     mcpEnabled: true,
     mcpPort: 39150,
     aiProviders: [
@@ -67,6 +68,28 @@ function defaults(): CoreSettings {
     aiTimeoutSecs: 300,
   };
 }
+
+/**
+ * URL リソースの開き方は、そのままドラフトを往復する
+ * (数値と違って編集途中の文字列にならないので、変換は素通し)。
+ */
+describe("urlOpenMode", () => {
+  it("既定は外部ブラウザ", () => {
+    expect(toDraft(defaults()).urlOpenMode).toBe("external");
+  });
+
+  it("ドラフトを往復しても失われない", () => {
+    for (const mode of ["external", "internal", "internalAuto"] as const) {
+      const settings: CoreSettings = { ...defaults(), urlOpenMode: mode };
+      expect(fromDraft(toDraft(settings)).urlOpenMode).toBe(mode);
+    }
+  });
+
+  it("変更は未保存として検出される", () => {
+    const baseline = toDraft(defaults());
+    expect(isDirty({ ...baseline, urlOpenMode: "internal" }, baseline)).toBe(true);
+  });
+});
 
 /** 既定のドラフトに差分をあてる。 */
 function draft(patch: Partial<SettingsDraft> = {}): SettingsDraft {

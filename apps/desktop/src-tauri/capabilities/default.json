@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window. The board / task drawer / settings page live here, so it gets every app command.",
-  "windows": ["main"],
+  "description": "Capability for the main window. The board / task drawer / settings page live here, so it gets every app command. Note this grants by WEBVIEW label, not window label: the main window also hosts the browser-pane child webview (crate::browser), and \"windows\": [\"main\"] would hand that third party page every permission below.",
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -33,6 +33,11 @@
     "allow-set-settings",
     "allow-get-runtime-status",
     "allow-show-main-window",
+
+    "allow-browser-pane-open",
+    "allow-browser-pane-close",
+    "allow-browser-pane-set-bounds",
+    "allow-browser-pane-set-visible",
 
     "allow-get-mcp-token-status",
     "allow-set-mcp-token",

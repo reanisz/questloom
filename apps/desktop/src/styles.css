@@ -79,6 +79,13 @@
   --column-min-expanded: 128px;
   --titlebar-height: 32px;
 
+  /*
+   * 内蔵ブラウザペインの幅。ドロワーの幅の上限もこれから決めるので変数にしてある
+   * (ドロワーがペインに重なると、ネイティブの子 webview がドロワーの上に描かれて
+   * 操作できなくなる)。
+   */
+  --browser-pane-width: max(360px, 45vw);
+
   color-scheme: dark;
   font-family: "Segoe UI", "Yu Gothic UI", "Meiryo", system-ui, -apple-system, sans-serif;
   font-size: 14px;
@@ -219,6 +226,82 @@ h3 {
   background: var(--danger-soft);
   box-shadow: inset 0 0 0 1px var(--danger);
   color: var(--text);
+}
+
+/* ---- 内蔵ブラウザペイン ---- */
+
+/*
+ * ペインはボードの左に場所を取るだけで、中身(ページ)は Rust 側が重ねる
+ * **ネイティブの子 webview**(`crate::browser`)。CSS で描けるのは枠だけで、
+ * 位置は `.browser-pane-body` の実寸を測って Tauri へ送る
+ * (`components/BrowserPane.tsx`)。
+ */
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+ * ペインが開いている間だけ、ドロワーの幅に上限を作る(`.drawer` が読む)。
+ * ドロワーは `position: fixed` だが、CSS 変数は DOM の親から継承されるので届く。
+ */
+.app-body:has(> .browser-pane) {
+  --drawer-limit: calc(100vw - var(--browser-pane-width) - 12px);
+}
+
+.app-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * ドロワー(z-index 50/51)より上に置く。ドロワーを開いてもペインのヘッダを
+ * 使えるようにするため(ネイティブの子 webview は暗幕の影響を受けないので、
+ * ヘッダだけ暗くなって押せない、という食い違いも避けられる)。
+ * モーダル(60/61)より下なので、モーダル中はきちんと暗幕の下に入る。
+ */
+.browser-pane {
+  position: relative;
+  z-index: 52;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 var(--browser-pane-width);
+  min-width: 0;
+  background: var(--app-tint);
+  box-shadow: inset -1px 0 0 var(--border);
+}
+
+.browser-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 28px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+
+.browser-pane-url {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* 長い URL は末尾ではなく先頭(スキームとホスト)を残したいので、方向は既定のまま。 */
+  direction: ltr;
+}
+
+/* 子 webview が乗る箱。隠している間だけ見える地色を敷いておく。 */
+.browser-pane-body {
+  flex: 1;
+  min-height: 0;
+  background: var(--surface-2);
 }
 
 /* ---- ボード ---- */
@@ -662,12 +745,15 @@ textarea {
 
 /*
  * 昇格メニューと同じガラスのポップオーバー。違いは「カーソル位置に fixed で置く」
- * ことだけ(座標は TaskContextMenu が測って決める)。ドロワー (50/51) より下、
- * ボードより上に出す。
+ * ことだけ(座標は TaskContextMenu が測って決める)。
+ * メニューはボードの端まで張り出しうるので、内蔵ブラウザペイン (52) より上に出す
+ * (ペインの子 webview 自体はメニューを開いている間だけ隠している)。
+ * モーダル (60/61) より下。
  */
 .context-menu {
   position: fixed;
-  z-index: 45;
+  /* 内蔵ブラウザペイン(52)より上。メニューがペインの上に張り出しても隠れない。 */
+  z-index: 55;
   min-width: 176px;
   padding: 4px;
   border-radius: var(--radius-sm);
@@ -761,7 +847,12 @@ textarea {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(480px, 92vw);
+  /*
+   * 内蔵ブラウザペインが開いている間は、ペインに重ならない幅までしか広がらない
+   * (`--drawer-limit` は `.app-body:has(> .browser-pane)` でだけ定義される)。
+   * 重なると、ネイティブの子 webview がドロワーの上に描かれて操作できなくなる。
+   */
+  width: min(480px, 92vw, var(--drawer-limit, 100vw));
   display: flex;
   flex-direction: column;
   background: var(--panel);
@@ -1420,6 +1511,23 @@ textarea {
   align-items: center;
   gap: 8px;
   cursor: pointer;
+}
+
+/* ラジオの縦並び(3 択の設定)。各項目は補足を 1 行下に持てる。 */
+.settings-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-radios .settings-check {
+  align-items: flex-start;
+}
+
+.settings-radio-hint {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .settings-text {
