@@ -250,6 +250,19 @@ h3 {
   --drawer-limit: calc(100vw - var(--browser-pane-width) - 12px);
 }
 
+/*
+ * ペインが開いている間は、ペインとボードの間の余白を詰める
+ * (通常時の左 padding 16px は、ペインの境界線と合わさると無駄な隙間に見えるため)。
+ * ヘッダ側の左余白も揃えて詰める。
+ */
+.app-body:has(> .browser-pane) .board {
+  padding-left: 6px;
+}
+
+.app-body:has(> .browser-pane) .app-header {
+  padding-left: 8px;
+}
+
 .app-main {
   display: flex;
   flex: 1;
