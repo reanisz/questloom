@@ -28,20 +28,33 @@ import { describe, it } from "node:test";
 globalThis.defineQuestloomPlugin = (plugin) => plugin;
 
 const {
+  buildInboxDescription,
+  buildInboxTitle,
+  buildMentionQuery,
   buildPrDescription,
   buildReasons,
+  buildReviewRequestQuery,
   collectDescriptionTargets,
   collectPullRequestTargets,
+  collectTrackedKeys,
+  decideInboxNotification,
   decideNoticeAction,
   mergeCi,
+  mergeInboxItems,
+  nextInboxState,
+  parseIssueOrPullUrl,
   parsePullRequestUrl,
+  planInboxPrune,
   planNotification,
   pullRequestApiPath,
+  searchApiPath,
+  selectInboxCandidates,
   selectNewComments,
   shouldFillDescription,
   shouldNotifyCiFailure,
   summarizeCheckRuns,
   summarizeCombinedStatus,
+  toInboxItems,
   truncateBody,
 } = await import("./github.ts");
 
@@ -502,5 +515,423 @@ describe("buildPrDescription", () => {
     const description = buildPrDescription({ title: "T", body }, ref);
     const tail = description.split("\n\n")[1];
     assert.equal(tail, `${"あ".repeat(400)}…`);
+  });
+});
+
+/* ==================== 受信箱(レビュー依頼・メンション)==================== */
+
+/** `InboxItem` を組み立てる小道具。 */
+const inboxItem = (url, over = {}) => ({
+  ref: parseIssueOrPullUrl(url),
+  title: "タイトル",
+  author: "alice",
+  updatedAt: "2026-09-01T00:00:00Z",
+  kinds: ["mention"],
+  ...over,
+});
+
+describe("parseIssueOrPullUrl", () => {
+  it("PR の URL は isPullRequest: true で返す", () => {
+    assert.deepEqual(parseIssueOrPullUrl("https://github.com/o/r/pull/7/files"), {
+      owner: "o",
+      repo: "r",
+      number: 7,
+      key: "o/r#7",
+      url: "https://github.com/o/r/pull/7",
+      isPullRequest: true,
+    });
+  });
+
+  it("issue の URL は isPullRequest: false で返し、URL も /issues/ に正規化する", () => {
+    assert.deepEqual(parseIssueOrPullUrl("https://github.com/o/r/issues/7#issuecomment-1"), {
+      owner: "o",
+      repo: "r",
+      number: 7,
+      key: "o/r#7",
+      url: "https://github.com/o/r/issues/7",
+      isPullRequest: false,
+    });
+  });
+
+  it("issue と PR は同じ番号空間なのでキーがそろう(追跡済み判定に効く)", () => {
+    assert.equal(
+      parseIssueOrPullUrl("https://github.com/Foo/Bar/issues/9").key,
+      parseIssueOrPullUrl("https://github.com/foo/bar/pull/9").key,
+    );
+  });
+
+  it("issue でも PR でもない URL は拾わない", () => {
+    for (const url of [
+      "https://github.com/o/r/discussions/1",
+      "https://github.com/o/r/commit/abc",
+      "https://gitlab.com/o/r/issues/1",
+      "https://github.com.evil.test/o/r/issues/1",
+      "",
+    ]) {
+      assert.equal(parseIssueOrPullUrl(url), null, url);
+    }
+  });
+
+  it("parsePullRequestUrl は issue を弾き、isPullRequest を含まない形で返す", () => {
+    assert.equal(parsePullRequestUrl("https://github.com/o/r/issues/7"), null);
+    assert.deepEqual(Object.keys(parsePullRequestUrl("https://github.com/o/r/pull/7")), [
+      "owner",
+      "repo",
+      "number",
+      "key",
+      "url",
+    ]);
+  });
+});
+
+describe("検索クエリ", () => {
+  it("レビュー依頼は @me で引く(login を取りに行かなくて済む)", () => {
+    assert.equal(buildReviewRequestQuery(), "type:pr state:open review-requested:@me");
+  });
+
+  it("メンションは前回確認時刻からの更新に絞る", () => {
+    assert.equal(
+      buildMentionQuery("2026-09-01T00:00:00Z"),
+      "state:open mentions:@me updated:>2026-09-01T00:00:00Z",
+    );
+  });
+
+  it("パスはクエリを URL エンコードし、更新順・1 ページで打ち切る", () => {
+    assert.equal(
+      searchApiPath("state:open mentions:@me updated:>2026-09-01T00:00:00Z", 50),
+      "/search/issues?q=state%3Aopen%20mentions%3A%40me%20updated%3A%3E2026-09-01T00%3A00%3A00Z" +
+        "&per_page=50&sort=updated&order=desc",
+    );
+  });
+
+  it("件数を省くと既定(50)になる", () => {
+    assert.match(searchApiPath("type:pr"), /&per_page=50&/);
+  });
+});
+
+describe("toInboxItems", () => {
+  it("検索結果を判定に必要な形へ落とす", () => {
+    const items = toInboxItems(
+      [
+        {
+          html_url: "https://github.com/o/r/pull/1",
+          title: "  直す  ",
+          user: { login: "bob" },
+          updated_at: "2026-09-01T10:00:00Z",
+          pull_request: {},
+        },
+      ],
+      "review",
+    );
+    assert.deepEqual(items, [
+      {
+        ref: parseIssueOrPullUrl("https://github.com/o/r/pull/1"),
+        title: "直す",
+        author: "bob",
+        updatedAt: "2026-09-01T10:00:00Z",
+        kinds: ["review"],
+      },
+    ]);
+  });
+
+  it("URL を解析できないものは落とし、タイトル・作者が無くても壊れない", () => {
+    const items = toInboxItems(
+      [
+        { html_url: "https://github.com/o/r/discussions/1" },
+        { html_url: "https://github.com/o/r/issues/2" },
+      ],
+      "mention",
+    );
+    assert.equal(items.length, 1);
+    assert.deepEqual([items[0].title, items[0].author, items[0].updatedAt], ["", "", ""]);
+  });
+});
+
+describe("mergeInboxItems", () => {
+  it("同じ issue/PR は 1 件にまとめ、kinds を合流させる", () => {
+    const merged = mergeInboxItems(
+      [inboxItem("https://github.com/o/r/pull/1", { kinds: ["review"] })],
+      [inboxItem("https://github.com/o/r/pull/1", { kinds: ["mention"] })],
+    );
+    assert.equal(merged.length, 1);
+    assert.deepEqual(merged[0].kinds, ["review", "mention"]);
+  });
+
+  it("新しい updated_at を採る", () => {
+    const merged = mergeInboxItems(
+      [
+        inboxItem("https://github.com/o/r/pull/1", {
+          kinds: ["review"],
+          updatedAt: "2026-09-01T00:00:00Z",
+        }),
+      ],
+      [
+        inboxItem("https://github.com/o/r/pull/1", {
+          kinds: ["mention"],
+          updatedAt: "2026-09-02T00:00:00Z",
+        }),
+      ],
+    );
+    assert.equal(merged[0].updatedAt, "2026-09-02T00:00:00Z");
+  });
+
+  it("読めない updated_at は読める方に置き換わる", () => {
+    const merged = mergeInboxItems(
+      [inboxItem("https://github.com/o/r/pull/1", { kinds: ["review"], updatedAt: "" })],
+      [
+        inboxItem("https://github.com/o/r/pull/1", {
+          kinds: ["mention"],
+          updatedAt: "2026-09-02T00:00:00Z",
+        }),
+      ],
+    );
+    assert.equal(merged[0].updatedAt, "2026-09-02T00:00:00Z");
+  });
+
+  it("別々の issue/PR はキーの昇順で並ぶ", () => {
+    const merged = mergeInboxItems(
+      [inboxItem("https://github.com/o/r/pull/2")],
+      [inboxItem("https://github.com/o/r/issues/1")],
+    );
+    assert.deepEqual(
+      merged.map((item) => item.ref.key),
+      ["o/r#1", "o/r#2"],
+    );
+  });
+});
+
+describe("collectTrackedKeys / selectInboxCandidates", () => {
+  const origin = "plugin:github";
+
+  it("未完了タスクが参照している issue / PR を追跡済みとみなす", () => {
+    const tasks = [
+      { id: "t1", status: "todo", origin: "user" },
+      { id: "t2", status: "done", origin: "user" },
+      { id: "t3", status: "new", origin },
+    ];
+    const resources = [
+      { taskId: "t1", kind: "url", value: "https://github.com/o/r/pull/1" },
+      { taskId: "t1", kind: "url", value: "https://github.com/o/r/issues/2" },
+      // Done タスク・自分が作ったタスク・URL 以外・ボードに無いタスクは数えない。
+      { taskId: "t2", kind: "url", value: "https://github.com/o/r/pull/3" },
+      { taskId: "t3", kind: "url", value: "https://github.com/o/r/pull/4" },
+      { taskId: "t1", kind: "file", value: "https://github.com/o/r/pull/5" },
+      { taskId: "ghost", kind: "url", value: "https://github.com/o/r/pull/6" },
+    ];
+    assert.deepEqual([...collectTrackedKeys(tasks, resources, origin)].sort(), [
+      "o/r#1",
+      "o/r#2",
+    ]);
+  });
+
+  it("追跡済みの issue / PR は受信箱に取り込まない(PR 監視との二重通知を防ぐ)", () => {
+    const items = [
+      inboxItem("https://github.com/o/r/pull/1"),
+      inboxItem("https://github.com/o/r/issues/2"),
+    ];
+    assert.deepEqual(
+      selectInboxCandidates(items, new Set(["o/r#1"])).map((item) => item.ref.key),
+      ["o/r#2"],
+    );
+  });
+});
+
+describe("decideInboxNotification", () => {
+  const review = (over = {}) =>
+    inboxItem("https://github.com/o/r/pull/1", { kinds: ["review"], ...over });
+
+  it("初めて見たレビュー依頼は通知する(理由に作者を載せる)", () => {
+    const decision = decideInboxNotification(null, review());
+    assert.equal(decision.review, true);
+    assert.equal(decision.mention, false);
+    assert.deepEqual(decision.reasons, ["alice の PR のレビューを依頼されています"]);
+  });
+
+  it("通知済みのレビュー依頼は繰り返さない(re-request で updated が動いても黙る)", () => {
+    const state = {
+      reviewNotified: true,
+      mentionNotifiedAt: null,
+      noticeTaskId: "n1",
+      seenAt: "2026-09-01T00:00:00Z",
+    };
+    const decision = decideInboxNotification(state, review({ updatedAt: "2026-09-09T00:00:00Z" }));
+    assert.deepEqual(decision.reasons, []);
+    assert.equal(decision.review, false);
+  });
+
+  it("初めて見たメンションは通知する(issue か PR かを文言に出す)", () => {
+    assert.deepEqual(decideInboxNotification(null, inboxItem("https://github.com/o/r/issues/1")).reasons, [
+      "alice の issue でメンションされています",
+    ]);
+    assert.deepEqual(decideInboxNotification(null, inboxItem("https://github.com/o/r/pull/1")).reasons, [
+      "alice の PR でメンションされています",
+    ]);
+  });
+
+  it("メンションは前回通知した更新より新しいときだけ通知する", () => {
+    const state = {
+      reviewNotified: false,
+      mentionNotifiedAt: "2026-09-01T00:00:00Z",
+      noticeTaskId: null,
+      seenAt: "2026-09-01T00:00:00Z",
+    };
+    // 同時刻・過去は通知しない。
+    assert.equal(decideInboxNotification(state, inboxItem("https://github.com/o/r/pull/1")).mention, false);
+    assert.equal(
+      decideInboxNotification(
+        state,
+        inboxItem("https://github.com/o/r/pull/1", { updatedAt: "2026-08-31T00:00:00Z" }),
+      ).mention,
+      false,
+    );
+    // 新しければ通知する。
+    assert.equal(
+      decideInboxNotification(
+        state,
+        inboxItem("https://github.com/o/r/pull/1", { updatedAt: "2026-09-01T00:00:01Z" }),
+      ).mention,
+      true,
+    );
+  });
+
+  it("レビュー依頼とメンションが同時に当たったら理由を 2 つ並べる", () => {
+    const both = inboxItem("https://github.com/o/r/pull/1", { kinds: ["review", "mention"] });
+    const decision = decideInboxNotification(null, both);
+    assert.deepEqual(decision, {
+      review: true,
+      mention: true,
+      reasons: [
+        "alice の PR のレビューを依頼されています",
+        "alice の PR でメンションされています",
+      ],
+    });
+  });
+
+  it("作者が取れなくても文言が壊れない", () => {
+    const decision = decideInboxNotification(null, review({ author: "" }));
+    assert.deepEqual(decision.reasons, ["レビューを依頼されています"]);
+  });
+});
+
+describe("buildInboxTitle / buildInboxDescription", () => {
+  it("レビュー依頼を主に見立てる(両方に当たったときも)", () => {
+    const item = inboxItem("https://github.com/o/r/pull/1", { kinds: ["review", "mention"] });
+    assert.equal(buildInboxTitle(item, { review: true, mention: true, reasons: [] }), "レビュー依頼: o/r#1");
+    assert.equal(buildInboxTitle(item, { review: false, mention: true, reasons: [] }), "メンション: o/r#1");
+  });
+
+  it("タイトル・出典・理由・URL を並べる", () => {
+    const item = inboxItem("https://github.com/o/r/issues/3", { title: "落ちる", author: "bob" });
+    assert.equal(
+      buildInboxDescription(item, ["bob の issue でメンションされています"]),
+      "落ちる\no/r#3 (issue) by bob\n\nbob の issue でメンションされています\n\nhttps://github.com/o/r/issues/3",
+    );
+  });
+
+  it("タイトルや作者が取れなくても壊れない", () => {
+    const item = inboxItem("https://github.com/o/r/pull/3", { title: "", author: "" });
+    assert.equal(buildInboxDescription(item, []), "o/r#3\no/r#3 (pr)\n\nhttps://github.com/o/r/pull/3");
+  });
+});
+
+describe("nextInboxState", () => {
+  const now = "2026-09-02T00:00:00Z";
+  const item = inboxItem("https://github.com/o/r/pull/1", { updatedAt: "2026-09-01T12:00:00Z" });
+
+  it("通知した内容だけを記録し、観測時刻を進める", () => {
+    assert.deepEqual(
+      nextInboxState(null, item, { review: true, mention: true, reasons: ["x"] }, "n1", now),
+      {
+        reviewNotified: true,
+        mentionNotifiedAt: "2026-09-01T12:00:00Z",
+        noticeTaskId: "n1",
+        seenAt: now,
+      },
+    );
+  });
+
+  it("通知しなかったときも観測時刻は進める(TTL 掃除の対象から外す)", () => {
+    const previous = {
+      reviewNotified: true,
+      mentionNotifiedAt: "2026-08-01T00:00:00Z",
+      noticeTaskId: "n1",
+      seenAt: "2026-08-01T00:00:00Z",
+    };
+    assert.deepEqual(
+      nextInboxState(previous, item, { review: false, mention: false, reasons: [] }, "n1", now),
+      {
+        reviewNotified: true,
+        mentionNotifiedAt: "2026-08-01T00:00:00Z",
+        noticeTaskId: "n1",
+        seenAt: now,
+      },
+    );
+  });
+
+  it("一度立てたレビュー通知済みは下ろさない(下ろすのは掃除の仕事)", () => {
+    const previous = {
+      reviewNotified: true,
+      mentionNotifiedAt: null,
+      noticeTaskId: null,
+      seenAt: now,
+    };
+    assert.equal(
+      nextInboxState(previous, item, { review: false, mention: true, reasons: ["x"] }, null, now)
+        .reviewNotified,
+      true,
+    );
+  });
+
+  it("更新時刻が取れないメンションは「今」を起点にする", () => {
+    const blank = inboxItem("https://github.com/o/r/pull/1", { updatedAt: "" });
+    assert.equal(
+      nextInboxState(null, blank, { review: false, mention: true, reasons: ["x"] }, null, now)
+        .mentionNotifiedAt,
+      now,
+    );
+  });
+});
+
+describe("planInboxPrune", () => {
+  const nowMs = Date.parse("2026-09-30T00:00:00Z");
+  const state = (over = {}) => ({
+    reviewNotified: false,
+    mentionNotifiedAt: null,
+    noticeTaskId: null,
+    seenAt: "2026-09-29T00:00:00Z",
+    ...over,
+  });
+
+  it("まだレビュー依頼として生きているなら残す", () => {
+    assert.equal(planInboxPrune(state({ reviewNotified: true }), true, true, nowMs), "keep");
+  });
+
+  it("依頼が解消されたら通知済みだけ解除する(再依頼をまた知らせるため)", () => {
+    assert.equal(planInboxPrune(state({ reviewNotified: true }), true, false, nowMs), "clear-review");
+  });
+
+  it("レビュー依頼の検索をしていないラウンドでは解除しない", () => {
+    assert.equal(planInboxPrune(state({ reviewNotified: true }), false, false, nowMs), "keep");
+  });
+
+  it("最後の観測から TTL を過ぎたら捨てる", () => {
+    assert.equal(
+      planInboxPrune(state({ seenAt: "2026-08-01T00:00:00Z" }), true, false, nowMs),
+      "delete",
+    );
+    // レビュー依頼として生きている限り TTL では消さない。
+    assert.equal(
+      planInboxPrune(state({ seenAt: "2026-08-01T00:00:00Z" }), true, true, nowMs),
+      "keep",
+    );
+  });
+
+  it("TTL 以内のメンション状態は残す", () => {
+    assert.equal(planInboxPrune(state(), true, false, nowMs), "keep");
+  });
+
+  it("壊れた値・読めない観測時刻は捨てる", () => {
+    assert.equal(planInboxPrune(null, true, false, nowMs), "delete");
+    assert.equal(planInboxPrune(state({ seenAt: "???" }), true, false, nowMs), "delete");
   });
 });

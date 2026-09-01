@@ -15,6 +15,14 @@
  * そのタスク自身へ履歴を追記する**。プラグインの追記は origin が `plugin:github` なので、
  * questloom 本体の起床ルールがそのタスクを New へ戻す(= 待っていたものが手元に返る)。
  *
+ * さらに、**受信箱(inbox)の取り込み**をする。GitHub の検索 API を 1 ラウンドに 2 回だけ叩き、
+ *
+ * - 自分(またはチーム)に**レビューを依頼された** open な PR
+ * - 前回確認以降に更新された、自分が**メンションされた** issue / PR
+ *
+ * を「レビュー依頼: owner/repo#123」「メンション: owner/repo#123」というインスタントタスクとして
+ * New に作る。**どのタスクからも参照されていないものだけ**が対象なので、上の PR 監視とは重複しない。
+ *
  * もう一つ、**description の自動記入**をする。PR の URL が付いたタスクの description が
  * 空なら、PR のタイトル・状態・作者・本文の先頭を書き込む。タスクイベント
  * (`ctx.onTaskEvent`)で即座に反応し、ポーリングでも取りこぼしを拾う。
@@ -42,6 +50,9 @@
  *   認証付き GET と ETag による条件付きリクエストがそのまま通る。
  * - PR ごとの前回状態は `ctx.kv` に持つ(キーは `pr:<owner>/<repo>#<num>`)。
  *   PR がクローズ/マージされたら破棄し、どのタスクからも参照されなくなったキーも掃除する。
+ * - 受信箱の状態は `inbox:<owner>/<repo>#<num>`(通知済みフラグと通知タスク id)と
+ *   `inboxMentionSince`(メンション検索の起点)に持つ。
+ *   **検索 API は ETag を返さない**(`Cache-Control: no-cache`)ので条件付きリクエストはしない。
  * - description を記入したタスクは `desc:<taskId>` に記録する
  *   (値は `{ pr, at }`)。ボードから消えたタスクの記録は掃除する。
  * - 判定ロジックは純関数に切り出してファイル末尾で `export` している
@@ -65,6 +76,30 @@ const PR_KEY_PREFIX = "pr:";
 /** description を記入済みのタスクを覚えておく KV キーの接頭辞。 */
 const DESC_KEY_PREFIX = "desc:";
 
+/** 受信箱(レビュー依頼・メンション)の状態を持つ KV キーの接頭辞。 */
+const INBOX_KEY_PREFIX = "inbox:";
+
+/** メンション検索の起点(前回確認時刻)を持つ KV キー。 */
+const INBOX_SINCE_KEY = "inboxMentionSince";
+
+/**
+ * 検索 1 回あたりの取得件数。
+ *
+ * 1 ページで打ち切るので、これを超える分は次のラウンドに回る
+ * (レビュー依頼は現在の集合をそのまま引くので次回また出てくるし、
+ * メンションは `updated:>` の起点が進まなかった分だけ次回に拾い直せる)。
+ */
+const SEARCH_PER_PAGE = 50;
+
+/**
+ * 受信箱の状態を捨てるまでの日数。
+ *
+ * レビュー依頼は「今の集合に居ないこと」で解消を検知できるが、メンションは
+ * `updated:>` の窓で引くので「出てこない = 消えた」とは言えない。
+ * そこで最後に観測してからの経過時間で切る。
+ */
+const INBOX_TTL_DAYS = 30;
+
 /** description に載せる PR 本文の最大文字数。超えたら切って「…」を付ける。 */
 const DESCRIPTION_BODY_LIMIT = 400;
 
@@ -85,11 +120,14 @@ const PER_PAGE = 100;
 const DEFAULT_INTERVAL_MINUTES = 5;
 
 /**
- * PR の URL。`https://github.com/<owner>/<repo>/pull/<番号>` を拾う。
+ * issue / PR の URL。`https://github.com/<owner>/<repo>/(pull|issues)/<番号>` を拾う。
  * 末尾に `/files` や `#issuecomment-...` が付いていても良い。
+ *
+ * GitHub は issue と PR で番号空間を共有するので、`owner/repo#番号` は
+ * どちらの URL から来ても同じものを指す(= KV キーとして安全に使える)。
  */
-const PR_URL_PATTERN =
-  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)\/pull\/(\d+)(?:[/?#].*)?$/;
+const ISSUE_URL_PATTERN =
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)\/(pull|issues)\/(\d+)(?:[/?#].*)?$/;
 
 /** 失敗とみなす check-run の `conclusion`。 */
 const FAILED_CONCLUSIONS = new Set([
@@ -119,6 +157,12 @@ interface PullRequestRef {
   key: string;
   /** 正規化した PR の URL(通知タスクの主リソースに使う)。 */
   url: string;
+}
+
+/** URL から取り出した issue / PR の参照(PR 専用の `PullRequestRef` を一般化したもの)。 */
+interface IssueRef extends PullRequestRef {
+  /** `/pull/` なら真、`/issues/` なら偽。 */
+  isPullRequest: boolean;
 }
 
 /** 監視対象の PR 1 件と、それを参照している未完了タスク。 */
@@ -205,6 +249,25 @@ interface GhCombinedStatus {
   statuses?: GhStatusContext[];
 }
 
+/** `GET /search/issues` が返す 1 件(使うフィールドだけ)。 */
+interface GhSearchItem {
+  /** `https://github.com/<owner>/<repo>/(pull|issues)/<番号>`。 */
+  html_url?: string;
+  title?: string;
+  /** 作成者。メンションした本人とは限らない(コメント内のメンションもあるため)。 */
+  user?: GhUser | null;
+  updated_at?: string;
+  /** PR のときだけ生えるオブジェクト。issue との判別に使う(URL からも分かる)。 */
+  pull_request?: unknown;
+}
+
+/** `GET /search/issues` のレスポンス。 */
+interface GhSearchResult {
+  total_count?: number;
+  incomplete_results?: boolean;
+  items?: GhSearchItem[];
+}
+
 /** 2xx 以外が返ってきたことを表す例外。ステータスで扱いを変えるために持つ。 */
 class HttpError extends Error {
   readonly status: number;
@@ -227,26 +290,40 @@ class RateLimitError extends Error {
 /* ============================================================== 純粋な判定 */
 
 /**
- * GitHub の PR URL を解析する。PR URL でなければ `null`。
+ * GitHub の issue / PR URL を解析する。どちらでもなければ `null`。
  *
- * `issues` や `commit` の URL、github.com 以外のホストは弾く。
+ * `commit` の URL、github.com 以外のホストは弾く。
  */
-function parsePullRequestUrl(url: string): PullRequestRef | null {
+function parseIssueOrPullUrl(url: string): IssueRef | null {
   if (typeof url !== "string") return null;
-  const match = PR_URL_PATTERN.exec(url.trim());
+  const match = ISSUE_URL_PATTERN.exec(url.trim());
   if (!match) return null;
   const owner = match[1];
   // `repo.git` のような末尾は URL としては来ないが、念のため落としておく。
   const repo = match[2].replace(/\.git$/i, "");
-  const number = Number(match[3]);
+  const isPullRequest = match[3] === "pull";
+  const number = Number(match[4]);
   if (!repo || !Number.isSafeInteger(number) || number <= 0) return null;
   return {
     owner,
     repo,
     number,
     key: `${owner.toLowerCase()}/${repo.toLowerCase()}#${number}`,
-    url: `https://github.com/${owner}/${repo}/pull/${number}`,
+    url: `https://github.com/${owner}/${repo}/${isPullRequest ? "pull" : "issues"}/${number}`,
+    isPullRequest,
   };
+}
+
+/**
+ * GitHub の PR URL を解析する。PR URL でなければ `null`。
+ *
+ * `issues` や `commit` の URL、github.com 以外のホストは弾く。
+ */
+function parsePullRequestUrl(url: string): PullRequestRef | null {
+  const ref = parseIssueOrPullUrl(url);
+  if (!ref || !ref.isPullRequest) return null;
+  // PR 監視は `isPullRequest` を見ないので、素の `PullRequestRef` に落として返す。
+  return { owner: ref.owner, repo: ref.repo, number: ref.number, key: ref.key, url: ref.url };
 }
 
 /** `collectPullRequestTargets` が受け取るタスク(TaskCard の必要な部分だけ)。 */
@@ -587,6 +664,297 @@ function buildReasons(newComments: readonly CommentInfo[], ci: CiSummary | null)
   return reasons;
 }
 
+/* ------------------------------- 受信箱(レビュー依頼・メンション)の純関数 */
+
+/** 受信箱に入った理由。1 件が両方に当たることもある。 */
+type InboxKind = "review" | "mention";
+
+/** 検索結果 1 件を、通知の判断に必要な形へ正規化したもの。 */
+interface InboxItem {
+  ref: IssueRef;
+  /** issue / PR のタイトル。 */
+  title: string;
+  /** 作成者の login(取れなければ空文字)。 */
+  author: string;
+  /** 最終更新時刻 (RFC 3339)。 */
+  updatedAt: string;
+  /** どの検索で拾ったか。両方で拾えば 2 つ入る。 */
+  kinds: InboxKind[];
+}
+
+/** KV に持つ受信箱の状態(`inbox:<owner>/<repo>#<番号>`)。 */
+interface InboxState {
+  /**
+   * レビュー依頼を通知済みか。
+   *
+   * 依頼が解消(レビュー済み / PR クローズ)されて検索結果から消えたら偽に戻し、
+   * 再依頼を改めて通知できるようにする。**同じ依頼が生きている間は再通知しない**
+   * (re-request で `updated` が動いても、依頼そのものは 1 件なので黙っている)。
+   */
+  reviewNotified: boolean;
+  /** メンションで通知した対象の `updated_at`。これより新しい更新だけを次の通知にする。 */
+  mentionNotifiedAt: string | null;
+  /** 直近で作った通知タスクの id。未完了なら再利用して追記する。 */
+  noticeTaskId: string | null;
+  /** 最後にこのエントリを観測した時刻 (RFC 3339)。TTL 掃除の基準。 */
+  seenAt: string;
+}
+
+/** 何を通知するか。`reasons` が空なら何もしない。 */
+interface InboxDecision {
+  /** 通知本文に並べる理由。 */
+  reasons: string[];
+  /** レビュー依頼として通知するか。 */
+  review: boolean;
+  /** メンションとして通知するか。 */
+  mention: boolean;
+}
+
+/** 受信箱の状態を捨てるか、レビュー依頼の通知済みを解除するか。 */
+type InboxPruneAction = "keep" | "clear-review" | "delete";
+
+/**
+ * レビュー依頼の検索クエリ。
+ *
+ * `@me` は**認証しているユーザー自身**に解決されるので、login を引く必要がない
+ * (未認証で投げると 422 になる)。`review-requested:` は自分に直接来た依頼に加えて
+ * **自分が属するチームへの依頼**も含む。受信箱としてはその方が漏れがない。
+ */
+function buildReviewRequestQuery(): string {
+  return "type:pr state:open review-requested:@me";
+}
+
+/**
+ * メンションの検索クエリ。
+ *
+ * `mentions:` に「いつメンションされたか」の条件は無いので、
+ * 「自分がメンションされている open な issue/PR のうち、前回確認以降に更新されたもの」で引く。
+ * 昔メンションされたスレッドが動いただけでも当たるが、
+ * 1 件につき 1 度しか通知しない KV 側の判定で騒がしさを抑える。
+ *
+ * @param since RFC 3339(秒精度)の起点。GitHub は `Z` 終わりを受け付ける。
+ */
+function buildMentionQuery(since: string): string {
+  return `state:open mentions:@me updated:>${since}`;
+}
+
+/**
+ * 検索 API のパス。
+ *
+ * **ETag は付けない。** `GET /search/issues` は `Cache-Control: no-cache` を返し
+ * `ETag` を返さないので、条件付きリクエストが成立しない(実機で確認済み)。
+ */
+function searchApiPath(query: string, perPage: number = SEARCH_PER_PAGE): string {
+  return `/search/issues?q=${encodeURIComponent(query)}&per_page=${perPage}&sort=updated&order=desc`;
+}
+
+/** 検索結果を `InboxItem` に正規化する。URL を解析できないものは落とす。 */
+function toInboxItems(raw: readonly GhSearchItem[], kind: InboxKind): InboxItem[] {
+  const items: InboxItem[] = [];
+  for (const item of raw) {
+    const ref = parseIssueOrPullUrl(String(item.html_url ?? ""));
+    if (!ref) continue;
+    items.push({
+      ref,
+      title: (item.title ?? "").trim(),
+      author: (item.user?.login ?? "").trim(),
+      updatedAt: item.updated_at ?? "",
+      kinds: [kind],
+    });
+  }
+  return items;
+}
+
+/**
+ * レビュー依頼とメンションの結果を 1 本にまとめる。
+ *
+ * 同じ issue/PR が両方に出てきたら 1 件にして `kinds` を合流させる
+ * (「レビュー依頼が来て、そこでメンションもされた」を 2 つのタスクにしないため)。
+ * 戻りはキーの昇順。
+ */
+function mergeInboxItems(
+  review: readonly InboxItem[],
+  mention: readonly InboxItem[],
+): InboxItem[] {
+  const byKey = new Map<string, InboxItem>();
+  for (const item of [...review, ...mention]) {
+    const found = byKey.get(item.ref.key);
+    if (!found) {
+      byKey.set(item.ref.key, { ...item, kinds: [...item.kinds] });
+      continue;
+    }
+    for (const kind of item.kinds) {
+      if (!found.kinds.includes(kind)) found.kinds.push(kind);
+    }
+    const next = toEpoch(item.updatedAt);
+    const current = toEpoch(found.updatedAt);
+    if (!Number.isNaN(next) && (Number.isNaN(current) || next > current)) {
+      found.updatedAt = item.updatedAt;
+    }
+  }
+  const merged = [...byKey.values()];
+  merged.sort((a, b) => (a.ref.key < b.ref.key ? -1 : a.ref.key > b.ref.key ? 1 : 0));
+  return merged;
+}
+
+/**
+ * 既にタスクで追いかけている issue / PR のキーを集める。
+ *
+ * ここに入っているものは受信箱に取り込まない。**PR 監視と同じ集合**
+ * (Done でない、自分が作ったのでもないタスクの関連リソース)を見ているので、
+ * 「PR 監視が見張っている PR のレビュー依頼」を二重に知らせずに済む。
+ *
+ * Done のタスクは対象外。片付いたタスクに貼ってあった PR へ新しく
+ * レビューを頼まれたなら、それは新しい用件なので知らせてよい。
+ */
+function collectTrackedKeys(
+  tasks: readonly TargetTaskLike[],
+  resources: readonly TargetResourceLike[],
+  pluginOrigin: string,
+): Set<string> {
+  const live = new Set<string>();
+  for (const task of tasks) {
+    if (task.status === "done") continue;
+    if (task.origin === pluginOrigin) continue;
+    live.add(task.id);
+  }
+  const keys = new Set<string>();
+  for (const resource of resources) {
+    if (resource.kind !== "url") continue;
+    if (!live.has(resource.taskId)) continue;
+    const ref = parseIssueOrPullUrl(resource.value);
+    if (ref) keys.add(ref.key);
+  }
+  return keys;
+}
+
+/** 追跡済みのものを落とす。 */
+function selectInboxCandidates(
+  items: readonly InboxItem[],
+  trackedKeys: ReadonlySet<string>,
+): InboxItem[] {
+  return items.filter((item) => !trackedKeys.has(item.ref.key));
+}
+
+/**
+ * この 1 件について何を通知するか決める。
+ *
+ * - **レビュー依頼**は「まだ通知していなければ 1 度だけ」。依頼が解消されて
+ *   検索結果から消えたときに `reviewNotified` が解除される(`planInboxPrune`)ので、
+ *   再依頼は改めて通知される。
+ * - **メンション**は「前回通知した更新より新しい更新があれば」。
+ *   通知タスクが未完了で残っていれば新規作成ではなく追記になるので、
+ *   活発なスレッドでもタスクは増えない。
+ */
+function decideInboxNotification(
+  state: InboxState | null,
+  item: InboxItem,
+): InboxDecision {
+  const review = item.kinds.includes("review") && !(state?.reviewNotified ?? false);
+
+  const previous = state?.mentionNotifiedAt ?? null;
+  const previousAt = toEpoch(previous);
+  const updatedAt = toEpoch(item.updatedAt);
+  const mention =
+    item.kinds.includes("mention") &&
+    // 起点が読めない(未通知・壊れた値)なら通知する。更新時刻が読めない場合も同じ。
+    (Number.isNaN(previousAt) || Number.isNaN(updatedAt) || updatedAt > previousAt);
+
+  const kindWord = item.ref.isPullRequest ? "PR" : "issue";
+  const reasons: string[] = [];
+  if (review) {
+    reasons.push(
+      item.author
+        ? `${item.author} の PR のレビューを依頼されています`
+        : "レビューを依頼されています",
+    );
+  }
+  if (mention) {
+    // 検索結果から分かるのは issue/PR の作成者まで。
+    // コメント内でメンションされた場合、誰が書いたかまでは追加リクエスト無しでは分からない。
+    reasons.push(
+      item.author
+        ? `${item.author} の ${kindWord} でメンションされています`
+        : `${kindWord} でメンションされています`,
+    );
+  }
+  return { reasons, review, mention };
+}
+
+/** 通知タスクのタイトル。両方に当たったときはレビュー依頼を主に見立てる。 */
+function buildInboxTitle(item: InboxItem, decision: InboxDecision): string {
+  const slug = `${item.ref.owner}/${item.ref.repo}#${item.ref.number}`;
+  return `${decision.review ? "レビュー依頼" : "メンション"}: ${slug}`;
+}
+
+/**
+ * 通知タスクの description。
+ *
+ * ```
+ * <issue/PR のタイトル>
+ * <owner>/<repo>#<番号> (pr) by <作成者>
+ *
+ * <理由>
+ *
+ * <URL>
+ * ```
+ */
+function buildInboxDescription(item: InboxItem, reasons: readonly string[]): string {
+  const slug = `${item.ref.owner}/${item.ref.repo}#${item.ref.number}`;
+  const meta = `${slug} (${item.ref.isPullRequest ? "pr" : "issue"})${
+    item.author ? ` by ${item.author}` : ""
+  }`;
+  const lines = [item.title || slug, meta];
+  if (reasons.length > 0) lines.push("", ...reasons);
+  lines.push("", item.ref.url);
+  return lines.join("\n");
+}
+
+/** 通知したあとの KV 状態。通知しなかったときも観測時刻だけは進める。 */
+function nextInboxState(
+  previous: InboxState | null,
+  item: InboxItem,
+  decision: InboxDecision,
+  noticeTaskId: string | null,
+  now: string,
+): InboxState {
+  return {
+    reviewNotified: (previous?.reviewNotified ?? false) || decision.review,
+    mentionNotifiedAt: decision.mention
+      ? item.updatedAt || now
+      : (previous?.mentionNotifiedAt ?? null),
+    noticeTaskId,
+    seenAt: now,
+  };
+}
+
+/**
+ * 溜まった受信箱の状態をどうするか。
+ *
+ * - まだレビュー依頼として生きているなら残す。
+ * - 最後に観測してから `ttlDays` 以上たっていたら捨てる
+ *   (メンションは「結果に出てこない = 消えた」と言えないので時間で切る)。
+ * - 依頼が解消された(検索結果から消えた)だけなら、通知済みフラグだけ解除して残す。
+ *   同じ PR にまた依頼が来たとき、改めて知らせるため。
+ *
+ * @param reviewScanned レビュー依頼の検索が今回成功したか。
+ *   失敗・無効のときは「結果に居ない」を根拠にできないので通知済みを解除しない。
+ */
+function planInboxPrune(
+  state: InboxState | null,
+  reviewScanned: boolean,
+  inReviewResults: boolean,
+  nowMs: number,
+  ttlDays: number = INBOX_TTL_DAYS,
+): InboxPruneAction {
+  if (!state || typeof state !== "object") return "delete";
+  if (inReviewResults) return "keep";
+  const seen = toEpoch(state.seenAt);
+  if (Number.isNaN(seen) || nowMs - seen > ttlDays * 86_400_000) return "delete";
+  if (reviewScanned && state.reviewNotified) return "clear-review";
+  return "keep";
+}
+
 /* ================================================================ 実行部分 */
 
 /** KV のキーを作る。 */
@@ -905,6 +1273,141 @@ async function pruneStates(ctx: Ctx, targets: readonly PullRequestTarget[]): Pro
   }
 }
 
+/* --------------------------------- 受信箱(レビュー依頼・メンション)の実行部 */
+
+/** 受信箱の KV キーを作る。 */
+function inboxKey(ref: IssueRef): string {
+  return `${INBOX_KEY_PREFIX}${ref.key}`;
+}
+
+/** 検索 API を 1 回叩いて items を返す。 */
+async function searchIssues(client: GhClient, query: string): Promise<GhSearchItem[]> {
+  // ETag は返ってこないので条件付きリクエストはしない(空の入れ物を渡す)。
+  const result = await client.get<GhSearchResult>(searchApiPath(query), {});
+  return result.data?.items ?? [];
+}
+
+/** 溜まった受信箱の状態を掃除する。 */
+async function pruneInboxStates(
+  ctx: Ctx,
+  reviewScanned: boolean,
+  reviewKeys: ReadonlySet<string>,
+  nowMs: number,
+): Promise<void> {
+  let keys: string[];
+  try {
+    keys = await ctx.kv.keys();
+  } catch (error) {
+    ctx.log.warn(`KV のキーを列挙できませんでした: ${describeError(error)}`);
+    return;
+  }
+  for (const key of keys) {
+    if (!key.startsWith(INBOX_KEY_PREFIX)) continue;
+    const state = (await ctx.kv.get<InboxState>(key)) ?? null;
+    const inResults = reviewKeys.has(key.slice(INBOX_KEY_PREFIX.length));
+    const action = planInboxPrune(state, reviewScanned, inResults, nowMs);
+    if (action === "delete") {
+      await ctx.kv.set(key, null);
+      ctx.log.debug(`受信箱の状態を破棄しました: ${key}`);
+    } else if (action === "clear-review" && state) {
+      await ctx.kv.set(key, { ...state, reviewNotified: false });
+      ctx.log.debug(`レビュー依頼が解消されたので通知済みを解除しました: ${key}`);
+    }
+  }
+}
+
+/**
+ * レビュー依頼とメンションを取り込む(1 ラウンドにつき検索 2 回)。
+ *
+ * PR 監視とは独立で、見張っている PR が 0 件でも走る。
+ * 検索の認証時レート制限は 30 req/min なので 2 回なら余裕がある。
+ *
+ * @throws {RateLimitError} レート制限に当たった場合(呼び出し側がラウンドを打ち切る)。
+ */
+async function scanInbox(
+  ctx: Ctx,
+  client: GhClient,
+  settings: Record<string, unknown>,
+  tasks: readonly TargetTaskLike[],
+  resources: readonly TargetResourceLike[],
+  taskStatuses: ReadonlyMap<string, string>,
+  pluginOrigin: string,
+): Promise<void> {
+  const wantReview = settings.watchReviewRequests !== false;
+  const wantMention = settings.watchMentions !== false;
+  if (!wantReview && !wantMention) {
+    ctx.log.debug("レビュー依頼・メンションの取り込みはどちらも無効です。");
+    return;
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  /* --- 1. レビュー依頼(現在の集合をそのまま引く) --------------------- */
+  let reviewItems: InboxItem[] = [];
+  let reviewScanned = false;
+  if (wantReview) {
+    reviewItems = toInboxItems(await searchIssues(client, buildReviewRequestQuery()), "review");
+    reviewScanned = true;
+  }
+
+  /* --- 2. メンション(前回確認以降の更新だけ) ------------------------- */
+  let mentionItems: InboxItem[] = [];
+  if (wantMention) {
+    const since = await ctx.kv.get<string>(INBOX_SINCE_KEY);
+    if (typeof since === "string" && since !== "") {
+      mentionItems = toInboxItems(await searchIssues(client, buildMentionQuery(since)), "mention");
+    } else {
+      // 初回は「今」を起点に記録するだけ。過去のメンションを丸ごと通知しない。
+      ctx.log("メンションの監視を開始します(ここから先の更新だけを見ます)。");
+    }
+    // 検索が成功したときだけ起点を進める(例外なら次回に同じ窓をやり直す)。
+    await ctx.kv.set(INBOX_SINCE_KEY, toGitHubTimestamp(now));
+  }
+
+  const reviewKeys = new Set(reviewItems.map((item) => item.ref.key));
+  const tracked = collectTrackedKeys(tasks, resources, pluginOrigin);
+  const candidates = selectInboxCandidates(mergeInboxItems(reviewItems, mentionItems), tracked);
+
+  /* --- 3. 通知 -------------------------------------------------------- */
+  for (const item of candidates) {
+    const key = inboxKey(item.ref);
+    try {
+      const stored = (await ctx.kv.get<InboxState>(key)) ?? null;
+      const decision = decideInboxNotification(stored, item);
+      let noticeTaskId = stored?.noticeTaskId ?? null;
+
+      if (decision.reasons.length > 0) {
+        const slug = `${item.ref.owner}/${item.ref.repo}#${item.ref.number}`;
+        const body = `${slug}: ${decision.reasons.join(" / ")}`;
+        // 追跡済みは弾いてあるので、Watching の起床(planNotification)は出番が無い。
+        const action = decideNoticeAction(noticeTaskId, taskStatuses);
+        if (action.kind === "append") {
+          await ctx.tasks.addTaskUpdate(action.taskId, body);
+          ctx.log(`既存の通知タスクへ追記しました: ${body}`);
+        } else {
+          const created = await ctx.tasks.createTask({
+            title: buildInboxTitle(item, decision),
+            description: buildInboxDescription(item, decision.reasons),
+            status: "new",
+            isInstant: true,
+            resources: [{ kind: "url", value: item.ref.url, label: slug, isPrimary: true }],
+          });
+          noticeTaskId = created.id;
+          ctx.log(`通知タスクを作成しました: ${body}`);
+        }
+      }
+
+      await ctx.kv.set(key, nextInboxState(stored, item, decision, noticeTaskId, nowIso));
+    } catch (error) {
+      // 1 件の失敗で残りを止めない(PR 監視と同じ方針)。
+      ctx.log.warn(`${item.ref.key} の取り込みに失敗しました: ${describeError(error)}`);
+    }
+  }
+
+  await pruneInboxStates(ctx, reviewScanned, reviewKeys, now.getTime());
+}
+
 /* ------------------------------------------- description の自動記入(実行部) */
 
 /** KV に残す「記入済み」の記録。 */
@@ -1041,6 +1544,20 @@ async function poll(ctx: Ctx): Promise<void> {
   const targets = collectPullRequestTargets(tasks, resources, pluginOrigin);
   const taskStatuses = new Map(tasks.map((task) => [task.id, task.status] as const));
 
+  const client = createClient(ctx, pat);
+
+  // レビュー依頼・メンションの取り込み。見張る PR が 0 件でも走らせるので、
+  // 監視対象を打ち切る前にここで済ませる。PR 監視とは互いに独立。
+  try {
+    await scanInbox(ctx, client, settings, tasks, resources, taskStatuses, pluginOrigin);
+  } catch (error) {
+    if (error instanceof RateLimitError) {
+      ctx.log.warn(`${error.message} (このラウンドは打ち切ります)`);
+      return;
+    }
+    ctx.log.warn(`レビュー依頼・メンションの確認に失敗しました: ${describeError(error)}`);
+  }
+
   await pruneStates(ctx, targets);
 
   if (targets.length === 0) {
@@ -1048,7 +1565,6 @@ async function poll(ctx: Ctx): Promise<void> {
     return;
   }
 
-  const client = createClient(ctx, pat);
   let selfLogin: string | null;
   try {
     selfLogin = await loadSelfLogin(ctx, client);
@@ -1078,10 +1594,12 @@ export default defineQuestloomPlugin({
   manifest: {
     id: "github",
     name: "GitHub 統合",
-    version: "0.1.0",
+    version: "0.2.0",
     description:
       "未完了タスクに紐づいた GitHub PR を監視し、新しいコメントや CI 失敗を検知したら" +
-      "「PR を確認する」子タスクを New に作る。PR の URL が付いたタスクの詳細が空なら、" +
+      "「PR を確認する」子タスクを New に作る。自分宛のレビュー依頼と、どのタスクからも" +
+      "追いかけていない issue/PR での自分へのメンションも New に取り込む。" +
+      "PR の URL が付いたタスクの詳細が空なら、" +
       "PR のタイトル・状態・本文の先頭を自動で書き込む(こちらは PAT 不要)。",
     // ctx.fetch はここに書いたホストにしか出られない(完全一致)。
     fetchDomains: ["api.github.com"],
@@ -1101,6 +1619,24 @@ export default defineQuestloomPlugin({
         type: "number",
         default: DEFAULT_INTERVAL_MINUTES,
         hint: "短くしすぎると GitHub のレート制限に当たる。PR 1 件あたり 1 回 5 リクエスト程度。",
+      },
+      {
+        key: "watchReviewRequests",
+        label: "レビュー依頼を取り込む",
+        type: "boolean",
+        default: true,
+        hint:
+          "自分(または自分が属するチーム)にレビューを依頼された open な PR を New に取り込む。" +
+          "既にタスクで追いかけている PR は取り込まない。",
+      },
+      {
+        key: "watchMentions",
+        label: "メンションを取り込む",
+        type: "boolean",
+        default: true,
+        hint:
+          "自分がメンションされた issue / PR のうち、どのタスクからも追いかけていないものを" +
+          "New に取り込む。有効にした時点より前のメンションは通知しない。",
       },
       {
         key: "enabled",
@@ -1209,19 +1745,32 @@ export default defineQuestloomPlugin({
 // ホストは default export しか見ないので、名前付き export を足しても動作には影響しない。
 // `examples/plugins/github.test.mjs` がここを検証する。
 export {
+  buildInboxDescription,
+  buildInboxTitle,
+  buildMentionQuery,
   buildPrDescription,
   buildReasons,
+  buildReviewRequestQuery,
   collectDescriptionTargets,
   collectPullRequestTargets,
+  collectTrackedKeys,
+  decideInboxNotification,
   decideNoticeAction,
   mergeCi,
+  mergeInboxItems,
+  nextInboxState,
+  parseIssueOrPullUrl,
   parsePullRequestUrl,
+  planInboxPrune,
   planNotification,
   pullRequestApiPath,
+  searchApiPath,
+  selectInboxCandidates,
   selectNewComments,
   shouldFillDescription,
   shouldNotifyCiFailure,
   summarizeCheckRuns,
   summarizeCombinedStatus,
+  toInboxItems,
   truncateBody,
 };
