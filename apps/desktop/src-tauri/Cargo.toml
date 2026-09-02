@@ -43,6 +43,18 @@ tracing-subscriber.workspace = true
 # url: プラグインの fetch 許可ドメイン判定 (plugin_host::is_fetch_allowed) の URL パースに使う。
 url.workspace = true
 
+# windows-sys: メインウィンドウの前面判定・前面化 (crate::window::platform)。
+# tao/Tauri の is_focused は webview の子 HWND にフォーカスが移ると false になり、
+# set_focus は Windows のフォーカス窃取防止で黙って失敗しうるので、この 2 点だけ
+# Win32 を直接叩く。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 # reqwest: tests/backend_e2e.rs が実アプリの MCP エンドポイントを HTTP で叩くのに使う。
 reqwest.workspace = true

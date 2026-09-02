@@ -58,6 +58,7 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, spec: &str) {
 
     let Some(shortcut) = target else {
         tracing::info!("グローバルショートカットは設定されていません");
+        crate::tray::note_shortcut(app, None);
         return;
     };
 
@@ -71,13 +72,18 @@ pub fn apply<R: Runtime>(app: &AppHandle<R>, spec: &str) {
         Ok(()) => {
             *registered = Some(shortcut);
             tracing::info!(spec, "グローバルショートカットを登録しました");
+            crate::tray::note_shortcut(app, None);
         }
         // 失敗は記録しない。次回の apply で(設定が同じでも)もう一度試せるようにする。
-        Err(error) => tracing::warn!(
-            spec,
-            %error,
-            "グローバルショートカットを登録できませんでした(他アプリが使用中の可能性があります)"
-        ),
+        Err(error) => {
+            tracing::warn!(
+                spec,
+                %error,
+                "グローバルショートカットを登録できませんでした(他アプリが使用中の可能性があります)"
+            );
+            // 押しても反応しない理由に気づけるよう、トレイのツールチップにも出す。
+            crate::tray::note_shortcut(app, Some(spec));
+        }
     }
 }
 

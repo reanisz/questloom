@@ -905,6 +905,40 @@ main ウィンドウの中に重なることがあるが、これはウィンド
 `Window::add_child` による子 webview で、conf にも定義しない。
 上記「内蔵ブラウザペイン」節を参照。
 
+### グローバルショートカットのトグル判定(`is_focused` を使わない)
+
+グローバルショートカット(既定 Ctrl+Space)とトレイ左クリックは
+`window::toggle_main` を通る。判定は純関数 `window::toggle_action(Presence)` に切り出してあり、
+`{visible, minimized, foreground}` の全 8 通りをテストで固定している
+(`only_a_foreground_window_is_hidden`)。**隠すのは「見えていて・最小化されておらず・
+前面にいる」ときだけ**で、それ以外は表示 + 前面化。
+
+- **`WebviewWindow::is_focused()` を前面判定に使わないこと。** main ウィンドウは
+  中に WebView2 の子 HWND を抱えていて、**利用者がアプリの中を一度でもクリックすると
+  キーボードフォーカスはその子へ移る**。tao の `is_focused` は「tao が作った最上位
+  ウィンドウ自身がフォーカスを持つか」(`is_active && is_focused`)なので、
+  **questloom が前面にいても false を返す**。これを「前面ではない」と読むと
+  トグルが hide 側へ一度も入らず、前面にいるときに押しても何も起きない
+  (= ショートカットが効かないように見える)。実機で確認済み:
+  起動直後・アプリの中をクリックした後は `is_focused` が常に false になる。
+- 代わりに `window::platform::is_foreground` が **`GetForegroundWindow()` と HWND を
+  直接突き合わせる**。前面ウィンドウは必ず最上位ウィンドウなので、子 webview に
+  フォーカスがあっても親の main が前面として返る。HWND は
+  `WebviewWindow::hwnd()` を `isize` にして platform モジュールへ渡す
+  (`windows` crate の型をモジュール境界へ持ち出さないため)。
+- 前面化は `show_main` が `unminimize` → `show` → `set_focus` の順に行い、
+  **それでも前面に出ていなければ** `window::platform::force_foreground` を後追いで当てる。
+  Windows は前面でないプロセスからの `SetForegroundWindow` を拒否するので、
+  呼び出し元スレッドの入力キューを現在の前面スレッドへ `AttachThreadInput` で繋いでから
+  `SetForegroundWindow` + `BringWindowToTop` + `SetFocus` を呼び、必ず外す。
+- Win32 を直接叩くのはこの 2 つだけ。依存は `windows-sys`
+  (`[target.'cfg(windows)'.dependencies]`)で、`questloom-core` には持ち込まない。
+- 登録に失敗したとき(他アプリ・**questloom の二重起動**が同じキーを先に取っている)は
+  warn ログに加えて**トレイのツールチップ**に理由を出す(`tray::note_shortcut`)。
+  設定画面の稼働状態 (`get_runtime_status().shortcutRegistered`) を開かなくても気づける。
+- 日本語 IME(MS-IME / JP 配列)を ON にした状態でも `RegisterHotKey` が先に効くことは
+  実機で確認済み。Ctrl+Space が IME に食われることはないので既定値は変えていない。
+
 ### メインウィンドウのすりガラス (windowEffects)
 
 main ウィンドウは `tauri.conf.json` で `"transparent": true` +
